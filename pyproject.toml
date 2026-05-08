@@ -34,8 +34,24 @@ web = [
     # extract_page_content (web_search) usa trafilatura como extrator primario
     "trafilatura>=1.6,<3.0",
 ]
+exploit = [
+    # Binary exploitation: ROP chains, shellcode generation, ELF analysis.
+    "pwntools>=4.12,<5.0",
+    # Container sandbox (optional — falls back to rlimits).
+    "docker>=6.1,<8.0",
+]
+embeddings = [
+    # Semantic code search: embeddings + FAISS vector index.
+    "sentence-transformers>=2.2,<4.0",
+    "faiss-cpu>=1.7,<2.0",
+    "numpy>=1.24,<2.0",
+]
+graph = [
+    # Dependency graph + path tracing.
+    "networkx>=3.2,<4.0",
+]
 all = [
-    "alpha-code[browser,network,database,web,dev]",
+    "mythos[browser,network,database,web,dev,exploit,embeddings,graph]",
 ]
 dev = [
     # AUDIT_V1.2 #010: pytest 9.0.2 vulneravel a CVE-2025-71176 (fix em 9.0.3).

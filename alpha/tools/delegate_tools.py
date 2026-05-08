@@ -53,6 +53,9 @@ SUBAGENT_DESTRUCTIVE_BLOCKLIST = frozenset({
     # Red-team tools — recon, exploitation, payload injection.
     "nmap_scan", "ffuf_fuzz", "banner_grab", "payload_inject",
     "traffic_capture", "port_knock", "exploit_loop",
+    # Binary exploitation tools — ROP chains, shellcode, sandbox execution.
+    "check_mitigations", "generate_rop_chain", "generate_shellcode",
+    "inject_payload", "analyze_binary", "run_exploit", "sandbox_test",
 })
 
 # Read-only git actions que sub-agents podem chamar sem callback.

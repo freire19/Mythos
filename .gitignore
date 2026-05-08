@@ -66,8 +66,8 @@ docs/SKILLS_AUDIT.md
 # Backup of .git/ (local snapshot before risky operations)
 .git.backup/
 
-# Local-only skills (not distributed with Alpha)
-skills/git-save/
+# Local test targets (cloned repos for hunting loop)
+test_targets/
 skills/audit-1-front-scan/
 skills/audit-2-front-review/
 skills/audit-3-front-ux/

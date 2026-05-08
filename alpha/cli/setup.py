@@ -64,6 +64,13 @@ def get_tools_for_agent(agent: AgentScope | None):
             load_mcp_servers()
         except Exception as e:
             logging.getLogger(__name__).warning("MCP load failed: %s", e)
+        # Sandbox tools live outside the auto-discovery path (alpha/sandbox.py
+        # doesn't match *_tools.py). Register them explicitly.
+        try:
+            from alpha.sandbox import _register_sandbox_tools
+            _register_sandbox_tools()
+        except ImportError:
+            pass
         if agent is not None and (agent.tools_allow or agent.tools_deny):
             tools = get_openai_tools(name_filter=agent.filter_tools)
         else:
