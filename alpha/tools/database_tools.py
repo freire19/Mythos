@@ -142,16 +142,21 @@ async def _close_pg_pools() -> None:
 
 # SQL statements that modify data
 _WRITE_PATTERNS = re.compile(
-    r"^\s*(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|TRUNCATE|REPLACE|MERGE)\b",
+    r"^\s*("
+    r"INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|TRUNCATE|REPLACE|MERGE"
+    r"|VACUUM|REINDEX|ANALYZE|GRANT|REVOKE|SET\s+ROLE|RESET"
+    r")\b",
     re.IGNORECASE,
 )
 
-# Dangerous patterns always blocked
+# Dangerous patterns always blocked (even in non-readonly mode)
 _BLOCKED_SQL = [
     r"\bATTACH\b",  # attach external databases
     r"\bDETACH\b",  # detach databases
     r"\bLOAD_EXTENSION\b",  # load extensions
     r"\bPRAGMA\s+.*=",  # write pragmas (read pragmas OK)
+    r"\bCOPY\s+.*\s+TO\s+PROGRAM\b",  # shell execution via PG (#020)
+    r"\bCOPY\s+.*\s+FROM\s+PROGRAM\b",  # shell execution via PG (#020)
 ]
 
 

@@ -497,11 +497,11 @@ def print_banner(provider: str, model: str) -> None:
   ║  ╚═╝  ╚═╝╚══════╝╚═╝     ╚═╝  ╚═╝╚═╝  ╚═╝       ║
   ╚══════════════════════════════════════════════════╝"""
 
-    print(c(C.GREEN + C.BOLD, banner))
-    print(f"  {c(C.GREEN_DARK, '│')} {c(C.WHITE + C.BOLD, 'MYTHOS')} {c(C.GRAY, '— Cybersecurity Agent')}")
-    print(f"  {c(C.GREEN_DARK, '│')} {c(C.GRAY, 'cwd:')} {c(C.GREEN, cwd)}")
-    print(f"  {c(C.GREEN_DARK, '│')} {c(C.GRAY, 'provider:')} {c(C.CYAN, f'{provider} ({model})')}")
-    print(f"  {c(C.GREEN_DARK, '│')} {c(C.GRAY, 'Commands:')} /clear /history /continue /tools /model /help /exit")
+    print(c(C.RED + C.BOLD, banner))
+    print(f"  {c(C.RED_DARK, '│')} {c(C.WHITE + C.BOLD, 'MYTHOS')} {c(C.GRAY, '— Cybersecurity Agent')}")
+    print(f"  {c(C.RED_DARK, '│')} {c(C.GRAY, 'cwd:')} {c(C.RED, cwd)}")
+    print(f"  {c(C.RED_DARK, '│')} {c(C.GRAY, 'provider:')} {c(C.CYAN, f'{provider} ({model})')}")
+    print(f"  {c(C.RED_DARK, '│')} {c(C.GRAY, 'Commands:')} /clear /history /continue /tools /model /help /exit")
     print()
 
 

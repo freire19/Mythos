@@ -9,6 +9,8 @@ from dotenv import load_dotenv
 
 # Load .env from project root (not CWD) so `alpha` works from any directory
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
+# .env do projeto vence o env do shell — evita "atualizei a chave mas
+# a sessao ainda usa a antiga" quando o usuario esquece de re-exportar.
 load_dotenv(_PROJECT_ROOT / ".env", override=True)
 
 # ─── Defaults ───
@@ -42,6 +44,7 @@ LOOP_DETECTION = {
     "cycle_window": 20,           # look-back window for cycle detection
     "stale_window": 6,            # last N tool calls com no new info → stale
     "min_iter": 3,                # iter <= N nao rodam detection (exploration)
+    "min_calls": 6,               # gate loop detection by call count, not iter (#018)
 }
 
 # ─── Provider configs ───

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Mythos — atualiza o repo + dependencias num comando so.
-# Uso: alpha-update           (pula pra master mais recente)
-#      alpha-update v1.2.0    (fixa numa tag especifica)
+# Uso: mythos-update           (pula pra master mais recente)
+#      mythos-update v1.2.0    (fixa numa tag especifica)
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
@@ -17,7 +17,7 @@ if [ ! -x "$VENV_PY" ]; then
     exit 1
 fi
 
-echo "→ Atualizando Alpha em $PROJECT_DIR"
+echo "→ Atualizando Mythos em $PROJECT_DIR"
 echo
 
 OLD_HEAD="$(git rev-parse --short HEAD)"
@@ -57,5 +57,5 @@ else
 fi
 
 echo
-echo "✓ Alpha atualizado: $OLD_HEAD → $NEW_HEAD"
+echo "✓ Mythos atualizado: $OLD_HEAD → $NEW_HEAD"
 echo "  $(git log -1 --pretty=format:'%s' HEAD)"

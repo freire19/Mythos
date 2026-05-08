@@ -122,9 +122,14 @@ async def _run_git(args: list[str], cwd: str, timeout: int | None = None) -> dic
 
 
 def _find_git_repo(path: str) -> str | None:
-    """Walk up from path to find .git directory. Returns repo root or None."""
+    """Walk up to find .git directory. Never escapes AGENT_WORKSPACE."""
     p = Path(path).resolve()
+    ws = AGENT_WORKSPACE.resolve()
     while p != p.parent:
+        try:
+            p.relative_to(ws)
+        except ValueError:
+            return None
         if (p / ".git").exists():
             return str(p)
         p = p.parent

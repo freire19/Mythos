@@ -1,7 +1,7 @@
 [project]
-name = "alpha-code"
-version = "1.0.0"
-description = "Alpha Code — Standalone terminal agent"
+name = "mythos"
+version = "2.0.0"
+description = "MYTHOS — Autonomous vulnerability hunter. Red-team cybersecurity agent."
 requires-python = ">=3.11"
 # DEEP_SECURITY #036: upper bounds em todas as deps. Sem cap, `pip install -U`
 # pode puxar uma major release com breaking changes ou CVE recem-introduzido
@@ -47,7 +47,7 @@ dev = [
 ]
 
 [project.scripts]
-alpha = "main:main"
+mythos = "main:main"
 
 [tool.setuptools]
 py-modules = ["main"]
