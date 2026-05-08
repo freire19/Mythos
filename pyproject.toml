@@ -50,8 +50,12 @@ graph = [
     # Dependency graph + path tracing.
     "networkx>=3.2,<4.0",
 ]
+c_analysis = [
+    # AST-level C static analysis for vulnerability detection.
+    "pycparser>=2.21,<3.0",
+]
 all = [
-    "mythos[browser,network,database,web,dev,exploit,embeddings,graph]",
+    "mythos[browser,network,database,web,dev,exploit,embeddings,graph,c_analysis]",
 ]
 dev = [
     # AUDIT_V1.2 #010: pytest 9.0.2 vulneravel a CVE-2025-71176 (fix em 9.0.3).
