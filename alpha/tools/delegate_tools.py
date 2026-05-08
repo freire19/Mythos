@@ -56,6 +56,8 @@ SUBAGENT_DESTRUCTIVE_BLOCKLIST = frozenset({
     # Binary exploitation tools — ROP chains, shellcode, sandbox execution.
     "check_mitigations", "generate_rop_chain", "generate_shellcode",
     "inject_payload", "analyze_binary", "run_exploit", "sandbox_test",
+    # Exploit feedback loop — autonomous exploitation.
+    "auto_exploit", "tune_offset", "analyze_crash_output",
 })
 
 # Read-only git actions que sub-agents podem chamar sem callback.

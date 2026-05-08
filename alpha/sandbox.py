@@ -51,32 +51,30 @@ CRASH_SIGNALS = {
 
 def _analyze_crash(exit_code: int, stderr: str) -> dict:
     """Analyze exit code and stderr for crash indicators."""
-    if exit_code >= 0 and exit_code != 255:
-        return {"crashed": False, "exit_code": exit_code}
+    # Negative exit code = killed by signal (asyncio convention)
+    if exit_code < 0:
+        sig = -exit_code
+        crash_info = CRASH_SIGNALS.get(sig, f"Signal {sig}")
+        return {
+            "crashed": True,
+            "signal": sig,
+            "signal_name": crash_info,
+            "exit_code": exit_code,
+            "evidence": stderr[:2000] if stderr else "",
+        }
 
-    # Negative exit code = signal
-    sig = -exit_code
-    crash_info = CRASH_SIGNALS.get(sig, f"Unknown signal {sig}")
+    # exit_code 255 can be normal failure — check stderr for crash patterns
+    if b"segmentation fault" in stderr.lower().encode() or b"sigsegv" in stderr.lower().encode():
+        return {
+            "crashed": True,
+            "signal": 11,
+            "signal_name": "SIGSEGV (detected from stderr)",
+            "exit_code": exit_code,
+            "evidence": stderr[:2000],
+        }
 
-    # Look for specific crash patterns in stderr
-    patterns = {}
-    if "stack smashing detected" in stderr.lower():
-        patterns["stack_canary_triggered"] = True
-    if "segmentation fault" in stderr.lower():
-        patterns["segfault"] = True
-    if "illegal hardware instruction" in stderr.lower():
-        patterns["illegal_instruction"] = True
-    if "trace/breakpoint trap" in stderr.lower():
-        patterns["breakpoint_trap"] = True
-
-    return {
-        "crashed": True,
-        "signal": sig,
-        "signal_name": crash_info,
-        "exit_code": exit_code,
-        "patterns": patterns,
-        "evidence": stderr[:2000] if stderr else "",
-    }
+    # Normal exit
+    return {"crashed": False, "exit_code": exit_code}
 
 
 # ─── Process-level sandbox (fallback) ───
@@ -282,9 +280,13 @@ async def run_exploit(
     bin_path = str(Path(binary).resolve())
 
     if use_container and _get_container_runtime():
-        return await _run_container_sandbox(
+        result = await _run_container_sandbox(
             bin_path, input_data, args, timeout, mem_limit_mb, env or {}
         )
+        # Fall back to process sandbox if container failed (docker installed
+        # but not running, or image missing, or mount failed).
+        if not result.get("error"):
+            return result
 
     return await _run_process_sandbox(
         bin_path, input_data, args, timeout, mem_limit_mb, env or {}
