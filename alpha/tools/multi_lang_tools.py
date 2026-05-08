@@ -76,14 +76,14 @@ async def analyze_codebase(path: str = ".", language: str = "auto",
         a = CASTAnalyzer()
         result = a.scan_codebase(str(root))
     elif lang == "javascript":
-        from alpha.js_analyzer import scan_js_codebase
-        result = scan_js_codebase(str(root))
+        from alpha.js_analyzer import JSAnalyzer
+        result = JSAnalyzer().scan_codebase(str(root))
     elif lang == "go":
-        from alpha.go_analyzer import scan_go_codebase
-        result = scan_go_codebase(str(root))
+        from alpha.go_analyzer import GoAnalyzer
+        result = GoAnalyzer().scan_codebase(str(root))
     elif lang == "rust":
-        from alpha.rust_analyzer import scan_rust_codebase
-        result = scan_rust_codebase(str(root))
+        from alpha.rust_analyzer import RustAnalyzer
+        result = RustAnalyzer().scan_codebase(str(root))
     elif lang == "python":
         # Use depgraph for Python — entry points + sinks
         from alpha.depgraph import DependencyGraph
@@ -110,13 +110,9 @@ async def analyze_codebase(path: str = ".", language: str = "auto",
     else:
         return {"ok": False, "error": f"Unsupported language: {lang}"}
 
-    # Filter by severity
-    severity_order = {"CRÍTICO": 0, "ALTO": 1, "MÉDIO": 2, "BAIXO": 3}
-    min_level = severity_order.get(min_severity, 3)
-    result["findings"] = [
-        f for f in result.get("findings", [])
-        if severity_order.get(f.get("severity", "BAIXO"), 3) <= min_level
-    ]
+    # Filter by severity using shared constant
+    from alpha.analyzer_base import Sev
+    result["findings"] = Sev.filter(result.get("findings", []), min_severity)
     result["total_findings"] = len(result.get("findings", []))
     result["language"] = lang
 
@@ -141,14 +137,14 @@ async def detect_vulns_multi(file: str, language: str = "auto") -> dict:
         a = CASTAnalyzer()
         findings = a.scan_file(str(path))
     elif lang == "javascript":
-        from alpha.js_analyzer import scan_js_file
-        findings = scan_js_file(str(path))
+        from alpha.js_analyzer import JSAnalyzer
+        findings = JSAnalyzer().scan_file(str(path))
     elif lang == "go":
-        from alpha.go_analyzer import scan_go_file
-        findings = scan_go_file(str(path))
+        from alpha.go_analyzer import GoAnalyzer
+        findings = GoAnalyzer().scan_file(str(path))
     elif lang == "rust":
-        from alpha.rust_analyzer import scan_rust_file
-        findings = scan_rust_file(str(path))
+        from alpha.rust_analyzer import RustAnalyzer
+        findings = RustAnalyzer().scan_file(str(path))
     else:
         return {"ok": False, "error": f"Unsupported language: {lang}"}
 
@@ -211,8 +207,8 @@ async def auto_exploit_multi(target: str, language: str = "auto",
         }
 
     if lang == "javascript":
-        from alpha.js_analyzer import scan_js_file
-        findings = scan_js_file(str(path))
+        from alpha.js_analyzer import JSAnalyzer
+        findings = JSAnalyzer().scan_file(str(path))
         return {
             "ok": True, "language": "javascript",
             "mode": "static_analysis_poc",
