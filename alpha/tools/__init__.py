@@ -26,6 +26,9 @@ Tool module index (where each tool lives, see #096):
 - plan_tools.py    — present_plan, todo_write
 - skill_tools.py   — load_skill
 - apify_tools.py   — apify_run_actor, apify_search_actors
+- security_tools.py — scan_vulnerabilities, audit_dependencies,
+                       analyze_binary, fuzz_endpoint,
+                       check_misconfigurations
 """
 
 import importlib
@@ -66,6 +69,7 @@ class ToolCategory(str, Enum):
     BROWSER = "browser"
     SCRAPING = "scraping"
     SKILLS = "skills"
+    SECURITY = "security"
     COMPOSITE = "composite"
     GENERAL = "general"
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Alpha Code CLI — run from anywhere, just type: alpha
+# Mythos CLI — run from anywhere, just type: mythos
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 VENV="$PROJECT_DIR/.venv/bin/python"

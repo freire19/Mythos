@@ -17,7 +17,7 @@ from .steps import (
 def run_wizard() -> bool:
     """Run the onboarding wizard. Returns True on completion, False if canceled."""
     print()
-    print(c(C.CYAN + C.BOLD, "  Alpha Code — Onboarding"))
+    print(c(C.CYAN + C.BOLD, "  Mythos — Onboarding"))
     print(c(C.GRAY, "  ~60 seconds. Ctrl+C cancels."))
     print()
 

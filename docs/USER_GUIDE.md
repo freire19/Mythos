@@ -1,6 +1,6 @@
-# Alpha Code — User Guide
+# Mythos — User Guide
 
-A practical walkthrough for running and configuring Alpha as a daily driver.
+A practical walkthrough for running and configuring Mythos as a daily driver.
 For internal architecture and contribution notes, see `CLAUDE.md`.
 
 ---
@@ -47,7 +47,7 @@ The wrapper auto-activates `.venv` so you can call Alpha from anywhere.
 python main.py
 ```
 
-You should see the green ALPHA CODE banner. Try a few prompts:
+You should see the green MYTHOS banner. Try a few prompts:
 
 - `oi` — chat reply, no tool calls.
 - `liste os arquivos do diretório atual` — runs `list_directory`.

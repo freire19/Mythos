@@ -107,7 +107,7 @@ class TestClear:
         _drive_repl(monkeypatch, "hello", "/clear", "/exit")
         out = capsys.readouterr().out
         # Banner appears at startup AND after /clear → at least 2 occurrences.
-        assert out.count("ALPHA CODE") >= 2
+        assert out.count("MYTHOS") >= 2
 
 
 class TestHistory:
@@ -251,5 +251,5 @@ def test_repl_starts_and_exits_cleanly(repl_env, monkeypatch, capsys):
     """Bare-minimum sanity: start REPL, send /exit, verify banner appeared."""
     _drive_repl(monkeypatch, "/exit")
     out = capsys.readouterr().out
-    assert "ALPHA CODE" in out
+    assert "MYTHOS" in out
     assert "Goodbye" in out

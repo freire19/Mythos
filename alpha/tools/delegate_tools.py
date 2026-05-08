@@ -47,6 +47,12 @@ SUBAGENT_DESTRUCTIVE_BLOCKLIST = frozenset({
     # vetor de exfil via actors maliciosos. Sub-agent sem callback nao
     # pode chamar (#034).
     "apify_run_actor",
+    # Security tools — scanners e fuzzers sao DESTRUCTIVE e executam
+    # comandos externos; sub-agent sem callback nao pode dispara-los.
+    "scan_vulnerabilities", "audit_dependencies", "fuzz_endpoint",
+    # Red-team tools — recon, exploitation, payload injection.
+    "nmap_scan", "ffuf_fuzz", "banner_grab", "payload_inject",
+    "traffic_capture", "port_knock", "exploit_loop",
 })
 
 # Read-only git actions que sub-agents podem chamar sem callback.
@@ -131,6 +137,7 @@ async def _run_subagent(
     label: str = "",
     stream_to_parent: bool = True,
     parent_approval_callback=None,
+    parent_workspace: str | None = None,
 ) -> dict:
     """
     Core sub-agent runner with isolated context.
@@ -155,7 +162,7 @@ async def _run_subagent(
 
     max_iterations = feat.get("subagent_max_iterations", 15)
     agent_provider = provider or DEFAULT_PROVIDER
-    workspace_root = str(AGENT_WORKSPACE)
+    workspace_root = parent_workspace or str(AGENT_WORKSPACE)
 
     agent_id = _new_agent_id()
     try:
@@ -213,6 +220,8 @@ async def _run_subagent(
     if tools_filter:
         allowed = {s.strip() for s in tools_filter.split(",")}
         tools = [t for t in tools if t["function"]["name"] in allowed]
+    else:
+        allowed = None
 
     # Safe get_tool wrapper: aplica a politica de blocklist montada acima
     # (delegate_* anti-recursao + SUBAGENT_DESTRUCTIVE_BLOCKLIST quando
@@ -221,9 +230,12 @@ async def _run_subagent(
     # consiga "burlar" via lookup direto no TOOL_REGISTRY (#091).
     original_get_tool = get_tool
     _all_blocked = _blocked
+    allowed_filter = allowed
 
     def _safe_get_tool(name: str):
         if name in _all_blocked:
+            return None
+        if allowed_filter is not None and name not in allowed_filter:
             return None
         return original_get_tool(name)
 

@@ -1,6 +1,6 @@
-# Alpha Code
+# Mythos
 
-Standalone terminal agent that connects to multiple LLM providers (DeepSeek, OpenAI, Anthropic, Grok, Ollama) and executes tasks autonomously through a tool-calling loop.
+Autonomous cybersecurity agent that connects to multiple LLM providers (DeepSeek, OpenAI, Anthropic, Grok, Ollama). Specialized in vulnerability research, code auditing, exploit development, and system hardening.
 
 Pure async Python, minimal dependencies (`httpx`, `python-dotenv`, `ddgs`, `pyyaml`, `prompt_toolkit`).
 

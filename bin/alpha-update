@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Alpha Code — atualiza o repo + dependencias num comando so.
+# Mythos — atualiza o repo + dependencias num comando so.
 # Uso: alpha-update           (pula pra master mais recente)
 #      alpha-update v1.2.0    (fixa numa tag especifica)
 set -euo pipefail
