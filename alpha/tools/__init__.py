@@ -9,7 +9,7 @@ Supports:
 
 Tool module index (where each tool lives, see #096):
 - file_tools.py    — read_file, write_file, edit_file, search_files,
-                     glob_files, list_directory, move_file, delete_file
+                     glob_files, list_directory
 - shell_tools.py   — execute_shell
 - pipeline_tools.py — execute_pipeline
 - code_tools.py    — execute_python, install_package
@@ -17,7 +17,7 @@ Tool module index (where each tool lives, see #096):
 - network_tools.py — http_request
 - search_tools.py  — web_search, extract_page_content, search_files
 - database_tools.py — query_database, list_tables, describe_table
-- composite_tools.py — project_overview, run_tests, search_and_replace,
+- composite_tools.py → project_overview, run_tests, search_and_replace,
                        deploy_check
 - system_tools.py  — clipboard_read, clipboard_write, screenshot,
                      get_system_info, get_battery_status, etc.
@@ -71,6 +71,7 @@ class ToolCategory(str, Enum):
     SKILLS = "skills"
     SECURITY = "security"
     COMPOSITE = "composite"
+    PLANNING = "planning"
     GENERAL = "general"
 
 

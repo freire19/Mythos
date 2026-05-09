@@ -84,8 +84,9 @@ def write_env(updates: dict[str, str]) -> Path:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             fh.write(content)
         os.replace(tmp_path, ENV_PATH)
-    except Exception:
-        # Cleanup do tmp em caso de erro antes do replace
+    except BaseException:
+        # Cleanup do tmp em caso de erro antes do replace.
+        # BaseException cobre KeyboardInterrupt alem de Exception.
         try:
             os.unlink(tmp_path)
         except OSError:

@@ -22,17 +22,26 @@ DEFAULT_PROVIDER = os.getenv("ALPHA_PROVIDER", "deepseek")
 # ficam como aliases com retro-compat. Sub-agent limit tambem entra
 # aqui em vez de viver isolado em FEATURES.
 LIMITS = {
-    "max_iterations": 50,           # iteracoes do agent loop principal
+    "max_iterations": 100,          # iteracoes do agent loop principal
+    "subagent_max_iterations": 15,  # iteracoes do sub-agent loop
     "tool_result_max_chars": 12_000,
     "llm_timeout": 300,             # seconds per LLM call
     "max_messages": 500,            # hard cap antes de needs_compression
 }
-# `subagent_max_iterations` vive em FEATURES (linha ~185) — `delegate_tools.py`
-# le de la. Manter dois lugares era drift garantido (#DM015 follow-up).
 
 MAX_ITERATIONS = LIMITS["max_iterations"]
 TOOL_RESULT_MAX_CHARS = LIMITS["tool_result_max_chars"]
 LLM_TIMEOUT = LIMITS["llm_timeout"]
+
+# ─── Retry config ───
+# Fonte unica para constantes de retry (#DM036).
+# LLM: retry de chamadas streaming com jittered backoff.
+# HTTP: retry de requests idempotentes (GET/HEAD/OPTIONS).
+RETRY_CONFIG = {
+    "llm_max_retries": 3,
+    "http_max_retries": 2,
+    "http_initial_backoff": 1.0,
+}
 
 # Loop detection (#085 V1.1): consts agrupadas em um dict para inspecao
 # uniforme (ex: ALPHA_LOOP_DETECT_DISABLE=1 pode levantar todos os

@@ -18,7 +18,8 @@ from ..net_utils import (
     validate_url as _validate_url,
     resolve_and_validate as _resolve_and_validate,
 )
-from . import ToolDefinition, ToolSafety, register_tool
+from . import ToolCategory, ToolDefinition, ToolSafety, register_tool
+from ..config import RETRY_CONFIG, TOOL_TIMEOUTS, TOOL_TIMEOUT_CAPS
 
 logger = logging.getLogger(__name__)
 
@@ -30,8 +31,8 @@ _ALLOWED_METHODS = frozenset({"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "
 # efeito. Metodos de escrita (POST/PUT/PATCH/DELETE) NUNCA retentam —
 # duplicar pagamentos / criacoes seria pior do que falhar uma vez.
 _RETRY_SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
-_HTTP_MAX_RETRIES = 2  # ate 3 tentativas no total
-_HTTP_INITIAL_BACKOFF = 0.5
+_HTTP_MAX_RETRIES = RETRY_CONFIG["http_max_retries"]
+_HTTP_INITIAL_BACKOFF = RETRY_CONFIG["http_initial_backoff"]
 
 
 # #D008-PERF: aiohttp.ClientSession compartilhada por loop. Antes, cada
@@ -100,7 +101,6 @@ async def _http_request(
     timeout: int | None = None,
 ) -> dict:
     """Make an HTTP request."""
-    from ..config import TOOL_TIMEOUTS
     if timeout is None:
         timeout = TOOL_TIMEOUTS.get("network", 30)
 
@@ -115,7 +115,6 @@ async def _http_request(
     if url_error:
         return {"error": url_error, "blocked": True}
 
-    from ..config import TOOL_TIMEOUT_CAPS
     timeout = min(timeout, TOOL_TIMEOUT_CAPS.get("network", 60))
 
     try:
@@ -209,35 +208,38 @@ async def _http_request(
             redirect_count += 1
 
         # Read response with size limit
-        raw = await resp.read()
-        if len(raw) > _MAX_RESPONSE_SIZE:
-            body_text = raw[:_MAX_RESPONSE_SIZE].decode(errors="replace")
-            body_text += f"\n... [truncado: resposta > {_MAX_RESPONSE_SIZE // 1000}KB]"
-        else:
-            body_text = raw.decode(errors="replace")
+        try:
+            raw = await resp.read()
+            if len(raw) > _MAX_RESPONSE_SIZE:
+                body_text = raw[:_MAX_RESPONSE_SIZE].decode(errors="replace")
+                body_text += f"\n... [truncado: resposta > {_MAX_RESPONSE_SIZE // 1000}KB]"
+            else:
+                body_text = raw.decode(errors="replace")
 
-        resp_headers = dict(resp.headers)
+            resp_headers = dict(resp.headers)
 
-        return {
-            "status_code": resp.status,
-            "headers": {
-                k: v
-                for k, v in resp_headers.items()
-                if k.lower()
-                in (
-                    "content-type",
-                    "content-length",
-                    "server",
-                    "date",
-                    "location",
-                    "x-request-id",
-                    "etag",
-                )
-            },
-            "body": body_text[:15000],
-            "url": str(resp.url),
-            "method": method,
-        }
+            return {
+                "status_code": resp.status,
+                "headers": {
+                    k: v
+                    for k, v in resp_headers.items()
+                    if k.lower()
+                    in (
+                        "content-type",
+                        "content-length",
+                        "server",
+                        "date",
+                        "location",
+                        "x-request-id",
+                        "etag",
+                    )
+                },
+                "body": body_text[:15000],
+                "url": str(resp.url),
+                "method": method,
+            }
+        finally:
+            resp.release()
 
     except ImportError:
         # Fallback: use urllib (stdlib)
@@ -393,7 +395,7 @@ register_tool(
             "required": ["url"],
         },
         safety=ToolSafety.DESTRUCTIVE,
-        category="network",
+        category=ToolCategory.NETWORK,
         executor=_http_request_with_retry,
     )
 )

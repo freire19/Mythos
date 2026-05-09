@@ -19,7 +19,7 @@ from ..net_utils import (
     is_private_ip as _is_private_ip,
     resolve_and_validate as _resolve_and_validate,
 )
-from . import ToolDefinition, ToolSafety, register_tool
+from . import ToolCategory, ToolDefinition, ToolSafety, register_tool
 from .workspace import AGENT_WORKSPACE
 
 logger = logging.getLogger(__name__)
@@ -297,7 +297,6 @@ async def _query_sqlite(db_path: str, query: str, read_only: bool) -> dict:
     # #D005: sem `wait_for`, uma query SQLite que trava (lock contention,
     # corrupted page) pendurava o agent indefinidamente. Cap de 30s alinha
     # com TOOL_TIMEOUTS["database"].
-    from ..config import TOOL_TIMEOUTS
     db_timeout = TOOL_TIMEOUTS.get("database", 30)
     loop = asyncio.get_event_loop()
     try:
@@ -370,11 +369,10 @@ async def _query_database(
             return {"error": "asyncpg não instalado. Execute: pip install asyncpg"}
 
         # #048: cap dedicado para fetch (nao apenas pool acquire).
-        from ..config import TOOL_TIMEOUTS
         fetch_timeout = TOOL_TIMEOUTS.get("database", 30)
         try:
             pool = await asyncio.wait_for(_get_pg_pool(connection), timeout=10)
-            async with pool.acquire() as conn:
+            async with pool.acquire(timeout=fetch_timeout) as conn:
                 if _is_write_query(query):
                     if read_only:
                         return {"error": "Query de escrita bloqueada em modo read_only"}
@@ -447,11 +445,10 @@ async def _describe_table(connection: str, table: str, db_type: str = "sqlite") 
         except ImportError:
             return {"error": "asyncpg não instalado. Execute: pip install asyncpg"}
 
-        from ..config import TOOL_TIMEOUTS
         fetch_timeout = TOOL_TIMEOUTS.get("database", 30)
         try:
             pool = await asyncio.wait_for(_get_pg_pool(connection), timeout=10)
-            async with pool.acquire() as conn:
+            async with pool.acquire(timeout=fetch_timeout) as conn:
                 rows = await asyncio.wait_for(
                     conn.fetch(
                         "SELECT column_name, data_type, is_nullable, column_default "
@@ -512,7 +509,7 @@ register_tool(
             "required": ["connection", "query"],
         },
         safety=ToolSafety.DESTRUCTIVE,
-        category="database",
+        category=ToolCategory.DATABASE,
         executor=_query_database,
     )
 )
@@ -538,7 +535,7 @@ register_tool(
             "required": ["connection"],
         },
         safety=ToolSafety.SAFE,
-        category="database",
+        category=ToolCategory.DATABASE,
         executor=_list_tables,
     )
 )
@@ -568,7 +565,7 @@ register_tool(
             "required": ["connection", "table"],
         },
         safety=ToolSafety.SAFE,
-        category="database",
+        category=ToolCategory.DATABASE,
         executor=_describe_table,
     )
 )

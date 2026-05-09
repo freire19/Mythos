@@ -75,31 +75,36 @@ async def _run_once(messages, user_message, provider, temperature, get_tool_fn, 
         ):
             event_type = event.get("type", "")
 
+            # Scroll-region mode keeps the spinner pinned at the bottom while
+            # output flows above — no more stop()/start() around every event.
+            # We only pause around `approval_needed` so the input() prompt
+            # echoes cleanly; the next tool_call/tool_result implicitly resumes.
             if event_type == "token":
-                indicator.stop()
                 text = event.get("text", "")
                 sys.stdout.write(text)
                 sys.stdout.flush()
                 full_reply += text
+                indicator.add_streamed_text(text)
 
             elif event_type == "tool_call":
-                indicator.stop()
+                if full_reply and not full_reply.endswith("\n"):
+                    sys.stdout.write("\n")
+                    sys.stdout.flush()
+                    full_reply += "\n"
                 tc_args = event.get("args", {}) or {}
                 print_tool_call(event["name"], tc_args, event.get("safety", "safe"))
                 pending_args[event["name"]] = tc_args if isinstance(tc_args, dict) else {}
                 indicator.start(label_for_tool(event["name"]))
 
             elif event_type == "tool_result":
-                indicator.stop()
                 tr_args = pending_args.pop(event["name"], None)
                 print_tool_result(event["name"], event.get("result", {}), args=tr_args)
                 indicator.start("Think")
 
             elif event_type == "approval_needed":
-                indicator.stop()
+                indicator.pause()
 
             elif event_type == "context_compressed":
-                indicator.stop()
                 print_context_compressed(event.get("before", 0), event.get("after", 0))
                 indicator.start("Think")
 
@@ -178,7 +183,7 @@ def run_repl(provider: str, temperature: float):
 
     while True:
         try:
-            prompt = f"{c(C.GREEN + C.BOLD, '❯')} "
+            prompt = f"{c(C.RED + C.BOLD, '❯')} "
             user_input, image_paths = read_input(prompt)
             user_input = user_input.strip()
         except (KeyboardInterrupt, EOFError):

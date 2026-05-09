@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import logging
 import re
+import shutil
+import sys
 import tempfile
 from pathlib import Path
 
@@ -139,33 +141,73 @@ class _SlashCompleter(Completer):
         if not line.startswith("/") or " " in line:
             return
 
-        for cmd, desc in _BUILTIN_COMMANDS:
-            if cmd.startswith(line):
-                yield Completion(
-                    cmd,
-                    start_position=-len(line),
-                    display_meta=desc,
-                )
-
         # Skills are imported lazily so this module stays import-cheap and
         # doesn't pull the registry at definition time.
+        entries: list[tuple[str, str]] = list(_BUILTIN_COMMANDS)
         try:
             from .skills import list_skills
             for s in list_skills():
-                cmd = f"/{s.name}"
-                if cmd.startswith(line):
-                    meta = (s.description or "").strip().split("\n", 1)[0]
-                    yield Completion(
-                        cmd,
-                        start_position=-len(line),
-                        display_meta=meta[:80] or "skill",
-                    )
+                meta = (s.description or "").strip().split("\n", 1)[0]
+                entries.append((f"/{s.name}", meta[:80] or "skill"))
         except Exception:
-            # Never break input on a skill-registry hiccup.
-            return
+            pass
+
+        # Substring match with prefix-first ranking: typing `/save` matches
+        # both `/save-anything` (prefix) and `/git-save` (substring). Prefix
+        # hits stream first so the closest match is at the top of the popup.
+        needle = line[1:].lower()
+        if not needle:
+            ordered = entries
+        else:
+            prefix_hits: list[tuple[str, str]] = []
+            substr_hits: list[tuple[str, str]] = []
+            for cmd, desc in entries:
+                name = cmd[1:].lower()
+                if name.startswith(needle):
+                    prefix_hits.append((cmd, desc))
+                elif needle in name:
+                    substr_hits.append((cmd, desc))
+            ordered = prefix_hits + substr_hits
+
+        for cmd, desc in ordered:
+            yield Completion(
+                cmd,
+                start_position=-len(line),
+                display_meta=desc,
+            )
 
 
 _SESSION: PromptSession | None = None
+
+
+def _frame_border() -> str:
+    """Horizontal rule used as the top/bottom frame around the prompt."""
+    from .display import C, c
+    cols = max(40, shutil.get_terminal_size((80, 24)).columns - 4)
+    return c(C.GRAY_DARK, "─" * cols)
+
+
+def _bottom_toolbar() -> "ANSI":
+    """Bottom frame: closing border, blank spacer, then accept-edits status.
+    Pairs with the top border `read_input` prints before `session.prompt` to
+    give the input area a demarcated `input box` feel."""
+    from . import display as _d
+    from .display import C, c
+
+    if _d._approve_all:
+        status = (
+            f" {c(C.YELLOW + C.BOLD, '»»')} "
+            f"{c(C.YELLOW + C.BOLD, 'accept edits on')} "
+            f"{c(C.GRAY, '(shift+tab to cycle) · ctrl+c to interrupt')}"
+        )
+    else:
+        status = (
+            f" {c(C.GRAY, '»»')} "
+            f"{c(C.GRAY, 'accept edits off')} "
+            f"{c(C.GRAY_DARK, '(shift+tab to enable) · ctrl+c to interrupt')}"
+        )
+    text = f"  {_frame_border()}\n\n{status}"
+    return ANSI(text)
 
 
 def _get_session() -> PromptSession:
@@ -174,6 +216,7 @@ def _get_session() -> PromptSession:
         _SESSION = PromptSession(
             completer=_SlashCompleter(),
             complete_while_typing=True,
+            bottom_toolbar=_bottom_toolbar,
         )
     return _SESSION
 
@@ -184,6 +227,12 @@ def read_input(prompt_ansi: str) -> tuple[str, list[Path]]:
     Raises EOFError on Ctrl+D and KeyboardInterrupt on Ctrl+C — same as
     the builtin `input()`.
     """
+    # Top frame border + spacer above the prompt — pairs with the bottom
+    # frame in `_bottom_toolbar` to give the input area a Claude Code-style
+    # demarcated box.
+    sys.stdout.write(f"\n  {_frame_border()}\n")
+    sys.stdout.flush()
+
     attached: dict[int, Path] = {}
     kb = _build_key_bindings(attached)
     session = _get_session()

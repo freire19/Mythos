@@ -93,6 +93,8 @@ _FUZZY_CACHE_SIZE = 256
 _fuzzy_cache: dict[str, str | None] = {}
 _fuzzy_cache_order: list[str] = []
 
+_SENTINEL = object()
+
 
 def _fuzzy_resolve(path: str) -> str | None:
     """Try to resolve a path that doesn't exist by matching fuzzy variants.
@@ -114,9 +116,6 @@ def _fuzzy_resolve(path: str) -> str | None:
         evicted = _fuzzy_cache_order.pop(0)
         _fuzzy_cache.pop(evicted, None)
     return result
-
-
-_SENTINEL = object()
 
 
 def _fuzzy_resolve_uncached(path: str) -> str | None:
@@ -192,6 +191,39 @@ def _validate_path(path: str) -> Path:
         )
 
     return p
+
+
+def _atomic_write(path: Path, data: bytes, mode: int = 0o644) -> None:
+    """Write data atomically via tempfile + os.replace.
+
+    Prevents corruption if the write fails mid-way (disk full, crash, Ctrl+C).
+    Uses O_NOFOLLOW to prevent symlink TOCTOU on the temp file.
+    tempfile.mkstemp creates in the same directory, so os.replace is atomic.
+    """
+    import tempfile
+
+    parent = path.parent
+    fd, tmp_path = tempfile.mkstemp(
+        prefix=f".{path.name}.", dir=str(parent)
+    )
+    try:
+        os.fchmod(fd, mode)
+        os.write(fd, data)
+        os.fsync(fd)  # garante que os dados chegaram ao disco antes do replace
+        os.replace(tmp_path, path)
+    except BaseException:
+        # Cleanup do tmp em caso de erro.
+        # BaseException cobre KeyboardInterrupt alem de Exception.
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
 
 
 def _validate_path_no_symlink(path: str) -> Path:

@@ -12,7 +12,9 @@ import re
 import shlex
 from pathlib import Path
 
-from . import ToolDefinition, ToolSafety, register_tool
+from . import ToolCategory, ToolDefinition, ToolSafety, register_tool
+from .._subprocess import run_subprocess
+from ..config import TOOL_TIMEOUTS
 from .safe_env import get_safe_env
 from .workspace import AGENT_WORKSPACE
 
@@ -87,35 +89,20 @@ _ALL_ACTIONS = _SAFE_ACTIONS | _DESTRUCTIVE_ACTIONS
 
 async def _run_git(args: list[str], cwd: str, timeout: int | None = None) -> dict:
     """Run a git command and return result."""
-    from ..config import TOOL_TIMEOUTS
     if timeout is None:
         timeout = TOOL_TIMEOUTS.get("git", 30)
     cmd = ["git"] + args
     try:
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=cwd,
-            env=get_safe_env(),
+        result = await run_subprocess(
+            cmd, timeout=timeout, cwd=cwd, env=get_safe_env()
         )
-        try:
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-        except TimeoutError:
-            proc.kill()
-            await proc.wait()
+        if result.timed_out:
             return {"error": f"git excedeu timeout de {timeout}s", "timeout": True}
-        except (asyncio.CancelledError, KeyboardInterrupt):
-            # Ctrl+C durante `git push`/`git fetch` deixaria o processo
-            # rodando ate completar a transferencia. Mata e propaga.
-            proc.kill()
-            await proc.wait()
-            raise
 
         return {
-            "exit_code": proc.returncode,
-            "stdout": stdout.decode(errors="replace")[:15000],
-            "stderr": stderr.decode(errors="replace")[:3000],
+            "exit_code": result.returncode,
+            "stdout": result.stdout.decode(errors="replace")[:15000],
+            "stderr": result.stderr.decode(errors="replace")[:3000],
         }
     except Exception as e:
         return {"error": str(e)}
@@ -426,7 +413,7 @@ register_tool(
             "required": ["action"],
         },
         safety=ToolSafety.DESTRUCTIVE,
-        category="git",
+        category=ToolCategory.GIT,
         executor=_git_operation,
     )
 )

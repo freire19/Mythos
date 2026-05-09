@@ -13,57 +13,16 @@ import re
 import shlex
 from pathlib import Path
 
-from . import ToolDefinition, ToolSafety, register_tool
+from . import ToolCategory, ToolDefinition, ToolSafety, register_tool
+from ..config import TOOL_TIMEOUTS, TOOL_TIMEOUT_CAPS
 from .path_helpers import _validate_path_no_symlink
 from .safe_env import get_safe_env
-from .shell_tools import HARD_BLOCKED_RE
+from ..security import HARD_BLOCKED_RE, validate_pipeline
 from .workspace import AGENT_WORKSPACE
 
 logger = logging.getLogger(__name__)
 
-# Operators allowed in pipelines
-_PIPE_OPERATORS = frozenset({"|", "&&", "||", ";", ">", ">>", "2>&1", "2>", "<"})
 
-
-_SHELL_EXPANSION_RE = re.compile(
-    r"\$\(|`"  # command substitution: $(...) or `...`
-    r"|\$\{"  # variable expansion: ${...}
-    r"|\$[A-Za-z_]"  # variable reference: $VAR
-    r"|<\("  # process substitution: <(...)
-    r"|\$\(\("  # arithmetic expansion: $((...))
-)
-
-
-def _validate_pipeline(pipeline: str) -> str | None:
-    """Validate a full pipeline string. Returns error message or None.
-
-    Denylist model: catastrophic patterns blocked; everything else runs.
-    """
-    # Block shell variable/command expansion (injection vector)
-    if _SHELL_EXPANSION_RE.search(pipeline):
-        return "Pipeline bloqueado: expansão de variáveis/comandos ($(), ``, ${}) não é permitida"
-
-    # Check hard-blocked patterns on the full string (combined regex, #D020)
-    if HARD_BLOCKED_RE.search(pipeline):
-        return "Pipeline bloqueado por segurança (padrão destrutivo detectado)"
-
-    # Syntactic check per segment (no allowlist; HARD_BLOCKED already gated)
-    segments = re.split(r"\s*(?:\|\||&&|;|\|)\s*", pipeline)
-    for segment in segments:
-        segment = segment.strip()
-        if not segment:
-            continue
-        cmd_part = re.split(r"\s*(?:>>?|2>>?|<)\s*", segment)[0].strip()
-        if not cmd_part:
-            continue
-        try:
-            parts = shlex.split(cmd_part)
-            if not parts:
-                continue
-        except ValueError:
-            return f"Segmento malformado no pipeline: {segment}"
-
-    return None
 
 
 def _validate_redirect_paths(pipeline: str) -> str | None:
@@ -351,12 +310,11 @@ async def _execute_pipe_chain(
 
 async def _execute_pipeline(pipeline: str, cwd: str = None, timeout: int | None = None) -> dict:
     """Execute a shell pipeline with pipes, redirects, and operators — sem shell."""
-    from ..config import TOOL_TIMEOUTS
     if timeout is None:
         timeout = TOOL_TIMEOUTS.get("pipeline", 120)
 
     # Validate entire pipeline
-    block_reason = _validate_pipeline(pipeline)
+    block_reason = validate_pipeline(pipeline)
     if block_reason:
         return {"error": block_reason, "blocked": True}
 
@@ -376,7 +334,6 @@ async def _execute_pipeline(pipeline: str, cwd: str = None, timeout: int | None 
     else:
         cwd = str(AGENT_WORKSPACE)
 
-    from ..config import TOOL_TIMEOUT_CAPS
     timeout = min(timeout, TOOL_TIMEOUT_CAPS.get("pipeline", 120))
     env = get_safe_env()
 
@@ -468,7 +425,7 @@ register_tool(
             "required": ["pipeline"],
         },
         safety=ToolSafety.DESTRUCTIVE,
-        category="shell",
+        category=ToolCategory.SHELL,
         executor=_execute_pipeline,
     )
 )

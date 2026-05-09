@@ -8,11 +8,12 @@ import re
 import shutil
 from pathlib import Path
 
-from . import ToolDefinition, ToolSafety, register_tool
+from . import ToolCategory, ToolDefinition, ToolSafety, register_tool
 from .path_helpers import (
     _fuzzy_resolve,
     _validate_path,
     _validate_path_no_symlink,
+    _atomic_write,
 )
 from .workspace import AGENT_WORKSPACE
 
@@ -288,6 +289,13 @@ async def _search_with_ripgrep(pattern: str, root: Path, max_results: int) -> li
         # a versao chamadora vai re-compilar. Devolver vazio aqui evita
         # double-work; o usuario pode re-tentar com pattern mais especifico.
         return []
+    except asyncio.CancelledError:
+        proc.kill()
+        try:
+            await proc.wait()
+        except Exception:
+            pass
+        raise
 
     if proc.returncode not in (0, 1):  # 0=match, 1=no match; 2=erro
         # Provavel divergencia de syntax regex — fallback Python.
@@ -445,14 +453,9 @@ async def _write_file(path: str, content: str) -> dict:
         # Re-validate resolved path after mkdir (directory could have been swapped)
         p_resolved = Path(path).expanduser().resolve()
         p_resolved.relative_to(AGENT_WORKSPACE)
-        # Atomic write: O_NOFOLLOW prevents symlink race between validate and open
+        # Atomic write via tempfile + os.replace
         data = content.encode("utf-8")
-        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW
-        fd = os.open(str(p), flags, 0o644)
-        try:
-            os.write(fd, data)
-        finally:
-            os.close(fd)
+        _atomic_write(p, data)
         return {
             "path": str(p),
             "bytes_written": len(data),
@@ -478,7 +481,14 @@ async def _edit_file(path: str, old_text: str, new_text: str) -> dict:
     if not p.exists():
         return {"error": f"Arquivo não encontrado: {path}"}
     try:
-        original = p.read_text(errors="replace")
+        # O_NOFOLLOW previne TOCTOU entre validate e read — se o path
+        # virou symlink depois do check, open falha com ELOOP.
+        fd = os.open(str(path), os.O_RDONLY | os.O_NOFOLLOW)
+        try:
+            raw = os.read(fd, 10_000_000)  # 10MB cap
+            original = raw.decode("utf-8", errors="replace")
+        finally:
+            os.close(fd)
         if old_text not in original:
             return {"error": "Texto não encontrado no arquivo. Verifique indentação e espaços."}
         count = original.count(old_text)
@@ -486,14 +496,9 @@ async def _edit_file(path: str, old_text: str, new_text: str) -> dict:
         # Re-validate before write (defense against TOCTOU race)
         p_resolved = Path(path).expanduser().resolve()
         p_resolved.relative_to(AGENT_WORKSPACE)
-        # Atomic write with O_NOFOLLOW to prevent symlink race
+        # Atomic write via tempfile + os.replace
         data = updated.encode("utf-8")
-        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW
-        fd = os.open(str(p), flags, 0o644)
-        try:
-            os.write(fd, data)
-        finally:
-            os.close(fd)
+        _atomic_write(p, data)
         return {
             "path": str(p),
             "occurrences_found": count,
@@ -533,7 +538,7 @@ register_tool(
             "required": ["path"],
         },
         safety=ToolSafety.SAFE,
-        category="filesystem",
+        category=ToolCategory.FILESYSTEM,
         executor=_read_file,
     )
 )
@@ -554,7 +559,7 @@ register_tool(
             "required": [],
         },
         safety=ToolSafety.SAFE,
-        category="filesystem",
+        category=ToolCategory.FILESYSTEM,
         executor=_list_directory,
     )
 )
@@ -581,7 +586,7 @@ register_tool(
             "required": ["pattern"],
         },
         safety=ToolSafety.SAFE,
-        category="filesystem",
+        category=ToolCategory.FILESYSTEM,
         executor=_search_files,
     )
 )
@@ -603,7 +608,7 @@ register_tool(
             "required": ["pattern"],
         },
         safety=ToolSafety.SAFE,
-        category="filesystem",
+        category=ToolCategory.FILESYSTEM,
         executor=_glob_files,
     )
 )
@@ -624,7 +629,7 @@ register_tool(
             "required": ["path", "content"],
         },
         safety=ToolSafety.DESTRUCTIVE,
-        category="filesystem",
+        category=ToolCategory.FILESYSTEM,
         executor=_write_file,
     )
 )
@@ -649,7 +654,7 @@ register_tool(
             "required": ["path", "old_text", "new_text"],
         },
         safety=ToolSafety.DESTRUCTIVE,
-        category="filesystem",
+        category=ToolCategory.FILESYSTEM,
         executor=_edit_file,
     )
 )

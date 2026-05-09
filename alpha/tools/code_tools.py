@@ -14,7 +14,8 @@ import re
 import sys
 import tempfile
 
-from . import ToolDefinition, ToolSafety, register_tool
+from . import ToolCategory, ToolDefinition, ToolSafety, register_tool
+from ..config import TOOL_TIMEOUTS, TOOL_TIMEOUT_CAPS
 from .safe_env import get_safe_env
 
 logger = logging.getLogger(__name__)
@@ -43,7 +44,7 @@ URL_PREFIXES = ("http://", "https://", "git+", "svn+", "ftp://", "/", "\\")
 _BLOCKED_MODULES = frozenset({
     # User-facing OS / process / FS modules.
     "os", "subprocess", "shutil", "sys", "importlib", "ctypes", "_ctypes",
-    "signal", "pathlib", "code", "multiprocessing", "webbrowser",
+    "signal", "code", "multiprocessing", "webbrowser",
     # Low-level OS interfaces — CPython implementation detail of `os` and
     # `subprocess`. Same capabilities, different name (#009 V1.2).
     "posix", "nt", "_posixsubprocess", "_winapi", "msvcrt",
@@ -179,7 +180,6 @@ def _format_block(snippet: str) -> str:
 
 async def _execute_python(code: str, timeout: int | None = None) -> dict:
     """Execute Python code in a subprocess with timeout."""
-    from ..config import TOOL_TIMEOUT_CAPS, TOOL_TIMEOUTS
     if timeout is None:
         timeout = TOOL_TIMEOUTS.get("code", 60)
     timeout = min(timeout, TOOL_TIMEOUT_CAPS.get("code", 60))
@@ -288,6 +288,13 @@ async def _install_package(package: str) -> dict:
         proc.kill()
         await proc.wait()
         return {"error": "Instalação excedeu timeout de 120s"}
+    except asyncio.CancelledError:
+        proc.kill()
+        try:
+            await proc.wait()
+        except Exception:
+            pass
+        raise
 
     return {
         "exit_code": proc.returncode,
@@ -316,7 +323,7 @@ register_tool(
             "required": ["code"],
         },
         safety=ToolSafety.DESTRUCTIVE,
-        category="code",
+        category=ToolCategory.CODE,
         executor=_execute_python,
     )
 )
@@ -336,7 +343,7 @@ register_tool(
             "required": ["package"],
         },
         safety=ToolSafety.DESTRUCTIVE,
-        category="code",
+        category=ToolCategory.CODE,
         executor=_install_package,
     )
 )

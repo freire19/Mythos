@@ -277,8 +277,7 @@ def save_session(
     # Cleanup probabilistico (#D025): rodar `_cleanup_old_sessions` em
     # toda chamada faz glob + sorted desnecessario. ~10% das chamadas
     # mantem o tamanho do diretorio bounded sem custo per-save.
-    import secrets as _secrets
-    if _secrets.randbelow(10) == 0:
+    if secrets.randbelow(10) == 0:
         try:
             _cleanup_old_sessions()
         except OSError as e:
@@ -305,7 +304,7 @@ def load_session(session_id: str) -> list[dict] | None:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
         return data.get("messages", [])
-    except (json.JSONDecodeError, KeyError) as e:
+    except (json.JSONDecodeError, KeyError, OSError, UnicodeDecodeError) as e:
         logger.warning(f"Failed to load session {session_id}: {e}")
         return None
 
@@ -327,7 +326,7 @@ def load_session_summary(session_id: str) -> str | None:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
         return data.get("summary")
-    except (json.JSONDecodeError, KeyError) as e:
+    except (json.JSONDecodeError, KeyError, OSError, UnicodeDecodeError) as e:
         logger.warning(f"Failed to load session summary {session_id}: {e}")
         return None
 

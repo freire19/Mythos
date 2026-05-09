@@ -11,7 +11,8 @@ import logging
 import shutil
 import subprocess
 
-from . import ToolDefinition, ToolSafety, register_tool
+from .._subprocess import run_subprocess
+from . import ToolCategory, ToolDefinition, ToolSafety, register_tool
 
 logger = logging.getLogger(__name__)
 
@@ -46,24 +47,18 @@ async def _clipboard_read() -> dict:
         return {"error": f"Comando '{cmd[0]}' não encontrado. Instale: {cmd[0]}"}
 
     try:
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=5)
+        result = await run_subprocess(cmd, timeout=5)
+        if result.timed_out:
+            return {"error": "Timeout ao ler clipboard"}
+        if result.returncode != 0:
+            return {"error": f"Falha ao ler clipboard: {result.stderr.decode(errors='replace')}"}
 
-        if proc.returncode != 0:
-            return {"error": f"Falha ao ler clipboard: {stderr.decode(errors='replace')}"}
-
-        content = stdout.decode(errors="replace")
+        content = result.stdout.decode(errors="replace")
         return {
             "content": content[:10000],
             "length": len(content),
             "truncated": len(content) > 10000,
         }
-    except TimeoutError:
-        return {"error": "Timeout ao ler clipboard"}
     except Exception as e:
         return {"error": str(e)}
 
@@ -83,19 +78,13 @@ async def _clipboard_write(content: str) -> dict:
         return {"error": f"Comando '{cmd[0]}' não encontrado. Instale: {cmd[0]}"}
 
     try:
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdin=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        _, stderr = await asyncio.wait_for(proc.communicate(input=content.encode()), timeout=5)
-
-        if proc.returncode != 0:
-            return {"error": f"Falha ao escrever no clipboard: {stderr.decode(errors='replace')}"}
+        result = await run_subprocess(cmd, timeout=5, stdin_input=content.encode())
+        if result.timed_out:
+            return {"error": "Timeout ao escrever no clipboard"}
+        if result.returncode != 0:
+            return {"error": f"Falha ao escrever no clipboard: {result.stderr.decode(errors='replace')}"}
 
         return {"success": True, "length": len(content)}
-    except TimeoutError:
-        return {"error": "Timeout ao escrever no clipboard"}
     except Exception as e:
         return {"error": str(e)}
 
@@ -188,6 +177,13 @@ async def _screenshot(region: str = "full") -> dict:
                     "region": region,
                     "tool_used": tool_name,
                 }
+        except asyncio.CancelledError:
+            proc.kill()
+            try:
+                await proc.wait()
+            except Exception:
+                pass
+            raise
         except (OSError, subprocess.CalledProcessError) as e:
             logger.debug("Screenshot tool %s failed: %s", tool_name, e)
             continue
@@ -233,6 +229,13 @@ async def _notify_user(
                 return {"error": f"Falha ao enviar notificação: {stderr.decode(errors='replace')}"}
 
             return {"sent": True, "channel": "desktop", "urgency": urgency}
+        except asyncio.CancelledError:
+            proc.kill()
+            try:
+                await proc.wait()
+            except Exception:
+                pass
+            raise
         except Exception as e:
             return {"error": str(e)}
 
@@ -260,7 +263,7 @@ register_tool(
         # Combinado com http_request/web_search auto-aprovados, leitura
         # silenciosa permite exfil. Promovido em DEEP_SECURITY #D103.
         safety=ToolSafety.DESTRUCTIVE,
-        category="system",
+        category=ToolCategory.SYSTEM,
         executor=_clipboard_read,
     )
 )
@@ -280,7 +283,7 @@ register_tool(
             "required": ["content"],
         },
         safety=ToolSafety.DESTRUCTIVE,
-        category="system",
+        category=ToolCategory.SYSTEM,
         executor=_clipboard_write,
     )
 )
@@ -301,7 +304,7 @@ register_tool(
             },
         },
         safety=ToolSafety.SAFE,
-        category="system",
+        category=ToolCategory.SYSTEM,
         executor=_screenshot,
     )
 )
@@ -345,7 +348,7 @@ register_tool(
             "required": ["message"],
         },
         safety=ToolSafety.SAFE,
-        category="system",
+        category=ToolCategory.SYSTEM,
         executor=_notify_user,
     )
 )

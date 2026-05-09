@@ -352,7 +352,7 @@ async def compress_context(
                 if event.get("content"):
                     summary = event["content"]
     except Exception as e:
-        logger.warning(f"Compression LLM call raised {type(e).__name__}: {e}")
+        logger.exception(f"Compression LLM call raised {type(e).__name__}: {e}")
         summary = ""
 
     if not summary:

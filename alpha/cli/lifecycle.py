@@ -110,6 +110,11 @@ def install_lifecycle_hooks() -> None:
     global _INSTALLED
     if _INSTALLED:
         return
+    # Indicator first so its scroll-region tear-down runs before other
+    # output (browser/MCP shutdown messages) — otherwise terminal stays
+    # clipped when the agent crashes mid-stream.
+    from alpha.display import cleanup_indicator
+    atexit.register(cleanup_indicator)
     atexit.register(_fire_on_stop)
     atexit.register(_shutdown_browser_session)
     atexit.register(_shutdown_mcp_servers)
