@@ -20,6 +20,7 @@ from ._delegate_policy import (
     SUBAGENT_DESTRUCTIVE_BLOCKLIST,
     _auto_approve_no_callback,
     _load_subagent_prompt,
+    _strip_control_chars,
 )
 from ._delegate_scratch import _create_scratch_dir, _new_agent_id, _snapshot_dir
 from .workspace import AGENT_WORKSPACE
@@ -80,8 +81,8 @@ async def _run_subagent(
         "You may read anything under the workspace using relative paths.\n\n"
     )
     if context:
-        task_content += f"Context: {context}\n\n"
-    task_content += task
+        task_content += f"Context: {_strip_control_chars(context)}\n\n"
+    task_content += _strip_control_chars(task)
 
     messages = [
         {"role": "system", "content": system_prompt},
@@ -187,13 +188,14 @@ async def _delegate_task(
     context: str = "",
     tools_filter: str = "",
     provider: str = "",
+    parent_workspace: str | None = None,
 ) -> dict:
     """Spawn a single sub-agent to handle a task."""
     if not FEATURES.get("multi_agent_enabled"):
         return {"error": "Multi-agent system is disabled. Set FEATURES['multi_agent_enabled']=True."}
     if not FEATURES.get("delegate_tool_enabled"):
         return {"error": "Delegate tool is disabled. Enable 'delegate_tool_enabled' in config."}
-    return await _run_subagent(task, context, tools_filter, provider)
+    return await _run_subagent(task, context, tools_filter, provider, parent_workspace=parent_workspace)
 
 
 # ── Parallel delegation ───────────────────────────────────────
@@ -203,6 +205,7 @@ async def _delegate_parallel(
     context: str = "",
     tools_filter: str = "",
     provider: str = "",
+    parent_workspace: str | None = None,
 ) -> dict:
     """Spawn multiple sub-agents in parallel, each handling one task."""
     if not FEATURES.get("multi_agent_enabled"):
@@ -236,7 +239,7 @@ async def _delegate_parallel(
             logger.info(f"Sub-agent #{idx + 1} starting: {task_desc[:60]}")
             result = await _run_subagent(
                 task_desc, context, tools_filter, provider,
-                label=f"#{idx + 1}",
+                label=f"#{idx + 1}", parent_workspace=parent_workspace,
             )
             result["task_index"] = idx
             result["task"] = task_desc

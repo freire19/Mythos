@@ -18,7 +18,7 @@ from ..config import TOOL_TIMEOUTS, TOOL_TIMEOUT_CAPS
 from .path_helpers import _validate_path_no_symlink
 from .safe_env import get_safe_env
 from ..security import HARD_BLOCKED_RE, validate_pipeline
-from .workspace import AGENT_WORKSPACE
+from .workspace import AGENT_WORKSPACE, assert_within_workspace
 
 logger = logging.getLogger(__name__)
 
@@ -37,10 +37,9 @@ def _validate_redirect_paths(pipeline: str) -> str | None:
         if target.startswith("&"):
             continue  # &1, &2 sao FD references, nao paths
         target_path = Path(target).expanduser().resolve()
-        try:
-            target_path.relative_to(AGENT_WORKSPACE)
-        except ValueError:
-            return f"Redirect para '{target}' fora do workspace permitido ({AGENT_WORKSPACE})"
+        err = assert_within_workspace(target_path)
+        if err:
+            return err
     return None
 
 
@@ -145,13 +144,9 @@ def _open_redirect_files(redirects: dict[str, str]) -> dict:
                     # (sem touch FS), evitando bypass `cmd > ../../etc/passwd`.
                     import os.path as _osp
                     norm = Path(_osp.normpath(str(raw)))
-                    try:
-                        norm.relative_to(AGENT_WORKSPACE)
-                    except ValueError:
-                        raise PermissionError(
-                            f"Redirect '{target}' fora do workspace "
-                            f"({AGENT_WORKSPACE})"
-                        )
+                    err = assert_within_workspace(norm)
+                    if err:
+                        raise PermissionError(err)
                     # Walk parents existentes — qualquer symlink no caminho
                     # ate a raiz seria explorado pelo open.
                     cur = norm.parent
@@ -326,10 +321,9 @@ async def _execute_pipeline(pipeline: str, cwd: str = None, timeout: int | None 
     # Validate cwd
     if cwd:
         cwd_path = Path(cwd).expanduser().resolve()
-        try:
-            cwd_path.relative_to(AGENT_WORKSPACE)
-        except ValueError:
-            return {"error": f"cwd fora do workspace permitido ({AGENT_WORKSPACE})"}
+        err = assert_within_workspace(cwd_path)
+        if err:
+            return {"error": err}
         cwd = str(cwd_path)
     else:
         cwd = str(AGENT_WORKSPACE)

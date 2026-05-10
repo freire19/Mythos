@@ -16,7 +16,7 @@ from . import ToolCategory, ToolDefinition, ToolSafety, register_tool
 from .._subprocess import run_subprocess
 from ..config import TOOL_TIMEOUTS
 from .safe_env import get_safe_env
-from .workspace import AGENT_WORKSPACE
+from .workspace import AGENT_WORKSPACE, assert_within_workspace
 
 # #D006: pre-compilada no module level. Antes era recompilada em cada
 # `_sanitize_git_args` (3-5 chamadas por tool call de log/show/diff/push/etc).
@@ -44,6 +44,7 @@ _ALLOWED_GIT_FLAGS = {
     "show": {"--stat", "--no-color", "--format", "--pretty"},
     "push": {"--set-upstream", "-u", "--tags"},
     "reset": {"--soft", "--mixed"},  # --hard requer aprovação via _needs_approval
+    "tag_create": {"-a", "--annotate", "-m", "--message"},
 }
 
 # Flags globalmente bloqueadas (escape do workspace / configuração)
@@ -224,10 +225,9 @@ async def _git_operation(
     # Resolve repo path
     if path:
         repo_path = Path(path).expanduser().resolve()
-        try:
-            repo_path.relative_to(AGENT_WORKSPACE)
-        except ValueError:
-            return {"error": f"Path fora do workspace permitido ({AGENT_WORKSPACE})"}
+        err = assert_within_workspace(repo_path)
+        if err:
+            return {"error": err}
         cwd = str(repo_path)
     else:
         cwd = str(AGENT_WORKSPACE)

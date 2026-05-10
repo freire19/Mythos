@@ -258,7 +258,16 @@ async def run_agent(
 
             # Force-text path nao pode sumir com erro do LLM em silencio:
             # o usuario veria reply vazio sem motivo. Propagar.
-            if forced_final and forced_final.get("error"):
+            # #DL031: se o LLM nao retornar nenhum evento final (provider
+            # down, conexao caiu), forced_final fica None e o codigo caia
+            # em done silencioso com reply parcial.
+            if forced_final is None:
+                yield {
+                    "type": "error",
+                    "message": "Loop detection forced-text response: no final event from LLM",
+                }
+                return
+            if forced_final.get("error"):
                 yield {
                     "type": "error",
                     "message": (

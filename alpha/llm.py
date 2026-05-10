@@ -181,6 +181,14 @@ def _recover_tool_call_from_content(content: str) -> dict | None:
     if not isinstance(name, str) or not name or args is None:
         return None
 
+    # #DL028: validate against tool registry — models (especially small
+    # Ollama-served ones) often hallucinate non-existent tool names.
+    # Recovery of a phantom tool wastes 1 LLM turn + tokens.
+    from .tools import get_tool as _get_registered_tool
+    if _get_registered_tool(name) is None:
+        logger.debug("Recovery skipped — tool '%s' not registered", name)
+        return None
+
     if isinstance(args, dict):
         args_str = json.dumps(args, ensure_ascii=False)
     elif isinstance(args, str):

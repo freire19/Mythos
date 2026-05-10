@@ -53,7 +53,6 @@ def build_assistant_tool_message(
     """
     msg: dict = {
         "role": "assistant",
-        "content": content or None,
         "tool_calls": [
             {
                 "id": tc["id"],
@@ -66,6 +65,8 @@ def build_assistant_tool_message(
             for tc in tool_calls
         ],
     }
+    if content:
+        msg["content"] = content
     if reasoning_content:
         msg["reasoning_content"] = reasoning_content
     return msg
@@ -165,11 +166,19 @@ def _record_result(tc: dict, tool_name: str, result: dict, messages: list[dict])
     _append_tool_msg(messages, tc["id"], result, tool_name)
 
 
-async def _execute_single_tool(tool_def, tool_name: str, args: dict) -> dict:
-    """Execute a single tool with timeout. Returns result dict."""
+async def _execute_single_tool(tool_def, tool_name: str, args: dict, *, workspace: str | None = None) -> dict:
+    """Execute a single tool with timeout. Returns result dict.
+
+    workspace is injected for tools that need it (delegate_task,
+    delegate_parallel — they must know the parent's workspace to
+    confine sub-agents to the same boundary, #DL026).
+    """
     tool_timeout = (
         _SLOW_TOOL_TIMEOUT if tool_name in _SLOW_TOOLS else TOOL_EXECUTION_TIMEOUT
     )
+    # Inject workspace for delegate tools (#DL026)
+    if workspace and tool_name in ("delegate_task", "delegate_parallel"):
+        args = {**args, "parent_workspace": workspace}
     try:
         result = await asyncio.wait_for(
             tool_def.executor(**args),
@@ -408,7 +417,7 @@ async def execute_tool_calls(
 
     async def _run(item):
         tc, tool_name, args, tool_def = item
-        result = await _execute_single_tool(tool_def, tool_name, args)
+        result = await _execute_single_tool(tool_def, tool_name, args, workspace=workspace)
         return tc, tool_name, args, result
 
     results = await asyncio.gather(*[_run(item) for item in runnable], return_exceptions=True)
@@ -479,7 +488,7 @@ async def _execute_sequential(
             yield _record_skip(tc, tool_name, result, messages)
             continue
 
-        result = await _execute_single_tool(tool_def, tool_name, args)
+        result = await _execute_single_tool(tool_def, tool_name, args, workspace=workspace)
         await _fire_post_tool(tool_name, args, result, workspace)
         yield {"type": "tool_result", "name": tool_name, "result": result}
         _record_result(tc, tool_name, result, messages)

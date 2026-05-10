@@ -9,9 +9,9 @@ from dotenv import load_dotenv
 
 # Load .env from project root (not CWD) so `alpha` works from any directory
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
-# .env do projeto vence o env do shell — evita "atualizei a chave mas
-# a sessao ainda usa a antiga" quando o usuario esquece de re-exportar.
-load_dotenv(_PROJECT_ROOT / ".env", override=True)
+# .env preenche apenas variáveis NÃO exportadas pelo shell (12-factor).
+# override=False evita que o .env sobrescreva chaves inline do usuário (#DL034).
+load_dotenv(_PROJECT_ROOT / ".env", override=False)
 
 # ─── Defaults ───
 
@@ -64,6 +64,7 @@ _PROVIDERS = {
         "api_key_env": "DEEPSEEK_API_KEY",
         "model_env": "DEEPSEEK_MODEL",
         "default_model": "deepseek-v4-pro",
+        "temperature": 0.5,
         # Vision: disponivel APENAS no chat web (chat.deepseek.com) como
         # beta fechado (Image Recognition Mode, Apr 2026). A API REST
         # NAO aceita image_url blocks — retorna HTTP 400.
@@ -74,6 +75,7 @@ _PROVIDERS = {
         "api_key_env": "OPENAI_API_KEY",
         "model_env": "OPENAI_MODEL",
         "default_model": "gpt-4o",
+        "temperature": 0.5,
         "supports_vision": True,
     },
     "anthropic": {
@@ -81,6 +83,7 @@ _PROVIDERS = {
         "api_key_env": "ANTHROPIC_API_KEY",
         "model_env": "ANTHROPIC_MODEL",
         "default_model": "claude-sonnet-4-6",
+        "temperature": 0.5,
         "api_format": "anthropic",
         "supports_vision": True,
     },
@@ -92,6 +95,7 @@ _PROVIDERS = {
         "api_key_env": "GEMINI_API_KEY",
         "model_env": "GEMINI_MODEL",
         "default_model": "gemini-2.5-flash",  # melhor custo-beneficio com visao
+        "temperature": 0.5,
         "supports_vision": True,
         "vision_format": "openai",
     },
@@ -100,6 +104,7 @@ _PROVIDERS = {
         "api_key_env": "GROK_API_KEY",
         "model_env": "GROK_MODEL",
         "default_model": "grok-4-1-fast-reasoning",
+        "temperature": 0.3,  # reasoning models benefit from lower temp
         "supports_vision": False,
     },
     "ollama": {
@@ -107,6 +112,7 @@ _PROVIDERS = {
         "api_key_env": None,
         "model_env": "OLLAMA_MODEL",
         "default_model": "qwen-heavy-abliterated:32b",
+        "temperature": 0.2,
         "low_temperature": True,
         "supports_vision": False,
     },
@@ -115,6 +121,7 @@ _PROVIDERS = {
         "api_key_env": None,
         "model_env": "OLLAMA_GEMMA_12B_MODEL",
         "default_model": "gemma3:12b",
+        "temperature": 0.2,
         "supports_tools": False,
         "low_temperature": True,
         "supports_vision": False,
@@ -124,6 +131,7 @@ _PROVIDERS = {
         "api_key_env": None,
         "model_env": "OLLAMA_GEMMA_27B_MODEL",
         "default_model": "gemma3:27b",
+        "temperature": 0.2,
         "supports_tools": False,
         "low_temperature": True,
         "supports_vision": False,

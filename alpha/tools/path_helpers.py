@@ -8,7 +8,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from .workspace import AGENT_WORKSPACE
+from .workspace import AGENT_WORKSPACE, assert_within_workspace
 
 logger = logging.getLogger(__name__)
 
@@ -183,12 +183,9 @@ def _validate_path(path: str) -> Path:
                 p = Path(fuzzy).resolve()
 
     # Check that resolved path is within workspace
-    try:
-        p.relative_to(AGENT_WORKSPACE)
-    except ValueError:
-        raise PermissionError(
-            f"Acesso negado: caminho fora do workspace permitido ({AGENT_WORKSPACE})"
-        )
+    err = assert_within_workspace(p)
+    if err:
+        raise PermissionError(err)
 
     return p
 
