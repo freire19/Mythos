@@ -4,6 +4,12 @@ Uses ANSI scroll regions (DECSTBM) to reserve the bottom terminal rows
 for a persistent spinner, so streaming output flows above without erasing it.
 """
 
+import asyncio
+import os
+import shutil
+import sys
+import time
+
 from .core import C, c, supports_color, _TODO_STATUS_GLYPH
 
 # ─── Thinking indicator (spinner) ───
