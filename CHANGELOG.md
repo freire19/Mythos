@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.3.1](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.3.0...alpha-code-v1.3.1) (2026-05-11)
+
+
+### Bug Fixes
+
+* **agent:** import _call_signature, _result_preview, _CYCLE_WINDOW from .loop ([38c73a8](https://github.com/freire19/Alpha_Code/commit/38c73a8bef75023826d21602006c6bfce1162abb))
+
 ## [1.3.0](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.2.3...alpha-code-v1.3.0) (2026-05-11)
 
 
