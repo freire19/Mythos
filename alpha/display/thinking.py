@@ -139,14 +139,16 @@ class ThinkingIndicator:
         self._panel_capacity = self._desired_panel_rows(rows)
         reserved = self._total_reserved()
         scroll_bottom = rows - reserved
-        # Push blank lines first so existing cursor content scrolls up
-        # past the soon-to-be-reserved rows, then set the scroll region
-        # and place the cursor at the last scrollable row so subsequent
-        # prints flow naturally.
+        # Save the cursor (DECSC), push blank lines so content above
+        # scrolls up past the soon-to-be-reserved rows, set the scroll
+        # region, then restore the cursor (DECRC). Restoring keeps
+        # output flowing right below the prompt instead of jumping to
+        # the bottom of an otherwise-empty screen.
         out = (
-            "\n" * reserved
+            "\0337"
+            + "\n" * reserved
             + f"\033[1;{scroll_bottom}r"
-            + f"\033[{scroll_bottom};1H"
+            + "\0338"
         )
         try:
             sys.stdout.write(out)
