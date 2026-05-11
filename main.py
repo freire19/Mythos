@@ -36,7 +36,6 @@ from alpha.display import (
     ThinkingIndicator,
     c,
     format_context_indicator,
-    label_for_tool,
     print_banner,
     print_context_compressed,
     print_context_warning,
@@ -46,6 +45,7 @@ from alpha.display import (
     print_tool_call,
     print_tool_result,
 )
+from alpha.display.core import live_label_for_tool
 from alpha.history import generate_session_id, save_session
 from alpha.cli.commands import DispatchResult, ReplContext, dispatch
 from alpha.cli.lifecycle import install_lifecycle_hooks
@@ -100,7 +100,7 @@ async def _run_once(messages, user_message, provider, temperature, get_tool_fn, 
                 tc_args = event.get("args", {}) or {}
                 print_tool_call(event["name"], tc_args, event.get("safety", "safe"))
                 pending_args[event["name"]] = tc_args if isinstance(tc_args, dict) else {}
-                indicator.start(label_for_tool(event["name"]))
+                indicator.start(live_label_for_tool(event["name"], tc_args))
 
             elif event_type == "tool_result":
                 tr_args = pending_args.pop(event["name"], None)

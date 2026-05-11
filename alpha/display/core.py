@@ -857,3 +857,24 @@ def label_for_tool(name: str) -> str:
     return "Working"
 
 
+_LIVE_LABEL_MAX_VALUE = 40
+
+
+def live_label_for_tool(name: str, args: dict) -> str:
+    """Build the spinner label as `verb target` so the user can see WHICH
+    file / command / task is in flight, not just the verb category.
+
+    Falls back to the bare verb when args has no obviously informative key
+    (avoids "Working {}" garbage)."""
+    verb = label_for_tool(name)
+    if not isinstance(args, dict) or not args:
+        return verb
+    for key in ("path", "command", "query", "action", "pattern", "file", "task", "tasks"):
+        if key in args:
+            val = str(args[key]).replace("\n", " ")
+            if len(val) > _LIVE_LABEL_MAX_VALUE:
+                val = val[:_LIVE_LABEL_MAX_VALUE - 1] + "…"
+            return f"{verb} {val}"
+    return verb
+
+
