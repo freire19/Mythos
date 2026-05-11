@@ -9,8 +9,18 @@ Mergulho profundo em UMA categoria. Enquanto audit-2-scan faz cobertura ampla (6
 
 ## Etapa 1 — Identificar categoria e contexto
 
-1. Identifique a categoria. Se nao especificada, pergunte. Validas:
-   - `security` | `logic` | `resilience` | `performance` | `maintainability` | `bugs`
+1. Identifique a categoria. Se nao especificada, **chame a tool `ask_choice`** com:
+   - `question`: "Qual categoria você quer auditar profundamente?"
+   - `options`: lista exatamente nesta ordem —
+     - `security — Vulnerabilidades, secrets, injection, auth`
+     - `logic — Erros de lógica, edge cases, race conditions`
+     - `resilience — Tratamento de erros, timeouts, retry, graceful degradation`
+     - `performance — Gargalos, uso de memória, I/O blocking, async`
+     - `maintainability — Código morto, duplicação, acoplamento, nomes`
+     - `bugs — Bugs funcionais, comportamento incorreto`
+
+   Use `chosen_value.split(' — ')[0]` para extrair a chave (`security`, `logic`, etc).
+   **Nunca** renderize a lista como tabela markdown — vem bagunçada no terminal.
 
 2. Encontre o AUDIT mais recente em `docs/audits/current/`. Se nao existir, tente `docs/`, `/audits/`. Nenhum: "Rode audit-1-setup + audit-2-scan + audit-4-report primeiro." e pare.
 
