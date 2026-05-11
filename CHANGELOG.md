@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.3.0](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.2.3...alpha-code-v1.3.0) (2026-05-11)
+
+
+### Features
+
+* **display:** Claude-Code-style tool call/result/subagent rendering ([b7d342d](https://github.com/freire19/Alpha_Code/commit/b7d342ded53857b0661f93dc2e178dbb5cd79c2c))
+
 ## [1.2.3](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.2.2...alpha-code-v1.2.3) (2026-05-11)
 
 
