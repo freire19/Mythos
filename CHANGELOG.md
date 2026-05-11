@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.6.0](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.5.3...alpha-code-v1.6.0) (2026-05-11)
+
+
+### Features
+
+* **agent,display,tools:** four runtime UX fixes from session screenshot ([940354d](https://github.com/freire19/Alpha_Code/commit/940354d3589648ffd0d89c83ba9f26b1dc81c61b))
+
+
+### Bug Fixes
+
+* **tests:** unbreak 12 post-refactor test failures ([710e8aa](https://github.com/freire19/Alpha_Code/commit/710e8aa2dbbba529cfbe65a69d13d4c53a5a6077))
+
 ## [1.5.3](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.5.2...alpha-code-v1.5.3) (2026-05-11)
 
 
