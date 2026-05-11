@@ -132,6 +132,16 @@ async def _run_once(messages, user_message, provider, temperature, get_tool_fn, 
                     elif used_inline_spinner:
                         sys.stdout.write(reply)
                         sys.stdout.flush()
+                elif not full_reply:
+                    # Silent end-of-turn: no streamed text and no done reply.
+                    # Usually means the LLM treated the last tool_call as the
+                    # work for this turn (todo_write check-off, etc.). Without
+                    # a marker the user sees the bare prompt and thinks the
+                    # agent froze, so they retype the instruction.
+                    print(
+                        f"  {c(C.GRAY_DARK, '·')} "
+                        f"{c(C.GRAY, '(turno encerrado — envie próxima instrução)')}"
+                    )
 
             elif event_type == "error":
                 indicator.stop()
