@@ -409,6 +409,16 @@ _INPUT_STYLE = Style.from_dict({
     # + neutral fg so the embedded ANSI escapes (from _bottom_toolbar) win.
     "bottom-toolbar": "bg:#1a1a1a fg:#cccccc noreverse",
     "bottom-toolbar.text": "bg:#1a1a1a fg:#cccccc noreverse",
+    # Slash-autocomplete menu — match Claude Code's look: terminal-dark bg,
+    # discreet text colors, subtle selection highlight (no bright gray bar).
+    "completion-menu": "bg:#0c0c0c",
+    "completion-menu.completion": "bg:#0c0c0c fg:#d0d0d0",
+    "completion-menu.completion.current": "bg:#2a2a2a fg:#ffffff bold",
+    "completion-menu.meta.completion": "bg:#0c0c0c fg:#808080",
+    "completion-menu.meta.completion.current": "bg:#2a2a2a fg:#cccccc",
+    # Scrollbar of the autocomplete popup — subdue it.
+    "scrollbar.background": "bg:#0c0c0c",
+    "scrollbar.button": "bg:#3a3a3a",
 })
 
 
