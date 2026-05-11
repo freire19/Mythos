@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.5.1](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.5.0...alpha-code-v1.5.1) (2026-05-11)
+
+
+### Refactoring
+
+* simplify findings — dedupe headers, kill dead stream path ([54afcfc](https://github.com/freire19/Alpha_Code/commit/54afcfcbf0a21c2e1256fd9543766b5c994cd77f))
+
 ## [1.5.0](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.4.0...alpha-code-v1.5.0) (2026-05-11)
 
 
