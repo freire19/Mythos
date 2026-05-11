@@ -1,6 +1,7 @@
 """Shell execution tool for ALPHA agent."""
 
 import asyncio
+import shlex
 from pathlib import Path
 
 from .._platform import IS_WINDOWS

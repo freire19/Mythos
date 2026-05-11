@@ -6,8 +6,14 @@ Supports single delegation (delegate_task) and parallel delegation
 Apos #082 split: helpers extraidos para _delegate_core.py.
 """
 
+import asyncio
+import json
+import logging
+
 from . import ToolCategory, ToolDefinition, ToolSafety, register_tool
+from ..config import FEATURES
 from ..display.core import _tool_args_preview
+from .workspace import AGENT_WORKSPACE
 
 from ._delegate_core import (
     SUBAGENT_DESTRUCTIVE_BLOCKLIST,
@@ -17,7 +23,10 @@ from ._delegate_core import (
     _new_agent_id,
     _create_scratch_dir,
     _snapshot_dir,
+    _strip_control_chars,
 )
+
+logger = logging.getLogger(__name__)
 
 
 
@@ -44,7 +53,6 @@ async def _run_subagent(
     from ..agent import run_agent
     from ..config import (
         DEFAULT_PROVIDER,
-        FEATURES as feat,
         LIMITS,
         get_subagent_allow,
         get_subagent_extra_block,

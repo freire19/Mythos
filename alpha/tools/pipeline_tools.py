@@ -10,6 +10,7 @@ import asyncio
 import logging
 import os
 import re
+import shlex
 from pathlib import Path
 
 from . import ToolCategory, ToolDefinition, ToolSafety, register_tool
