@@ -267,7 +267,10 @@ def print_tool_result(name: str, result: dict, args: dict | None = None) -> None
         # print it inline so the user still sees the checklist.
         if name == "todo_write" and isinstance(result.get("todos"), list):
             todos = result["todos"]
-            ind = _active_indicator
+            # Lazy import — thinking imports core at top, so importing
+            # thinking at module level here would create a cycle.
+            from .thinking import get_active_indicator, set_pinned_todos
+            ind = get_active_indicator()
             if ind is not None and ind._scroll_active:
                 set_pinned_todos(todos)
             else:
@@ -690,6 +693,16 @@ def _format_tokens(n: int) -> str:
     if n < 1_000_000:
         return f"{n / 1000:.1f}k"
     return f"{n / 1_000_000:.1f}M"
+
+
+_HINT_PHRASES = (
+    (8, "warming up"),
+    (20, "exploring"),
+    (45, "deep in thought"),
+    (90, "iterating"),
+    (180, "almost done thinking"),
+    (360, "still going"),
+)
 
 
 def _hint_for(seconds: float) -> str:

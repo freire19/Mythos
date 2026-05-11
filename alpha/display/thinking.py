@@ -10,7 +10,16 @@ import shutil
 import sys
 import time
 
-from .core import C, c, supports_color, _TODO_STATUS_GLYPH
+from .core import (
+    C,
+    _format_duration,
+    _format_tokens,
+    _hint_for,
+    _TODO_STATUS_GLYPH,
+    c,
+    is_auto_accept,
+    supports_color,
+)
 
 # ─── Thinking indicator (spinner) ───
 
@@ -33,16 +42,6 @@ _THINK_VERBS = (
     "Cogitating",
 )
 _VERB_ROTATE_SECS = 8
-
-_HINT_PHRASES = (
-    (8, "warming up"),
-    (20, "exploring"),
-    (45, "deep in thought"),
-    (90, "iterating"),
-    (180, "almost done thinking"),
-    (360, "still going"),
-)
-
 
 class ThinkingIndicator:
     """Animated spinner that always stays on the bottom row of the terminal.
@@ -262,7 +261,7 @@ class ThinkingIndicator:
     def _build_status(self) -> str:
         """Second reserved row — accept-edits state mirror. Empty when the
         feature is off so the row stays visually quiet."""
-        if not _approve_all:
+        if not is_auto_accept():
             return ""
         cols = self._term_cols or self._detect_size()[1]
         prefix = (
