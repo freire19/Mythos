@@ -193,6 +193,30 @@ def _detect_stale_progress(
     return pairs_similar >= window - 2  # allow 1 transition
 
 
+_ERROR_KEYWORDS = (
+    "error", "denied", "blocked", "não permitida", "nao permitida",
+    "not defined", "exception", "traceback", "is not defined",
+    "permission",
+)
+_ERROR_STREAK_THRESHOLD = _LD.get("error_streak_threshold", 4)
+
+
+def _detect_error_streak(recent_results: list[str]) -> int:
+    """Count consecutive error-like results at the tail. A long streak means
+    the agent is thrashing on something that won't start working — the four
+    existing detectors miss this because each retry uses a different tool or
+    different args. Returning the streak length lets the caller decide.
+    """
+    streak = 0
+    for r in reversed(recent_results):
+        rl = r.lower()
+        if any(kw in rl for kw in _ERROR_KEYWORDS):
+            streak += 1
+        else:
+            break
+    return streak
+
+
 def _detect_loop(
     call_sigs: list[str],
     recent_calls: list[str],
@@ -206,6 +230,7 @@ def _detect_loop(
     2. Similar calls (same tool, similar args N times)
     3. A→B→A→B cycles
     4. Stale progress (results not changing)
+    5. Error streak (N consecutive tool failures — "frustration loop")
     """
     # 1. Exact repetition — Counter em vez de N x list.count() (O(N) vs O(N*M))
     counts = Counter(recent_calls)
@@ -236,6 +261,11 @@ def _detect_loop(
     # 4. Stale progress
     if _detect_stale_progress(recent_results):
         return "stale progress — tool results not changing"
+
+    # 5. Frustration loop — back-to-back tool failures
+    streak = _detect_error_streak(recent_results)
+    if streak >= _ERROR_STREAK_THRESHOLD:
+        return f"error streak: {streak} consecutive failed tool calls"
 
     return None
 

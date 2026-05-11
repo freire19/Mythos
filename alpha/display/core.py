@@ -407,7 +407,24 @@ def print_tool_result(name: str, result: dict, args: dict | None = None) -> None
         print(f"  {c(C.GRAY_DARK, '└')} {check} {c(C.GRAY, str(path))}{c(C.DIM, detail)}")
         return
 
-    output = result.get("output") or result.get("content") or result.get("result")
+    # project_overview returns a multi-key dict (project_type, project_files,
+    # listing, git, path) — the generic summary picks just `path` and hides
+    # everything useful. Render the key facts inline instead.
+    if name == "project_overview" and "project_type" in result:
+        types = ", ".join(result.get("project_type") or ["unknown"])
+        files = result.get("project_files") or []
+        lines = [f"type: {types}"]
+        if files:
+            lines.append(f"files: {', '.join(files)}")
+        _print_result_body(lines)
+        return
+
+    output = (
+        result.get("output")
+        or result.get("content")
+        or result.get("result")
+        or result.get("stdout")
+    )
     if isinstance(output, str) and output.strip():
         _print_result_body(output.strip().split("\n"))
     else:

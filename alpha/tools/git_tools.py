@@ -161,6 +161,10 @@ def _sanitize_git_args(action: str, args: str) -> tuple[list[str], str | None]:
     if allowed is not None:
         for part in parts:
             if part.startswith("-"):
+                # `--` is the standard path separator in git ("git diff -- path/").
+                # Blocking it would block any path-scoped invocation.
+                if part == "--":
+                    continue
                 # Permitir flags numéricas como -20 para log
                 if part.lstrip("-").isdigit():
                     continue
