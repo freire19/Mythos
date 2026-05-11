@@ -128,11 +128,16 @@ register_tool(
         name="ask_choice",
         description=(
             "Ask the user to pick one option from a discrete list. "
-            "Use this instead of writing a markdown table or asking the user "
-            "to type a category — the REPL renders a numbered menu and "
-            "returns the picked value as `chosen_value`. "
-            "Examples: choosing an audit category, selecting a target file, "
-            "picking a deploy environment. "
+            "**MANDATORY whenever you would otherwise write `- option1`, "
+            "`- option2` bullets, a numbered list of choices, or a markdown "
+            "table of categories and ask the user to reply with one of them.** "
+            "Those formats render as raw text in the terminal and force the "
+            "user to type back manually; this tool instead pops a numbered "
+            "menu, captures the keystroke, and returns the picked value as "
+            "`chosen_value`. "
+            "Call BEFORE printing the options — do not print them yourself. "
+            "Examples: picking an audit category, selecting a target file, "
+            "choosing a deploy environment. "
             "NOT for free-form text input — the user must pick from `options`."
         ),
         parameters={

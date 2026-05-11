@@ -9,18 +9,28 @@ Mergulho profundo em UMA categoria. Enquanto audit-2-scan faz cobertura ampla (6
 
 ## Etapa 1 — Identificar categoria e contexto
 
-1. Identifique a categoria. Se nao especificada, **chame a tool `ask_choice`** com:
-   - `question`: "Qual categoria você quer auditar profundamente?"
-   - `options`: lista exatamente nesta ordem —
-     - `security — Vulnerabilidades, secrets, injection, auth`
-     - `logic — Erros de lógica, edge cases, race conditions`
-     - `resilience — Tratamento de erros, timeouts, retry, graceful degradation`
-     - `performance — Gargalos, uso de memória, I/O blocking, async`
-     - `maintainability — Código morto, duplicação, acoplamento, nomes`
-     - `bugs — Bugs funcionais, comportamento incorreto`
+1. Identifique a categoria. Se o usuário não disse qual, **a primeira coisa que você faz é chamar a tool `ask_choice` — antes de qualquer output textual**. Use exatamente esta chamada:
 
-   Use `chosen_value.split(' — ')[0]` para extrair a chave (`security`, `logic`, etc).
-   **Nunca** renderize a lista como tabela markdown — vem bagunçada no terminal.
+   ```json
+   {
+     "name": "ask_choice",
+     "arguments": {
+       "question": "Qual categoria você quer auditar em profundidade?",
+       "options": [
+         "security — Vulnerabilidades, secrets, injeção, permissões",
+         "logic — Erros de lógica, condições incorretas, edge cases",
+         "resilience — Tratamento de erros, timeouts, retries, crash recovery",
+         "performance — Gargalos, uso de memória, I/O, concorrência",
+         "maintainability — Código morto, duplicação, acoplamento, padrões quebrados",
+         "bugs — Bugs funcionais, comportamento incorreto, regressões"
+       ]
+     }
+   }
+   ```
+
+   Quando o tool retornar, use `chosen_value.split(' — ')[0]` para extrair a chave (`security`, `logic`, etc).
+
+   **PROIBIDO**: escrever a lista de categorias como bullets markdown, tabela, ou texto livre pedindo pro usuário responder. Isso vira lixo no terminal — sempre `ask_choice`.
 
 2. Encontre o AUDIT mais recente em `docs/audits/current/`. Se nao existir, tente `docs/`, `/audits/`. Nenhum: "Rode audit-1-setup + audit-2-scan + audit-4-report primeiro." e pare.
 
