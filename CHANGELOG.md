@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.6.2](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.6.1...alpha-code-v1.6.2) (2026-05-11)
+
+
+### Bug Fixes
+
+* **repl:** print marker on silent end-of-turn ([f81a08c](https://github.com/freire19/Alpha_Code/commit/f81a08c399d64664041cdd9e34926dd879780762))
+
 ## [1.6.1](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.6.0...alpha-code-v1.6.1) (2026-05-11)
 
 
