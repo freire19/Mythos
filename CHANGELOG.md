@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.5.3](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.5.2...alpha-code-v1.5.3) (2026-05-11)
+
+
+### Bug Fixes
+
+* import symbols stranded by tool/security splits ([c1d95e1](https://github.com/freire19/Alpha_Code/commit/c1d95e13fa72ccabc3bbb64b3d5103a78d0576bf))
+
 ## [1.5.2](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.5.1...alpha-code-v1.5.2) (2026-05-11)
 
 
