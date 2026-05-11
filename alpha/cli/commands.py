@@ -159,6 +159,14 @@ def _handle_save(ctx: ReplContext, parts: list[str]) -> DispatchResult:
     return DispatchResult.CONTINUE
 
 
+def _apply_loaded_messages(ctx: ReplContext, loaded: list[dict]) -> None:
+    """Replace ctx.messages/history with loaded session content."""
+    ctx.messages[:] = [{"role": "system", "content": ctx.system_prompt}]
+    ctx.messages.extend(loaded)
+    ctx.history.clear()
+    ctx.history.extend(m for m in loaded if m["role"] in ("user", "assistant"))
+
+
 def _handle_load(ctx: ReplContext, parts: list[str]) -> DispatchResult:
     if len(parts) < 2:
         sessions = list_sessions(10)
@@ -180,10 +188,7 @@ def _handle_load(ctx: ReplContext, parts: list[str]) -> DispatchResult:
         print(c(C.RED, f"  Session not found: {parts[1]}"))
         return DispatchResult.CONTINUE
 
-    ctx.messages[:] = [{"role": "system", "content": ctx.system_prompt}]
-    ctx.messages.extend(loaded)
-    ctx.history.clear()
-    ctx.history.extend(m for m in loaded if m["role"] in ("user", "assistant"))
+    _apply_loaded_messages(ctx, loaded)
 
     # Default: new session_id so `/save` later doesn't overwrite the
     # source. `--inplace` opts into editing the original (#DL018).
@@ -204,6 +209,11 @@ def _handle_load(ctx: ReplContext, parts: list[str]) -> DispatchResult:
 
 
 def _handle_continue(ctx: ReplContext, parts: list[str]) -> DispatchResult:
+    """Resume the last session — delegates to /load with last session ID.
+
+    When a summary is available, wraps it in a context preamble instead
+    of loading all messages (avoids blowing the context window).
+    """
     last_id = get_last_session_id()
     if not last_id:
         print(c(C.GRAY, "  No previous session found."))
@@ -211,38 +221,32 @@ def _handle_continue(ctx: ReplContext, parts: list[str]) -> DispatchResult:
 
     summary = load_session_summary(last_id)
     if not summary:
-        loaded = load_session(last_id)
-        if loaded is None:
-            print(c(C.RED, f"  Failed to load session: {last_id}"))
-            return DispatchResult.CONTINUE
-        ctx.messages[:] = [{"role": "system", "content": ctx.system_prompt}]
-        ctx.messages.extend(loaded)
-        ctx.history.clear()
-        ctx.history.extend(m for m in loaded if m["role"] in ("user", "assistant"))
-        print(f"  {c(C.GREEN, f'Resumed {len(loaded)} messages from {last_id}')}")
-    else:
-        ctx.messages[:] = [{"role": "system", "content": ctx.system_prompt}]
-        ctx.messages.append(
-            {
-                "role": "user",
-                "content": (
-                    f"[CONTEXT FROM PREVIOUS SESSION {last_id}]\n\n"
-                    f"{summary}\n\n"
-                    "[End of previous context. Continue from here.]"
-                ),
-            }
-        )
-        ctx.messages.append(
-            {
-                "role": "assistant",
-                "content": (
-                    "Understood. I have the context from our previous session. "
-                    "How would you like to continue?"
-                ),
-            }
-        )
-        ctx.history.clear()
-        print(f"  {c(C.GREEN, f'Resumed with summary from {last_id}')}")
+        # No summary available — delegate directly to /load logic.
+        return _handle_load(ctx, ["/load", last_id])
+
+    # Summary available — inject as context preamble in new session.
+    ctx.messages[:] = [{"role": "system", "content": ctx.system_prompt}]
+    ctx.messages.append(
+        {
+            "role": "user",
+            "content": (
+                f"[CONTEXT FROM PREVIOUS SESSION {last_id}]\n\n"
+                f"{summary}\n\n"
+                "[End of previous context. Continue from here.]"
+            ),
+        }
+    )
+    ctx.messages.append(
+        {
+            "role": "assistant",
+            "content": (
+                "Understood. I have the context from our previous session. "
+                "How would you like to continue?"
+            ),
+        }
+    )
+    ctx.history.clear()
+    print(f"  {c(C.GREEN, f'Resumed with summary from {last_id}')}")
     ctx.session_id = generate_session_id()
     return DispatchResult.CONTINUE
 

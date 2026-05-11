@@ -331,7 +331,7 @@ def _validate_tool_call(
 
     if tool_def is None:
         return (
-            {"error": f"Unknown tool: {tool_name}"},
+            {"error": f"Ferramenta desconhecida: {tool_name}"},
             tool_name, {}, "unknown", "unknown_tool", None,
         )
 

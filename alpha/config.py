@@ -149,7 +149,7 @@ def get_provider_config(provider: str) -> dict:
     cfg = _PROVIDERS.get(provider)
     if not cfg:
         raise RuntimeError(
-            f"Unknown provider: {provider}. Available: {list(_PROVIDERS)}"
+            f"Provider desconhecido: {provider}. Disponíveis: {list(_PROVIDERS)}"
         )
 
     base_url = cfg["base_url"]

@@ -1,6 +1,6 @@
 ---
 name: mvp-1-check
-description: Analisa um projeto existente e identifica tudo que falta para ele rodar como MVP funcional. Verifica funcionalidades core, fluxos criticos, infra, seguranca minima, estabilidade, UX e dependencias. Suporta escopo global (projeto todo) ou focado em uma camada/subprojeto especifico (ex: api, web, app, desktop, ocr) em monorepos. Use quando o usuario mencionar "mvp check", "mvp-check", "verificar mvp", "o que falta pro mvp", "mvp readiness", "checar se ta pronto", "o que falta pra rodar", "validar mvp", "mvp do <camada>", ou qualquer variacao.
+description: 'Analisa um projeto existente e identifica tudo que falta para ele rodar como MVP funcional. Verifica funcionalidades core, fluxos criticos, infra, seguranca minima, estabilidade, UX e dependencias. Suporta escopo global (projeto todo) ou focado em uma camada/subprojeto especifico (ex: api, web, app, desktop, ocr) em monorepos. Use quando o usuario mencionar "mvp check", "mvp-check", "verificar mvp", "o que falta pro mvp", "mvp readiness", "checar se ta pronto", "o que falta pra rodar", "validar mvp", "mvp do <camada>", ou qualquer variacao.'
 ---
 
 # MVP Check — Verificacao de Prontidao
