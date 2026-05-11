@@ -33,16 +33,19 @@ class C:
     ITALIC = "\033[3m"
     UNDERLINE = "\033[4m"
 
-    # Core palette (Kali-inspired: green dominant, red for danger)
-    GREEN = "\033[38;5;82m"       # Bright green (Kali signature)
-    GREEN_DARK = "\033[38;5;34m"  # Dark green (secondary)
-    GREEN_NEON = "\033[38;5;46m"  # Neon green (thinking indicator)
-    RED = "\033[38;5;196m"        # Bright red (errors/critical)
-    RED_DARK = "\033[38;5;124m"   # Dark red (warnings)
-    YELLOW = "\033[38;5;220m"     # Yellow (caution/approval)
-    ORANGE = "\033[38;5;208m"     # Orange (medium priority)
-    BLUE = "\033[38;5;33m"        # Blue (info)
-    CYAN = "\033[38;5;51m"        # Cyan (tool names)
+    # Core palette — solid tones, less neon. Slot 82 (#5fff5f) and 46
+    # (#00ff00) vibrate too much on dark terminals; switched to forest
+    # 34 (#00af00). Same idea for cyan/yellow: pull saturation back so
+    # the violet brand stays the loudest thing on screen.
+    GREEN = "\033[38;5;34m"       # #00af00 forest green (solid)
+    GREEN_DARK = "\033[38;5;28m"  # #008700 darker shade
+    GREEN_NEON = "\033[38;5;46m"  # #00ff00 reserved for thinking pulse only
+    RED = "\033[38;5;160m"        # #d70000 solid red (was 196 — neon)
+    RED_DARK = "\033[38;5;124m"   # #af0000
+    YELLOW = "\033[38;5;178m"     # #d7af00 gold (was 220 — neon yellow)
+    ORANGE = "\033[38;5;172m"     # #d78700 (was 208 — neon orange)
+    BLUE = "\033[38;5;33m"        # #0087ff
+    CYAN = "\033[38;5;37m"        # #00afaf teal (was 51 — neon cyan)
     MAGENTA = "\033[38;5;135m"    # Purple (sub-agents)
 
     # Refined violet palette — the Alpha brand color. Picked over the
@@ -231,12 +234,12 @@ def _render_diff(old_text: str, new_text: str, path: str | None = None) -> None:
             text = line[1:]
             if len(text) > DISPLAY_LINE_TRUNCATE:
                 text = text[:DISPLAY_LINE_TRUNCATE - 3] + "..."
-            print(f"  {c(C.GRAY_DARK, '│')} {c(C.BG_GREEN + C.GREEN, '+ ' + text)}")
+            print(f"  {c(C.GRAY_DARK, '│')} {c(C.BG_GREEN + C.WHITE, '+ ' + text)}")
         elif line.startswith("-"):
             text = line[1:]
             if len(text) > DISPLAY_LINE_TRUNCATE:
                 text = text[:DISPLAY_LINE_TRUNCATE - 3] + "..."
-            print(f"  {c(C.GRAY_DARK, '│')} {c(C.BG_RED + C.RED, '- ' + text)}")
+            print(f"  {c(C.GRAY_DARK, '│')} {c(C.BG_RED + C.WHITE, '- ' + text)}")
         else:
             text = line[1:] if line.startswith(" ") else line
             if len(text) > DISPLAY_LINE_TRUNCATE:
@@ -279,11 +282,79 @@ def _result_summary_line(result: dict) -> str:
     return short
 
 
+_DELEGATE_TASK_MAX_STEPS = 5
+
+
+def _strike(text: str) -> str:
+    """Wrap text in ANSI strikethrough — used for completed sub-agent steps."""
+    if NO_COLOR:
+        return text
+    return f"\033[9m{text}\033[29m"
+
+
+def _print_delegate_step(step: object) -> None:
+    """Render one step inside a Task block: `✔ tool_name: args_preview`."""
+    if isinstance(step, dict):
+        name = str(step.get("name", "?"))
+        preview = str(step.get("args_preview", ""))
+        text = f"{name}: {preview}" if preview else name
+    else:
+        text = str(step)
+    if len(text) > DISPLAY_PREVIEW_TRUNCATE:
+        text = text[:DISPLAY_PREVIEW_TRUNCATE - 1] + "…"
+    check = c(C.GREEN, "✔")
+    print(f"        {check} {c(C.GRAY, _strike(text))}")
+
+
+def _print_delegate_single(task_label: str, result: dict) -> None:
+    """Render a single sub-agent result as an inline Task block."""
+    steps = result.get("tools_used") or []
+    iterations = result.get("iterations", len(steps))
+    short = task_label[:DISPLAY_PROMPT_VALUE_TRUNCATE]
+    if len(task_label) > DISPLAY_PROMPT_VALUE_TRUNCATE:
+        short = short[: -1] + "…"
+    suffix = f"({iterations} steps)"
+    print(f"  {c(C.VIOLET + C.BOLD, '✪')} {c(C.WHITE + C.BOLD, short)} {c(C.GRAY, suffix)}")
+    inner = task_label[:60] + ("…" if len(task_label) > 60 else "")
+    print(f"  {c(C.GRAY_DARK, '└')} {c(C.VIOLET, '■')} {c(C.WHITE, inner)}")
+    shown = min(len(steps), _DELEGATE_TASK_MAX_STEPS)
+    for step in steps[:shown]:
+        _print_delegate_step(step)
+    extra = len(steps) - shown
+    if extra > 0:
+        print(f"        {c(C.GRAY, f'… +{extra} completed')}")
+
+
+def _print_delegate_aggregate(name: str, result: dict, args: dict | None) -> None:
+    """Top-level entry for the `✪ TaskName … (N steps)` view used by
+    delegate_task (single block) and delegate_parallel (one block per
+    sub-agent)."""
+    if name == "delegate_parallel":
+        sub_results = result.get("results") or []
+        for sub in sub_results:
+            if isinstance(sub, dict):
+                label = sub.get("task") or f"task-{sub.get('task_index', '?')}"
+                _print_delegate_single(str(label), sub)
+        return
+    task_label = ""
+    if isinstance(args, dict):
+        task_label = str(args.get("task", ""))
+    if not task_label:
+        task_label = "sub-agent task"
+    _print_delegate_single(task_label, result)
+
+
 def print_tool_result(name: str, result: dict, args: dict | None = None) -> None:
     """Display a tool result Claude-Code-style: `  └ first line` + aligned
     continuation + `  … +N lines (ctrl+o to expand)` footer."""
     if not isinstance(result, dict):
         _print_result_body([str(result)])
+        return
+
+    # Sub-agent delegation — render aggregated Task block instead of raw
+    # output, so the user sees `✪ Task… (N steps)` + checklist of steps.
+    if name in ("delegate_task", "delegate_parallel") and not result.get("error"):
+        _print_delegate_aggregate(name, result, args)
         return
 
     # Error results in red

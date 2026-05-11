@@ -160,7 +160,14 @@ async def _run_subagent(
             if event["type"] == "token":
                 collected_text += event.get("text", "")
             elif event["type"] == "tool_call":
-                tool_calls_made.append(event["name"])
+                # Capture name + args preview so the aggregate Task view
+                # rendered by print_tool_result shows useful step lines
+                # ("execute_shell: npm test") instead of bare tool names.
+                from ..display.core import _tool_args_preview
+                tool_calls_made.append({
+                    "name": event["name"],
+                    "args_preview": _tool_args_preview(event.get("args", {})),
+                })
                 if should_stream:
                     print_subagent_event(event, label)
             elif event["type"] == "done":
@@ -221,7 +228,9 @@ async def _delegate_task(
         return {"ok": False, "category": "feature_disabled", "error": "Multi-agent system is disabled. Set FEATURES['multi_agent_enabled']=True."}
     if not FEATURES.get("delegate_tool_enabled"):
         return {"ok": False, "category": "feature_disabled", "error": "Delegate tool is disabled. Enable 'delegate_tool_enabled' in config."}
-    return await _run_subagent(task, context, tools_filter, provider)
+    # stream_to_parent=False so print_tool_result can render the
+    # aggregated Task block at the end; inline streaming would duplicate.
+    return await _run_subagent(task, context, tools_filter, provider, stream_to_parent=False)
 
 
 # ── Parallel delegation ───────────────────────────────────────
@@ -269,6 +278,7 @@ async def _delegate_parallel(
             result = await _run_subagent(
                 task_desc, context, tools_filter, provider,
                 label=f"#{idx + 1}",
+                stream_to_parent=False,
             )
             result["task_index"] = idx
             result["task"] = task_desc
