@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.2.2](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.2.1...alpha-code-v1.2.2) (2026-05-11)
+
+
+### Bug Fixes
+
+* **display:** repair symbols stranded on wrong side of the split ([e29d3a8](https://github.com/freire19/Alpha_Code/commit/e29d3a81cc5e354c552b0e3a13d8678d2d601796))
+
 ## [1.2.1](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.2.0...alpha-code-v1.2.1) (2026-05-11)
 
 
