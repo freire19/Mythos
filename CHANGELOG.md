@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.5.2](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.5.1...alpha-code-v1.5.2) (2026-05-11)
+
+
+### Bug Fixes
+
+* nudge LLMs harder toward ask_choice instead of markdown lists ([3820147](https://github.com/freire19/Alpha_Code/commit/382014765bdbcdf5f5ecc6f4751ab39738a4b2df))
+
 ## [1.5.1](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.5.0...alpha-code-v1.5.1) (2026-05-11)
 
 
