@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.7.0](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.6.2...alpha-code-v1.7.0) (2026-05-11)
+
+
+### Features
+
+* **display:** show tool target in spinner label, not just verb ([8cc4646](https://github.com/freire19/Alpha_Code/commit/8cc4646ff83591d704447b5b3da67a72715d0307))
+
 ## [1.6.2](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.6.1...alpha-code-v1.6.2) (2026-05-11)
 
 
