@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.2.3](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.2.2...alpha-code-v1.2.3) (2026-05-11)
+
+
+### Bug Fixes
+
+* **display:** keep cursor near prompt after scroll-region setup ([6398db5](https://github.com/freire19/Alpha_Code/commit/6398db5d6923c18e92e7f0edfced4f820082921d))
+
 ## [1.2.2](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.2.1...alpha-code-v1.2.2) (2026-05-11)
 
 
