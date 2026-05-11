@@ -1,5 +1,38 @@
 # Changelog
 
+## [1.2.0](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.1.0...alpha-code-v1.2.0) (2026-05-11)
+
+
+### Features
+
+* **bin:** add PowerShell updater for native Windows users ([7ce7ee7](https://github.com/freire19/Alpha_Code/commit/7ce7ee7350158337cb233aa2d5891ed165e3f998))
+* live version from pyproject + improved completions + display aliases ([8d7e0ba](https://github.com/freire19/Alpha_Code/commit/8d7e0ba09924d759f2614d7cf20c5d484c15f176))
+* **repl:** Claude-Code-style multi-line slash autocomplete ([c0e1d8d](https://github.com/freire19/Alpha_Code/commit/c0e1d8d0da47c97dfab8cd9f81a89a1f37b44d6f))
+* **skills:** add 8 user-authored skills (audit suite, release, simplify, status) ([08c3487](https://github.com/freire19/Alpha_Code/commit/08c3487e780122349657dccd417a986b04869cfb))
+* **skills:** add mvp-1-check and mvp-2-report ([9ed440f](https://github.com/freire19/Alpha_Code/commit/9ed440fc300a3c2a066f7a5d83180c617ab0ed18))
+* Windows compat — colorama init, simple input fallback, cmd allowlist ([3885077](https://github.com/freire19/Alpha_Code/commit/3885077d635191c405ac70312a8ff3c34f5dcd86))
+
+
+### Bug Fixes
+
+* DEEP_BUGS zerado — 4 BAIXOs ([#004](https://github.com/freire19/Alpha_Code/issues/004), [#008](https://github.com/freire19/Alpha_Code/issues/008), [#017](https://github.com/freire19/Alpha_Code/issues/017), [#052](https://github.com/freire19/Alpha_Code/issues/052)) ([20a4bc4](https://github.com/freire19/Alpha_Code/commit/20a4bc4e41566b2fabe2daeb9ef194f28e889cd8))
+* repair broken docstring in _format_result that blocked imports ([1cdcd94](https://github.com/freire19/Alpha_Code/commit/1cdcd947bd7839fbbfed971df43142ca01d7c2b4))
+* REPL Windows — resposta invisivel quando spinner inline sobrescreve tokens ([2fd4299](https://github.com/freire19/Alpha_Code/commit/2fd429972acb82df041313a7f1248597781b45ac))
+* **security:** MCP client now spawns with safe_env — no longer leaks API keys (#D115) ([19a5be0](https://github.com/freire19/Alpha_Code/commit/19a5be0c77bf451dc02c6ec4e7db7c9c2d75a0f6))
+* skill YAML, release PR auto-merge, post-refactor cleanups ([6b846c3](https://github.com/freire19/Alpha_Code/commit/6b846c3f56c8995e59709141bad0d6caf696034a))
+
+
+### Refactoring
+
+* **agent:** split agent.py into agent/ package ([e49fba2](https://github.com/freire19/Alpha_Code/commit/e49fba23ea12c5342e69691be4cccdcd7d378823))
+* **display:** split display.py into display/ package ([bc6b725](https://github.com/freire19/Alpha_Code/commit/bc6b725b8c1ad2d73498d0eb0a95f998f9880575))
+* DM035 — move TOOL_TIMEOUTS imports to top-level in 6 tool modules ([0e373dd](https://github.com/freire19/Alpha_Code/commit/0e373ddc42f1ae5486c5bc61b1b433b7ed277dbd))
+* DM036 — centralize retry config in config.RETRY dict ([260dade](https://github.com/freire19/Alpha_Code/commit/260dade6cff8c5f4b4194bf4fd5d16ef121afe42))
+* DM041 — migrate category strings to ToolCategory enum ([83ef972](https://github.com/freire19/Alpha_Code/commit/83ef9723d1166fde3f6d7a4b80e5002899dc16ce))
+* maintainability quick wins — 8 BAIXOs fechados ([b3eb317](https://github.com/freire19/Alpha_Code/commit/b3eb317919506a58ba776ec705e15c981e4e6452))
+* simplify post-DEEP_PERFORMANCE — extract _quick_similar, deduplicate _SKIP_DIRS, fix stale docstring ([075cb0d](https://github.com/freire19/Alpha_Code/commit/075cb0d09eadd807c2bb59e02d11dcedd952dd5c))
+* **tools:** extract security module, split browser registrations ([d8c69a8](https://github.com/freire19/Alpha_Code/commit/d8c69a84df27a81029ebdf821462fc15d95cd36b))
+
 ## [1.1.0](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.0.0...alpha-code-v1.1.0) (2026-05-08)
 
 
