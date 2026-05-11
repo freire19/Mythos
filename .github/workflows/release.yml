@@ -25,3 +25,9 @@ jobs:
         run: |
           PR_NUMBER=$(echo "$PR_JSON" | jq -r .number)
           gh pr merge --squash "$PR_NUMBER" --repo "$GITHUB_REPOSITORY"
+      - name: Create release tag after merge
+        if: ${{ steps.release.outputs.pr }}
+        uses: googleapis/release-please-action@v4
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
