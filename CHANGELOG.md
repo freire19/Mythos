@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.6.1](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.6.0...alpha-code-v1.6.1) (2026-05-11)
+
+
+### Bug Fixes
+
+* **llm:** recover tool calls from DSML/XML invoke blocks (DeepSeek-V4-pro) ([c72de15](https://github.com/freire19/Alpha_Code/commit/c72de15b979affe5bbc2f0007b0b30e62822adc8))
+
 ## [1.6.0](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.5.3...alpha-code-v1.6.0) (2026-05-11)
 
 
