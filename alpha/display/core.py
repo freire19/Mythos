@@ -94,7 +94,7 @@ _SAFETY_COLORS = {
 }
 
 _SAFETY_ICONS = {
-    "safe": "✦",
+    "safe": "●",
     "destructive": "⚠",
     "unknown": "?",
 }
@@ -136,29 +136,34 @@ def _display_tool_name(name: str) -> str:
 # ─── Display functions ───
 
 
-def print_tool_call(name: str, args: dict, safety: str = "safe") -> None:
-    """Display a tool call with safety-colored indicator."""
-    args_str = ""
-    if isinstance(args, dict):
-        for key in ("path", "command", "query", "action", "pattern", "file", "code"):
-            if key in args:
-                val = str(args[key])
-                if len(val) > DISPLAY_PREVIEW_TRUNCATE:
-                    val = val[:DISPLAY_PREVIEW_TRUNCATE - 3] + "..."
-                args_str = f" {c(C.GRAY, val)}"
-                break
-        if not args_str and args:
-            first_val = str(next(iter(args.values())))
-            if len(first_val) > DISPLAY_PREVIEW_TRUNCATE:
-                first_val = first_val[:DISPLAY_PREVIEW_TRUNCATE - 3] + "..."
-            args_str = f" {c(C.GRAY, first_val)}"
+def _tool_args_preview(args: dict) -> str:
+    """Pick the most informative arg and truncate it for the header line."""
+    if not isinstance(args, dict) or not args:
+        return ""
+    for key in ("path", "command", "query", "action", "pattern", "file", "code"):
+        if key in args:
+            val = str(args[key])
+            break
+    else:
+        val = str(next(iter(args.values())))
+    if len(val) > DISPLAY_PREVIEW_TRUNCATE:
+        val = val[:DISPLAY_PREVIEW_TRUNCATE - 1] + "…"
+    return val.replace("\n", " ")
 
+
+def print_tool_call(name: str, args: dict, safety: str = "safe") -> None:
+    """Display a tool call as `  ● ToolName(args)` — Claude-Code style."""
     safety_color = _SAFETY_COLORS.get(safety, C.YELLOW)
     icon = c(safety_color, _SAFETY_ICONS.get(safety, "⚡"))
     label = _display_tool_name(name)
-    tool_name = c(C.CYAN + C.BOLD, label) if safety == "safe" else c(safety_color + C.BOLD, label)
-
-    print(f"  {icon} {tool_name}{args_str}")
+    name_color = C.VIOLET if safety == "safe" else safety_color
+    tool_name = c(name_color + C.BOLD, label)
+    preview = _tool_args_preview(args)
+    paren = (
+        f"{c(C.GRAY_DARK, '(')}{c(C.GRAY, preview)}{c(C.GRAY_DARK, ')')}"
+        if preview else ""
+    )
+    print(f"  {icon} {tool_name}{paren}")
 
 
 _TODO_STATUS_GLYPH = {
@@ -242,92 +247,102 @@ def _render_diff(old_text: str, new_text: str, path: str | None = None) -> None:
     print(f"  {c(C.GRAY_DARK, '└─')}")
 
 
-def print_tool_result(name: str, result: dict, args: dict | None = None) -> None:
-    """Display a tool result with status-aware formatting.
-
-    For `edit_file` / `write_file`, renders a colored unified diff from the
-    args passed in (old_text/new_text or new content vs current file).
-    """
-    border = c(C.GRAY_DARK, "│")
-
-    if isinstance(result, dict):
-        # Error results in red
-        if result.get("error"):
-            print(f"  {c(C.RED, '✗')} {c(C.RED, str(result['error'])[:DISPLAY_LINE_TRUNCATE])}")
-            return
-
-        # Skipped/denied results
-        if result.get("skipped"):
-            reason = result.get("reason", "denied")
-            print(f"  {c(C.YELLOW, '⊘')} {c(C.YELLOW, reason[:DISPLAY_LINE_TRUNCATE])}")
-            return
-
-        # todo_write — pin the list above the spinner if the indicator is
-        # in scroll-region mode; otherwise (inline fallback / non-TTY)
-        # print it inline so the user still sees the checklist.
-        if name == "todo_write" and isinstance(result.get("todos"), list):
-            todos = result["todos"]
-            # Lazy import — thinking imports core at top, so importing
-            # thinking at module level here would create a cycle.
-            from .thinking import get_active_indicator, set_pinned_todos
-            ind = get_active_indicator()
-            if ind is not None and ind._scroll_active:
-                set_pinned_todos(todos)
-            else:
-                _print_todo_list(todos)
-            warning = result.get("warning")
-            if warning:
-                print(f"  {c(C.YELLOW, '⚠')} {c(C.YELLOW, warning)}")
-            return
-
-        # Diff rendering for edits — show what was added vs. removed.
-        if name == "edit_file" and isinstance(args, dict) and args.get("old_text"):
-            old_text = str(args.get("old_text", ""))
-            new_text = str(args.get("new_text", ""))
-            path = result.get("path") or args.get("path")
-            _render_diff(old_text, new_text, str(path) if path else None)
-            return
-
-        if name == "write_file" and isinstance(args, dict) and args.get("content"):
-            new_content = str(args.get("content", ""))
-            path = result.get("path") or args.get("path")
-            old_content = result.get("_previous_content", "")
-            _render_diff(old_content, new_content, str(path) if path else None)
-            return
-
-        # Clean one-line summary for file ops without diff args (parallel batches).
-        if name in ("edit_file", "write_file") and not result.get("error"):
-            path = result.get("path", "")
-            n = result.get("occurrences_found", result.get("replaced", 0))
-            ok = c(C.GREEN, "✓") if not result.get("skipped") else c(C.YELLOW, "⊘")
-            detail = f"{n} occurrence(s)" if n else ""
-            print(f"  {ok} {c(C.CYAN, name)} {c(C.GRAY, str(path))} {c(C.DIM, detail)}".rstrip())
-            return
-
-        # Show output/content preview
-        output = result.get("output") or result.get("content") or result.get("result")
-        if isinstance(output, str) and output.strip():
-            lines = output.strip().split("\n")
-            for line in lines[:DISPLAY_MAX_LINES]:
-                print(f"  {border} {line[:DISPLAY_LINE_TRUNCATE]}")
-            if len(lines) > DISPLAY_MAX_LINES:
-                remaining = len(lines) - DISPLAY_MAX_LINES
-                print(f"  {border} {c(C.GRAY, f'... ({remaining} more lines)')}")
+def _print_result_body(lines: list[str], indent: str = "  ") -> None:
+    """Render a result body in Claude-Code style: `  └ first` then aligned
+    continuation lines, capped with `  … +N lines (ctrl+o to expand)`."""
+    if not lines:
+        return
+    elbow = c(C.GRAY_DARK, "└")
+    cont = " " * (len(indent) + 2)
+    shown = min(len(lines), DISPLAY_MAX_LINES)
+    for i, line in enumerate(lines[:shown]):
+        truncated = line[:DISPLAY_LINE_TRUNCATE]
+        if i == 0:
+            print(f"{indent}{elbow} {truncated}")
         else:
-            # Compact one-line summary for results without text output.
-            # Pick the most informative key: path > count > status > first value.
-            short = result.get("path") or str(result.get("count", ""))
-            if not short:
-                keys = [k for k in result if not k.startswith("_")]
-                if keys:
-                    first_val = str(result[keys[0]])
-                    short = first_val[:DISPLAY_LINE_TRUNCATE - 20]
-            if len(str(short)) > DISPLAY_LINE_TRUNCATE - 10:
-                short = str(short)[:DISPLAY_LINE_TRUNCATE - 13] + "..."
-            print(f"  {border} {c(C.GRAY, str(short))}")
+            print(f"{cont}{truncated}")
+    if len(lines) > shown:
+        remaining = len(lines) - shown
+        print(f"{indent}{c(C.GRAY, f'… +{remaining} lines (ctrl+o to expand)')}")
+
+
+def _result_summary_line(result: dict) -> str:
+    """Pick the most informative key for a result without printable output."""
+    short = result.get("path") or str(result.get("count", ""))
+    if not short:
+        keys = [k for k in result if not k.startswith("_")]
+        if keys:
+            short = str(result[keys[0]])[:DISPLAY_LINE_TRUNCATE - 20]
+    short = str(short)
+    if len(short) > DISPLAY_LINE_TRUNCATE - 10:
+        short = short[:DISPLAY_LINE_TRUNCATE - 11] + "…"
+    return short
+
+
+def print_tool_result(name: str, result: dict, args: dict | None = None) -> None:
+    """Display a tool result Claude-Code-style: `  └ first line` + aligned
+    continuation + `  … +N lines (ctrl+o to expand)` footer."""
+    if not isinstance(result, dict):
+        _print_result_body([str(result)])
+        return
+
+    # Error results in red
+    if result.get("error"):
+        msg = str(result["error"])[:DISPLAY_LINE_TRUNCATE]
+        print(f"  {c(C.RED, '└')} {c(C.RED, msg)}")
+        return
+
+    # Skipped/denied results
+    if result.get("skipped"):
+        reason = result.get("reason", "denied")
+        print(f"  {c(C.YELLOW, '└')} {c(C.YELLOW, reason[:DISPLAY_LINE_TRUNCATE])}")
+        return
+
+    # todo_write — pin above the spinner when in scroll-region mode,
+    # otherwise inline. Lazy import to avoid the core ↔ thinking cycle.
+    if name == "todo_write" and isinstance(result.get("todos"), list):
+        todos = result["todos"]
+        from .thinking import get_active_indicator, set_pinned_todos
+        ind = get_active_indicator()
+        if ind is not None and ind._scroll_active:
+            set_pinned_todos(todos)
+        else:
+            _print_todo_list(todos)
+        warning = result.get("warning")
+        if warning:
+            print(f"  {c(C.YELLOW, '⚠')} {c(C.YELLOW, warning)}")
+        return
+
+    # Diff rendering for edits — shows full +/- diff card, has its own framing.
+    if name == "edit_file" and isinstance(args, dict) and args.get("old_text"):
+        _render_diff(
+            str(args.get("old_text", "")),
+            str(args.get("new_text", "")),
+            str(result.get("path") or args.get("path") or "") or None,
+        )
+        return
+    if name == "write_file" and isinstance(args, dict) and args.get("content"):
+        _render_diff(
+            str(result.get("_previous_content", "")),
+            str(args.get("content", "")),
+            str(result.get("path") or args.get("path") or "") or None,
+        )
+        return
+
+    # Compact one-line summary for file ops without diff args.
+    if name in ("edit_file", "write_file") and not result.get("error"):
+        path = result.get("path", "")
+        n = result.get("occurrences_found", result.get("replaced", 0))
+        check = c(C.GREEN, "✓")
+        detail = f" ({n} occurrence(s))" if n else ""
+        print(f"  {c(C.GRAY_DARK, '└')} {check} {c(C.GRAY, str(path))}{c(C.DIM, detail)}")
+        return
+
+    output = result.get("output") or result.get("content") or result.get("result")
+    if isinstance(output, str) and output.strip():
+        _print_result_body(output.strip().split("\n"))
     else:
-        result_str = str(result)[:DISPLAY_LINE_TRUNCATE]
-        print(f"  {border} {result_str}")
+        _print_result_body([_result_summary_line(result)])
 
 
 # Session-level approval state
@@ -503,9 +518,15 @@ def print_context_warning(pct: int, used: int, limit: int) -> None:
 
 
 def print_subagent_event(event: dict, agent_label: str = "") -> None:
-    """Display a sub-agent event with indentation."""
-    prefix = f"  {c(C.GRAY_DARK, '┊')}"
-    label = f" {c(C.MAGENTA + C.BOLD, agent_label)}" if agent_label else ""
+    """Display a sub-agent event indented one level under the parent.
+
+    Uses the same `● Name(args)` / `└ result` look as the top-level tools,
+    just shifted right with `  ⚤` as the agent gutter so the hierarchy
+    reads at a glance.
+    """
+    gutter = c(C.MAGENTA, "⚤")
+    label_str = c(C.MAGENTA + C.DIM, agent_label) if agent_label else ""
+    indent = "    "  # 4-space indent so nested └ aligns under the ⚤ row
 
     event_type = event.get("type", "")
     if event_type == "tool_call":
@@ -513,20 +534,24 @@ def print_subagent_event(event: dict, agent_label: str = "") -> None:
         args = event.get("args", {})
         safety = event.get("safety", "safe")
         safety_color = _SAFETY_COLORS.get(safety, C.YELLOW)
-        icon = c(safety_color, _SAFETY_ICONS.get(safety, "✦"))
-        args_str = ""
-        for key in ("path", "command", "query", "action", "pattern"):
-            if key in args:
-                val = str(args[key])
-                if len(val) > 80:
-                    val = val[:77] + "..."
-                args_str = f" {c(C.GRAY, val)}"
-                break
-        print(f"{prefix}{label} {icon} {c(C.CYAN, _display_tool_name(name))}{args_str}")
+        icon = c(safety_color, _SAFETY_ICONS.get(safety, "●"))
+        name_color = C.VIOLET if safety == "safe" else safety_color
+        preview = _tool_args_preview(args)
+        paren = (
+            f"{c(C.GRAY_DARK, '(')}{c(C.GRAY, preview)}{c(C.GRAY_DARK, ')')}"
+            if preview else ""
+        )
+        header = f"{c(name_color + C.BOLD, _display_tool_name(name))}{paren}"
+        if label_str:
+            print(f"  {gutter} {label_str}  {icon} {header}")
+        else:
+            print(f"  {gutter} {icon} {header}")
     elif event_type == "done":
-        reply = event.get("reply", "")
-        preview = reply[:DISPLAY_PREVIEW_TRUNCATE].replace("\n", " ") if reply else ""
-        print(f"{prefix}{label} {c(C.GREEN, '✓')} {c(C.DIM, preview)}")
+        reply = str(event.get("reply", ""))
+        if not reply:
+            return
+        lines = reply.strip().split("\n")
+        _print_result_body(lines, indent=indent)
 
 
 def print_tools_list(tools: list[dict]) -> None:
