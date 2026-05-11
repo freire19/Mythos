@@ -26,7 +26,10 @@ logger = logging.getLogger(__name__)
 # raw text when they "think" about tool calls before the structured tool_calls
 # field arrives. Leaking these to the terminal is noisy; strip them from content.
 # `</?` covers both opening (<|DSML|name>) and closing (</|DSML|name>) tags.
-_DSML_RE = re.compile(r"</?\s*\|\s*DSML\s*\|[^>]*>", re.IGNORECASE)
+# `[|\s]*` (not `\|`) — DeepSeek-V4-pro occasionally emits doubled pipes,
+# extra spaces, or both: `< | | DSML | | tool_calls>`. The strict
+# single-pipe version missed those and they leaked verbatim to the screen.
+_DSML_RE = re.compile(r"</?\s*[|\s]*DSML[|\s]*[^>]*>", re.IGNORECASE)
 _XML_INVOKE_RE = re.compile(
     r"</?\s*(invoke|parameter|tool_calls)\b[^>]*>",
     re.IGNORECASE,
@@ -131,6 +134,69 @@ async def _get_shared_llm_client() -> httpx.AsyncClient:
         )
         _llm_client_loop = loop
     return _shared_llm_client
+
+
+_DSML_INVOKE_RE = re.compile(
+    r"<[^>]*\binvoke\s+name=\"([^\"]+)\"[^>]*>",
+    re.IGNORECASE,
+)
+_DSML_PARAM_RE = re.compile(
+    r"<[^>]*\bparameter\b([^>]*)>(.*?)</[^>]*\bparameter\b[^>]*>",
+    re.IGNORECASE | re.DOTALL,
+)
+_DSML_ATTR_NAME_RE = re.compile(r'name="([^"]+)"', re.IGNORECASE)
+_DSML_ATTR_STRING_RE = re.compile(r'string="(true|false)"', re.IGNORECASE)
+
+
+def _recover_tool_call_from_dsml(content: str) -> dict | None:
+    """Recover a tool call from <|DSML|invoke>/<|DSML|parameter> blocks.
+
+    DeepSeek-V4-pro occasionally emits its tool calls as XML-like text
+    blocks in the content stream instead of the structured tool_calls
+    field. The user only sees the markup leak through; the tool never
+    runs and the agent stalls waiting for an approval that never comes.
+    This parser converts the markup back into a proper tool_call dict.
+    """
+    if "invoke" not in content.lower():
+        return None
+    invoke_match = _DSML_INVOKE_RE.search(content)
+    if not invoke_match:
+        return None
+    name = invoke_match.group(1)
+
+    params: dict = {}
+    for m in _DSML_PARAM_RE.finditer(content):
+        attrs, value = m.group(1), m.group(2).strip()
+        name_m = _DSML_ATTR_NAME_RE.search(attrs)
+        if not name_m:
+            continue
+        key = name_m.group(1)
+        str_m = _DSML_ATTR_STRING_RE.search(attrs)
+        # string="false" means the value is JSON-encoded (e.g. an array).
+        # Default to treating as string when the flag is missing.
+        if str_m and str_m.group(1).lower() == "false":
+            try:
+                value = json.loads(value)
+            except json.JSONDecodeError:
+                pass
+        params[key] = value
+    if not params:
+        return None
+
+    from .tools import get_tool
+    if get_tool(name) is None:
+        logger.debug("Recovered DSML tool call '%s' not in registry — discarding", name)
+        return None
+
+    args_str = json.dumps(params, ensure_ascii=False)
+    digest = hashlib.sha1(
+        (name + args_str).encode("utf-8"), usedforsecurity=False
+    ).hexdigest()[:8]
+    return {
+        "id": f"call_dsml_{digest}",
+        "name": name,
+        "arguments": args_str,
+    }
 
 
 def _recover_tool_call_from_content(content: str) -> dict | None:
@@ -287,6 +353,7 @@ async def stream_chat_with_tools(
 
     for attempt in range(RETRY["llm"]["max_retries"] + 1):
         accumulated_content = ""
+        raw_content_for_recovery = ""
         dsml_stripper = DsmlStripper()
         # `reasoning_content` e o canal de "thinking" do DeepSeek-reasoner
         # (e tambem dos `gpt-oss` no Ollama). A API exige que o campo
@@ -376,8 +443,12 @@ async def stream_chat_with_tools(
                         # Content tokens — strip DSML noise before yielding.
                         # `dsml_stripper` buffers any unclosed `<…` tail so a
                         # tag split across SSE chunks is still removed cleanly.
+                        # raw_content_for_recovery preserves the unstripped
+                        # stream so _recover_tool_call_from_dsml can parse
+                        # any leaked <|DSML|invoke> blocks at end-of-stream.
                         content = delta.get("content", "")
                         if content:
+                            raw_content_for_recovery += content
                             safe = dsml_stripper.feed(content)
                             if safe:
                                 accumulated_content += safe
@@ -443,9 +514,15 @@ async def stream_chat_with_tools(
                     "error": None,
                 }
             else:
-                # Fallback: some models (Ollama qwen-coder etc.) emit tool calls
-                # as fenced JSON in content instead of via the tool_calls field.
-                recovered = _recover_tool_call_from_content(accumulated_content)
+                # Fallback chain when the structured tool_calls field stayed
+                # empty: first try DSML/XML invoke blocks (DeepSeek-V4-pro),
+                # then fenced JSON (Ollama qwen-coder). DSML uses the raw
+                # un-stripped buffer because the live sanitizer already
+                # erased the markup from accumulated_content.
+                recovered = (
+                    _recover_tool_call_from_dsml(raw_content_for_recovery)
+                    or _recover_tool_call_from_content(accumulated_content)
+                )
                 if recovered is not None:
                     logger.info(
                         f"Recovered tool call '{recovered['name']}' from content "
