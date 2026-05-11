@@ -75,7 +75,7 @@ register_tool(
         },
         safety=ToolSafety.DESTRUCTIVE,  # forces the approval gate
         executor=_present_plan,
-        category=ToolCategory.GENERAL,
+        category=ToolCategory.PLANNING,
     )
 )
 
@@ -164,6 +164,6 @@ register_tool(
         },
         safety=ToolSafety.SAFE,
         executor=_todo_write,
-        category=ToolCategory.GENERAL,
+        category=ToolCategory.PLANNING,
     )
 )

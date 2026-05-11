@@ -17,3 +17,7 @@ from . import _composite_deploy   # noqa: F401
 
 # Re-export helpers for backward compat (used by other modules)
 from ._composite_helpers import _run_tool, _violation  # noqa: F401
+from ._composite_project import _project_overview  # noqa: F401
+from ._composite_tests import _run_tests  # noqa: F401
+from ._composite_snr import _search_and_replace  # noqa: F401
+from ._composite_deploy import _deploy_check  # noqa: F401

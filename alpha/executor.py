@@ -53,7 +53,7 @@ def build_assistant_tool_message(
     """
     msg: dict = {
         "role": "assistant",
-        "content": content if content else "",
+        "content": content,
         "tool_calls": [
             {
                 "id": tc["id"],

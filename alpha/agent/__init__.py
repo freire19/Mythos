@@ -10,7 +10,7 @@ import logging
 from collections.abc import AsyncGenerator
 
 from ..approval import is_denied, needs_approval
-from ..config import MAX_ITERATIONS
+from ..config import LOOP_DETECTION, MAX_ITERATIONS  # noqa: F401 — LOOP_DETECTION re-exported for back-compat
 from ..context import (
     compress_until_under_budget,
     estimate_messages_tokens,
@@ -26,7 +26,11 @@ from .loop import (
     _detect_loop,
     _LOOP_DETECT_MIN_CALLS,
     _LOOP_DETECT_MIN_ITER,
+    _MAX_REPEAT_CALLS,
     _result_preview,
+    _SIMILAR_REPEAT_CALLS,
+    _SIMILARITY_THRESHOLD,
+    _STALE_WINDOW,
 )
 
 logger = logging.getLogger(__name__)

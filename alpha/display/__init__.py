@@ -11,6 +11,7 @@ from .core import (
     DISPLAY_MAX_LINES,
     DISPLAY_PREVIEW_TRUNCATE,
     DISPLAY_PROMPT_VALUE_TRUNCATE,
+    _approve_all,  # noqa: F401 — back-compat for monkeypatch-based tests
     _display_tool_name,
     _format_duration,
     _format_tokens,

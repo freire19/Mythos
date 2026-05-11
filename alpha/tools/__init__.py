@@ -67,6 +67,7 @@ class ToolCategory(str, Enum):
     SCRAPING = "scraping"
     SKILLS = "skills"
     COMPOSITE = "composite"
+    PLANNING = "planning"
     GENERAL = "general"
 
 

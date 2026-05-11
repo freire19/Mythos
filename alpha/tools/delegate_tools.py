@@ -53,14 +53,13 @@ async def _run_subagent(
     from ..agent import run_agent
     from ..config import (
         DEFAULT_PROVIDER,
-        LIMITS,
         get_subagent_allow,
         get_subagent_extra_block,
         get_subagent_policy,
     )
     from . import get_openai_tools, get_tool
 
-    max_iterations = LIMITS.get("subagent_max_iterations", 15)
+    max_iterations = FEATURES.get("subagent_max_iterations", 15)
     agent_provider = provider or DEFAULT_PROVIDER
     workspace_root = parent_workspace or str(AGENT_WORKSPACE)
 

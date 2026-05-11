@@ -48,37 +48,10 @@ class TestDeadRegexRemoved:
 # ─── #028 — safe_env TTL ───────────────────────────────────────────
 
 
-class TestSafeEnvTTL:
-    def test_cache_refreshes_after_ttl(self, monkeypatch):
-        from alpha.tools import safe_env
-
-        # Reset cache
-        safe_env.invalidate_safe_env_cache()
-
-        # First call — populates cache
-        first = safe_env.get_safe_env()
-        assert "PYTHONDONTWRITEBYTECODE" in first
-
-        # Mutate environ AND advance time past TTL
-        monkeypatch.setenv("ALPHA_TEST_NEW_VAR", "newvalue")
-        # Patch time.monotonic para forcar TTL expiry
-        original_at = safe_env._cached_at
-        with patch.object(safe_env.time, "monotonic",
-                          return_value=original_at + safe_env._CACHE_TTL_SECONDS + 1):
-            refreshed = safe_env.get_safe_env()
-
-        assert refreshed.get("ALPHA_TEST_NEW_VAR") == "newvalue"
-
-    def test_cache_held_within_ttl(self, monkeypatch):
-        from alpha.tools import safe_env
-
-        safe_env.invalidate_safe_env_cache()
-        first = safe_env.get_safe_env()
-        # Sem avancar tempo: nova var em environ NAO aparece (cache ainda valido)
-        monkeypatch.setenv("ALPHA_TEST_HELD_VAR", "held")
-        second = safe_env.get_safe_env()
-        assert "ALPHA_TEST_HELD_VAR" not in second
-        assert first is second  # mesmo objeto cacheado
+class TestSafeEnvCache:
+    # TTL-based invalidation (#028) was replaced by len(os.environ) check
+    # (#036) — the two TTL tests went away with it. invalidate_safe_env_cache
+    # is still the explicit reset hook and still works.
 
     def test_invalidate_forces_immediate_refresh(self, monkeypatch):
         from alpha.tools import safe_env
