@@ -8,6 +8,7 @@ Green/red dominant palette, safety-aware tool display, hacker aesthetic.
 import asyncio
 import json
 import os
+import re
 import shutil
 import sys
 import time
@@ -201,15 +202,25 @@ def _print_todo_list(todos: list) -> None:
 
 
 _DIFF_MAX_LINES = 40
+_DIFF_HUNK_RE = re.compile(r"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@")
+
+
+def _diff_line_full_width(prefix_plain: str, bg: str, fg: str, body: str) -> str:
+    """Render one diff line so the background color extends to the right
+    edge of the terminal (Claude-Code style). `\\033[K` paints the rest of
+    the line with whatever bg is active when it runs, so we have to keep
+    the bg active and reset *after* it."""
+    if NO_COLOR:
+        return f"{prefix_plain}{body}"
+    return f"{prefix_plain}{bg}{fg}{body}\033[K{C.RESET}"
 
 
 def _render_diff(old_text: str, new_text: str, path: str | None = None) -> None:
-    """Render a unified diff with green/red highlighted blocks (git-style).
+    """Render a unified diff with green/red full-width blocks (git-style).
 
-    Lines added are shown on a green background, removed on red, context in
-    gray. Output is bounded by `_DIFF_MAX_LINES` to avoid flooding the
-    terminal on large rewrites.
-    """
+    Adds line numbers parsed from each `@@` hunk header and stretches the
+    background color to the right edge via `\\033[K` so highlighted rows
+    don't end raggedly mid-line. Output is bounded by `_DIFF_MAX_LINES`."""
     import difflib
 
     old_lines = old_text.splitlines()
@@ -223,33 +234,55 @@ def _render_diff(old_text: str, new_text: str, path: str | None = None) -> None:
         print(f"  {c(C.GRAY_DARK, '│')} {c(C.GRAY, '(no textual changes)')}")
         return
 
-    # Skip the file headers (---/+++) since we already printed the path.
     body = [ln for ln in diff if not (ln.startswith("---") or ln.startswith("+++"))]
+    added = sum(1 for ln in body if ln.startswith("+"))
+    removed = sum(1 for ln in body if ln.startswith("-"))
+    if added or removed:
+        summary = f"Added {added} line(s), removed {removed} line(s)"
+        print(f"  {c(C.GRAY_DARK, '│')} {c(C.GRAY, summary)}")
 
+    old_n = new_n = 0
     shown = 0
+    gutter = c(C.GRAY_DARK, "│")
+
     for line in body:
         if shown >= _DIFF_MAX_LINES:
             remaining = len(body) - shown
-            print(f"  {c(C.GRAY_DARK, '│')} {c(C.GRAY, f'... ({remaining} more diff lines)')}")
+            print(f"  {gutter} {c(C.GRAY, f'… +{remaining} more diff lines')}")
             break
 
         if line.startswith("@@"):
-            print(f"  {c(C.GRAY_DARK, '│')} {c(C.CYAN + C.DIM, line[:DISPLAY_LINE_TRUNCATE])}")
+            m = _DIFF_HUNK_RE.match(line)
+            if m:
+                old_n = int(m.group(1))
+                new_n = int(m.group(2))
+            print(f"  {gutter} {c(C.CYAN + C.DIM, line[:DISPLAY_LINE_TRUNCATE])}")
         elif line.startswith("+"):
             text = line[1:]
             if len(text) > DISPLAY_LINE_TRUNCATE:
-                text = text[:DISPLAY_LINE_TRUNCATE - 3] + "..."
-            print(f"  {c(C.GRAY_DARK, '│')} {c(C.BG_GREEN + C.WHITE, '+ ' + text)}")
+                text = text[:DISPLAY_LINE_TRUNCATE - 1] + "…"
+            num = c(C.GRAY_DARK, f"{new_n:>4}")
+            print(_diff_line_full_width(
+                f"  {gutter} {num} ", C.BG_GREEN, C.WHITE, f"+ {text}",
+            ))
+            new_n += 1
         elif line.startswith("-"):
             text = line[1:]
             if len(text) > DISPLAY_LINE_TRUNCATE:
-                text = text[:DISPLAY_LINE_TRUNCATE - 3] + "..."
-            print(f"  {c(C.GRAY_DARK, '│')} {c(C.BG_RED + C.WHITE, '- ' + text)}")
+                text = text[:DISPLAY_LINE_TRUNCATE - 1] + "…"
+            num = c(C.GRAY_DARK, f"{old_n:>4}")
+            print(_diff_line_full_width(
+                f"  {gutter} {num} ", C.BG_RED, C.WHITE, f"- {text}",
+            ))
+            old_n += 1
         else:
             text = line[1:] if line.startswith(" ") else line
             if len(text) > DISPLAY_LINE_TRUNCATE:
-                text = text[:DISPLAY_LINE_TRUNCATE - 3] + "..."
-            print(f"  {c(C.GRAY_DARK, '│')} {c(C.GRAY, '  ' + text)}")
+                text = text[:DISPLAY_LINE_TRUNCATE - 1] + "…"
+            num = c(C.GRAY_DARK, f"{new_n:>4}")
+            print(f"  {gutter} {num} {c(C.GRAY, '  ' + text)}")
+            old_n += 1
+            new_n += 1
         shown += 1
 
     print(f"  {c(C.GRAY_DARK, '└─')}")
