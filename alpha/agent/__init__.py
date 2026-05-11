@@ -21,9 +21,12 @@ from ..context import (
 from ..executor import build_assistant_tool_message, execute_tool_calls
 from ..llm import stream_chat_with_tools
 from .loop import (
+    _call_signature,
+    _CYCLE_WINDOW,
     _detect_loop,
     _LOOP_DETECT_MIN_CALLS,
     _LOOP_DETECT_MIN_ITER,
+    _result_preview,
 )
 
 logger = logging.getLogger(__name__)
