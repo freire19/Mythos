@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.4.0](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.3.1...alpha-code-v1.4.0) (2026-05-11)
+
+
+### Features
+
+* **display:** solid color palette + aggregated Task block for delegate ([b203cad](https://github.com/freire19/Alpha_Code/commit/b203cada79b6cc8d5554bab1d6527f2aaf9d09e9))
+
 ## [1.3.1](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.3.0...alpha-code-v1.3.1) (2026-05-11)
 
 
