@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.5.0](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.4.0...alpha-code-v1.5.0) (2026-05-11)
+
+
+### Features
+
+* **tools:** add ask_choice tool + numbered menu renderer ([d639113](https://github.com/freire19/Alpha_Code/commit/d6391137a64176d4877adbf571ea468619d73cfa))
+
 ## [1.4.0](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.3.1...alpha-code-v1.4.0) (2026-05-11)
 
 
