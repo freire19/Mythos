@@ -23,10 +23,21 @@ import tempfile
 from pathlib import Path
 
 from prompt_toolkit import PromptSession
+from prompt_toolkit.application import get_app
 from prompt_toolkit.completion import Completer, Completion
-from prompt_toolkit.formatted_text import ANSI
+from prompt_toolkit.formatted_text import ANSI, to_formatted_text
 from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.layout.containers import Window
+from prompt_toolkit.layout.controls import UIContent
+from prompt_toolkit.layout.dimension import Dimension
+from prompt_toolkit.layout.menus import (
+    CompletionsMenuControl,
+    _get_menu_item_fragments,
+)
+from prompt_toolkit.layout.screen import Point
+from prompt_toolkit.mouse_events import MouseEventType
 from prompt_toolkit.styles import Style
+from prompt_toolkit.utils import get_cwidth
 
 from ._platform import use_simple_input
 from .clipboard import read_image_from_clipboard
@@ -230,6 +241,161 @@ class _SlashCompleter(Completer):
             )
 
 
+class _WrappedCompletionsMenuControl(CompletionsMenuControl):
+    """Replaces the default single-line truncated meta column with a
+    Claude-Code-style multi-line word-wrapped description.
+
+    Each completion entry can span up to ``MAX_META_LINES`` lines; longer
+    descriptions are truncated at a word boundary with a U+2026 ellipsis.
+    The selection background extends across all lines of the active entry.
+    """
+
+    META_TARGET_WIDTH = 40
+    MAX_META_LINES = 3
+
+    def _show_meta(self, complete_state) -> bool:
+        return any(c.display_meta_text for c in complete_state.completions)
+
+    def _get_menu_meta_width(self, max_width: int, complete_state) -> int:
+        if not self._show_meta(complete_state):
+            return 0
+        return max(8, min(max_width, self.META_TARGET_WIDTH))
+
+    def _wrap_text(self, text: str, width: int) -> list[str]:
+        if not text or width <= 0:
+            return [""]
+        words = text.split()
+        if not words:
+            return [""]
+        lines: list[str] = []
+        current = ""
+        idx = 0
+        while idx < len(words) and len(lines) < self.MAX_META_LINES:
+            w = words[idx]
+            cand = (current + " " + w) if current else w
+            if get_cwidth(cand) <= width:
+                current = cand
+                idx += 1
+            elif current:
+                lines.append(current)
+                current = ""
+            else:
+                cut = max(1, width - 1)
+                lines.append(w[:cut] + "…")
+                idx += 1
+        if current and len(lines) < self.MAX_META_LINES:
+            lines.append(current)
+        if idx < len(words) and lines:
+            last = lines[-1]
+            while last and get_cwidth(last) > width - 1:
+                last = last[:-1].rstrip()
+            lines[-1] = (last + "…") if last else "…"
+        return lines or [""]
+
+    def _line_layout(self, complete_state, menu_width: int, menu_meta_width: int):
+        flat: list[tuple[int, int, bool, str]] = []
+        cursor_y = 0
+        index = complete_state.complete_index
+        show_meta = self._show_meta(complete_state) and menu_meta_width > 4
+        for ci, c in enumerate(complete_state.completions):
+            is_current = ci == index
+            meta = (c.display_meta_text or "").strip() if show_meta else ""
+            wrapped = self._wrap_text(meta, menu_meta_width - 2) if meta else [""]
+            if ci == index:
+                cursor_y = len(flat)
+            for li, line_text in enumerate(wrapped):
+                flat.append((ci, li, is_current, line_text))
+        return flat, cursor_y, show_meta
+
+    def preferred_height(self, width, max_available_height, wrap_lines, get_line_prefix):
+        complete_state = get_app().current_buffer.complete_state
+        if not complete_state:
+            return 0
+        menu_width = self._get_menu_width(width, complete_state)
+        menu_meta_width = self._get_menu_meta_width(width - menu_width, complete_state)
+        flat, _, _ = self._line_layout(complete_state, menu_width, menu_meta_width)
+        return len(flat)
+
+    def create_content(self, width: int, height: int) -> UIContent:
+        complete_state = get_app().current_buffer.complete_state
+        if not complete_state:
+            return UIContent()
+
+        menu_width = self._get_menu_width(width, complete_state)
+        menu_meta_width = self._get_menu_meta_width(width - menu_width, complete_state)
+        flat, cursor_y, show_meta = self._line_layout(complete_state, menu_width, menu_meta_width)
+
+        # Mouse handler needs to map row → completion index when the user
+        # clicks any line of a multi-line entry.
+        self._line_to_completion = [t[0] for t in flat]
+
+        completions = complete_state.completions
+
+        def get_line(y):
+            ci, li, is_current, meta_line = flat[y]
+            c = completions[ci]
+            if li == 0:
+                name_frags = _get_menu_item_fragments(
+                    c, is_current, menu_width, space_after=True
+                )
+            else:
+                style = (
+                    "class:completion-menu.completion.current"
+                    if is_current
+                    else "class:completion-menu.completion"
+                )
+                name_frags = [(style, " " * menu_width)]
+
+            if show_meta:
+                style = (
+                    "class:completion-menu.meta.completion.current"
+                    if is_current
+                    else "class:completion-menu.meta.completion"
+                )
+                pad = " " * max(0, menu_meta_width - 1 - get_cwidth(meta_line))
+                meta_frags = to_formatted_text(
+                    [("", " " + meta_line + pad)], style=style
+                )
+            else:
+                meta_frags = []
+            return name_frags + meta_frags
+
+        return UIContent(
+            get_line=get_line,
+            cursor_position=Point(x=0, y=cursor_y),
+            line_count=len(flat),
+        )
+
+    def mouse_handler(self, mouse_event):
+        b = get_app().current_buffer
+        y = mouse_event.position.y
+        mapping = getattr(self, "_line_to_completion", None)
+        if mouse_event.event_type == MouseEventType.MOUSE_UP:
+            if mapping and 0 <= y < len(mapping):
+                b.go_to_completion(mapping[y])
+                b.complete_state = None
+        elif mouse_event.event_type == MouseEventType.SCROLL_DOWN:
+            b.complete_next(count=3, disable_wrap_around=True)
+        elif mouse_event.event_type == MouseEventType.SCROLL_UP:
+            b.complete_previous(count=3, disable_wrap_around=True)
+        return None
+
+
+def _patch_completions_menu(session: PromptSession) -> None:
+    try:
+        for c in session.app.layout.walk():
+            if (
+                isinstance(c, Window)
+                and isinstance(c.content, CompletionsMenuControl)
+                and not isinstance(c.content, _WrappedCompletionsMenuControl)
+            ):
+                c.content = _WrappedCompletionsMenuControl()
+                c.height = Dimension(min=1, max=30)
+                return
+    except Exception:
+        logger.debug("completions-menu patch failed; falling back to default", exc_info=True)
+
+
 _SESSION: PromptSession | None = None
 
 
@@ -256,6 +422,7 @@ def _get_session() -> PromptSession:
             style=_INPUT_STYLE,
             include_default_pygments_style=False,
         )
+        _patch_completions_menu(_SESSION)
     return _SESSION
 
 
