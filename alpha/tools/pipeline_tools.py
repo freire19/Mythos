@@ -10,14 +10,13 @@ import asyncio
 import logging
 import os
 import re
-import shlex
 from pathlib import Path
 
 from . import ToolCategory, ToolDefinition, ToolSafety, register_tool
 from .path_helpers import _validate_path_no_symlink
 from .safe_env import get_safe_env
 from ..config import TOOL_TIMEOUTS
-from .shell_tools import HARD_BLOCKED_RE
+from ..security import HARD_BLOCKED_RE, validate_pipeline
 from .workspace import AGENT_WORKSPACE, assert_within_workspace
 
 logger = logging.getLogger(__name__)
