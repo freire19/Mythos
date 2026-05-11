@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.2.1](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.2.0...alpha-code-v1.2.1) (2026-05-11)
+
+
+### Bug Fixes
+
+* **display:** add missing stdlib imports in thinking.py ([77b4ec4](https://github.com/freire19/Alpha_Code/commit/77b4ec48072e0a17f82dc6ed9c76a58732aaedbd))
+
 ## [1.2.0](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.1.0...alpha-code-v1.2.0) (2026-05-11)
 
 
