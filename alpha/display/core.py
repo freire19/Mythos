@@ -154,19 +154,24 @@ def _tool_args_preview(args: dict) -> str:
     return val.replace("\n", " ")
 
 
-def print_tool_call(name: str, args: dict, safety: str = "safe") -> None:
-    """Display a tool call as `  ● ToolName(args)` — Claude-Code style."""
+def _format_tool_call_header(name: str, args: dict, safety: str) -> str:
+    """Build `{icon} {ToolName}({preview})` — shared by top-level and sub-agent
+    rendering so the two visual variants never drift."""
     safety_color = _SAFETY_COLORS.get(safety, C.YELLOW)
     icon = c(safety_color, _SAFETY_ICONS.get(safety, "⚡"))
-    label = _display_tool_name(name)
     name_color = C.VIOLET if safety == "safe" else safety_color
-    tool_name = c(name_color + C.BOLD, label)
+    tool_name = c(name_color + C.BOLD, _display_tool_name(name))
     preview = _tool_args_preview(args)
     paren = (
         f"{c(C.GRAY_DARK, '(')}{c(C.GRAY, preview)}{c(C.GRAY_DARK, ')')}"
         if preview else ""
     )
-    print(f"  {icon} {tool_name}{paren}")
+    return f"{icon} {tool_name}{paren}"
+
+
+def print_tool_call(name: str, args: dict, safety: str = "safe") -> None:
+    """Display a tool call as `  ● ToolName(args)` — Claude-Code style."""
+    print(f"  {_format_tool_call_header(name, args, safety)}")
 
 
 _TODO_STATUS_GLYPH = {
@@ -312,11 +317,9 @@ def _print_delegate_single(task_label: str, result: dict) -> None:
     iterations = result.get("iterations", len(steps))
     short = task_label[:DISPLAY_PROMPT_VALUE_TRUNCATE]
     if len(task_label) > DISPLAY_PROMPT_VALUE_TRUNCATE:
-        short = short[: -1] + "…"
+        short = short[:-1] + "…"
     suffix = f"({iterations} steps)"
     print(f"  {c(C.VIOLET + C.BOLD, '✪')} {c(C.WHITE + C.BOLD, short)} {c(C.GRAY, suffix)}")
-    inner = task_label[:60] + ("…" if len(task_label) > 60 else "")
-    print(f"  {c(C.GRAY_DARK, '└')} {c(C.VIOLET, '■')} {c(C.WHITE, inner)}")
     shown = min(len(steps), _DELEGATE_TASK_MAX_STEPS)
     for step in steps[:shown]:
         _print_delegate_step(step)
@@ -351,26 +354,21 @@ def print_tool_result(name: str, result: dict, args: dict | None = None) -> None
         _print_result_body([str(result)])
         return
 
-    # Sub-agent delegation — render aggregated Task block instead of raw
-    # output, so the user sees `✪ Task… (N steps)` + checklist of steps.
     if name in ("delegate_task", "delegate_parallel") and not result.get("error"):
         _print_delegate_aggregate(name, result, args)
         return
 
-    # Error results in red
     if result.get("error"):
         msg = str(result["error"])[:DISPLAY_LINE_TRUNCATE]
         print(f"  {c(C.RED, '└')} {c(C.RED, msg)}")
         return
 
-    # Skipped/denied results
     if result.get("skipped"):
         reason = result.get("reason", "denied")
         print(f"  {c(C.YELLOW, '└')} {c(C.YELLOW, reason[:DISPLAY_LINE_TRUNCATE])}")
         return
 
-    # todo_write — pin above the spinner when in scroll-region mode,
-    # otherwise inline. Lazy import to avoid the core ↔ thinking cycle.
+    # Lazy import — thinking imports core, so a top-level import would loop.
     if name == "todo_write" and isinstance(result.get("todos"), list):
         todos = result["todos"]
         from .thinking import get_active_indicator, set_pinned_todos
@@ -597,32 +595,23 @@ def print_subagent_event(event: dict, agent_label: str = "") -> None:
     """
     gutter = c(C.MAGENTA, "⚤")
     label_str = c(C.MAGENTA + C.DIM, agent_label) if agent_label else ""
-    indent = "    "  # 4-space indent so nested └ aligns under the ⚤ row
 
     event_type = event.get("type", "")
     if event_type == "tool_call":
-        name = event.get("name", "")
-        args = event.get("args", {})
-        safety = event.get("safety", "safe")
-        safety_color = _SAFETY_COLORS.get(safety, C.YELLOW)
-        icon = c(safety_color, _SAFETY_ICONS.get(safety, "●"))
-        name_color = C.VIOLET if safety == "safe" else safety_color
-        preview = _tool_args_preview(args)
-        paren = (
-            f"{c(C.GRAY_DARK, '(')}{c(C.GRAY, preview)}{c(C.GRAY_DARK, ')')}"
-            if preview else ""
+        header = _format_tool_call_header(
+            event.get("name", ""),
+            event.get("args", {}),
+            event.get("safety", "safe"),
         )
-        header = f"{c(name_color + C.BOLD, _display_tool_name(name))}{paren}"
         if label_str:
-            print(f"  {gutter} {label_str}  {icon} {header}")
+            print(f"  {gutter} {label_str}  {header}")
         else:
-            print(f"  {gutter} {icon} {header}")
+            print(f"  {gutter} {header}")
     elif event_type == "done":
         reply = str(event.get("reply", ""))
         if not reply:
             return
-        lines = reply.strip().split("\n")
-        _print_result_body(lines, indent=indent)
+        _print_result_body(reply.strip().split("\n"), indent="    ")
 
 
 def print_tools_list(tools: list[dict]) -> None:

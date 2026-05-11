@@ -7,6 +7,7 @@ Apos #082 split: helpers extraidos para _delegate_core.py.
 """
 
 from . import ToolCategory, ToolDefinition, ToolSafety, register_tool
+from ..display.core import _tool_args_preview
 
 from ._delegate_core import (
     SUBAGENT_DESTRUCTIVE_BLOCKLIST,
@@ -26,7 +27,6 @@ async def _run_subagent(
     tools_filter: str = "",
     provider: str = "",
     label: str = "",
-    stream_to_parent: bool = True,
     parent_approval_callback=None,
     parent_workspace: str | None = None,
 ) -> dict:
@@ -131,10 +131,6 @@ async def _run_subagent(
             return None
         return original_get_tool(name)
 
-    # Stream events to terminal if interactive
-    is_tty = hasattr(sys.stdout, "isatty") and sys.stdout.isatty()
-    should_stream = stream_to_parent and is_tty
-
     # Run sub-agent loop
     collected_text = ""
     tool_calls_made = []
@@ -160,20 +156,12 @@ async def _run_subagent(
             if event["type"] == "token":
                 collected_text += event.get("text", "")
             elif event["type"] == "tool_call":
-                # Capture name + args preview so the aggregate Task view
-                # rendered by print_tool_result shows useful step lines
-                # ("execute_shell: npm test") instead of bare tool names.
-                from ..display.core import _tool_args_preview
                 tool_calls_made.append({
                     "name": event["name"],
                     "args_preview": _tool_args_preview(event.get("args", {})),
                 })
-                if should_stream:
-                    print_subagent_event(event, label)
             elif event["type"] == "done":
                 collected_text = event.get("reply", collected_text)
-                if should_stream:
-                    print_subagent_event(event, label)
             elif event["type"] == "error":
                 errors.append(event.get("message", "unknown error"))
     except asyncio.CancelledError:
@@ -228,9 +216,7 @@ async def _delegate_task(
         return {"ok": False, "category": "feature_disabled", "error": "Multi-agent system is disabled. Set FEATURES['multi_agent_enabled']=True."}
     if not FEATURES.get("delegate_tool_enabled"):
         return {"ok": False, "category": "feature_disabled", "error": "Delegate tool is disabled. Enable 'delegate_tool_enabled' in config."}
-    # stream_to_parent=False so print_tool_result can render the
-    # aggregated Task block at the end; inline streaming would duplicate.
-    return await _run_subagent(task, context, tools_filter, provider, stream_to_parent=False)
+    return await _run_subagent(task, context, tools_filter, provider)
 
 
 # ── Parallel delegation ───────────────────────────────────────
@@ -278,7 +264,6 @@ async def _delegate_parallel(
             result = await _run_subagent(
                 task_desc, context, tools_filter, provider,
                 label=f"#{idx + 1}",
-                stream_to_parent=False,
             )
             result["task_index"] = idx
             result["task"] = task_desc

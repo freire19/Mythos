@@ -80,13 +80,10 @@ async def _ask_choice(question: str, options: object = None) -> dict:
             "error": "question must be a non-empty string",
         }
 
-    # Pause the spinner so the menu and the input prompt stay visually
-    # clean. Restart it on exit so the agent loop keeps its progress UI.
     from ..display.thinking import get_active_indicator
     ind = get_active_indicator()
-    spinner_was_running = bool(ind and getattr(ind, "_task", None))
-    if spinner_was_running:
-        ind.stop()
+    if ind is not None:
+        ind.pause()
 
     try:
         _render_menu(question, parsed)
@@ -122,8 +119,8 @@ async def _ask_choice(question: str, options: object = None) -> dict:
             "error": "too many invalid attempts",
         }
     finally:
-        if spinner_was_running:
-            ind.start()
+        if ind is not None:
+            ind.resume()
 
 
 register_tool(
