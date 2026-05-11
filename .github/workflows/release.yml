@@ -21,5 +21,7 @@ jobs:
         if: ${{ steps.release.outputs.pr }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_NUMBER: ${{ fromJSON(steps.release.outputs.pr).number }}
-        run: gh pr merge --squash "$PR_NUMBER" --repo "$GITHUB_REPOSITORY"
+          PR_JSON: ${{ steps.release.outputs.pr }}
+        run: |
+          PR_NUMBER=$(echo "$PR_JSON" | jq -r .number)
+          gh pr merge --squash "$PR_NUMBER" --repo "$GITHUB_REPOSITORY"
