@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.8.0](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.7.0...alpha-code-v1.8.0) (2026-05-11)
+
+
+### Features
+
+* **display:** Claude-Code-style diff — line numbers + full-width highlight ([5bd430f](https://github.com/freire19/Alpha_Code/commit/5bd430ff1c10204e121c7a36b15cd036ed861bb8))
+
 ## [1.7.0](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.6.2...alpha-code-v1.7.0) (2026-05-11)
 
 
