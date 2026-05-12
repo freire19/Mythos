@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.8.3](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.8.2...alpha-code-v1.8.3) (2026-05-12)
+
+
+### Bug Fixes
+
+* **repl:** catch-all silent-turn marker, runs regardless of exit path ([7c6219c](https://github.com/freire19/Alpha_Code/commit/7c6219cb33972e283a632c018259f3572bac76f0))
+
 ## [1.8.2](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.8.1...alpha-code-v1.8.2) (2026-05-12)
 
 
