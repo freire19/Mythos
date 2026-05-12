@@ -418,6 +418,9 @@ async def _browser_close_tab(index: int | None = None) -> dict:
     if not session.pages:
         await session.close()
         return {"closed": index, "session_closed": True}
+    # Aba fechada antes da ativa desloca o índice ativo uma posição à esquerda
+    if index < session.active_idx:
+        session.active_idx -= 1
     session.active_idx = max(0, min(session.active_idx, len(session.pages) - 1))
     return {"closed": index, "tab_count": len(session.pages), "active_tab": session.active_idx}
 

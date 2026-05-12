@@ -286,7 +286,9 @@ async def _execute_pipe_chain(
                 # Sem kill, o subprocess vira zumbi ate ESGOTAR PIDs.
                 proc.kill()
                 try:
-                    await proc.wait()
+                    await asyncio.wait_for(proc.wait(), timeout=5)
+                except TimeoutError:
+                    logger.error(f"Pipeline process {proc.pid} didn't die after kill — may be in D state")
                 except Exception:
                     pass
                 raise
@@ -328,7 +330,9 @@ async def _execute_pipe_chain(
             except (TimeoutError, asyncio.CancelledError):
                 proc.kill()
                 try:
-                    await proc.wait()
+                    await asyncio.wait_for(proc.wait(), timeout=5)
+                except TimeoutError:
+                    logger.error(f"Pipeline process {proc.pid} didn't die after kill — may be in D state")
                 except Exception:
                     pass
                 raise

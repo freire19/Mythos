@@ -18,6 +18,11 @@ from .workspace import AGENT_WORKSPACE, assert_within_workspace
 
 logger = logging.getLogger(__name__)
 
+# Directories skipped during glob/recursive scans to avoid noise in monorepos
+_SKIP_DIRS = frozenset({".git", "node_modules", ".venv", "__pycache__",
+                         ".mypy_cache", ".pytest_cache", ".ruff_cache",
+                         "dist", "build"})
+
 
 # #025/#071 (V1.1): ripgrep (`rg`) e ~10-50x mais rapido que o scan Python
 # (`os.walk` + `read_text` + regex line-a-line) em projetos > 1000 arquivos.
@@ -400,8 +405,6 @@ async def _glob_files(pattern: str, path: str = ".") -> dict:
     # inteira antes de cortar a 200. Em monorepos com .git/node_modules
     # incluido, isso pode produzir 100K+ entradas. Itera o generator,
     # acumula 200, ordena no final.
-    _SKIP_DIRS = {".git", "node_modules", ".venv", "__pycache__", ".mypy_cache",
-                  ".pytest_cache", ".ruff_cache", "dist", "build"}
     matches = []
     skipped_outside = 0
     try:

@@ -5,6 +5,7 @@ import shlex
 from ..executor import _annotate_error
 from . import ToolCategory, ToolDefinition, ToolSafety, register_tool
 from ._composite_helpers import _run_tool, _violation
+from .file_tools import _SKIP_DIRS
 from .path_helpers import _validate_path
 from .workspace import AGENT_WORKSPACE
 

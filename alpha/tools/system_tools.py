@@ -67,7 +67,7 @@ async def _clipboard_read() -> dict:
     except asyncio.CancelledError:
         proc.kill()
         try:
-            await proc.wait()
+            await asyncio.wait_for(proc.wait(), timeout=3)
         except Exception:
             pass
         raise
@@ -106,7 +106,7 @@ async def _clipboard_write(content: str) -> dict:
     except asyncio.CancelledError:
         proc.kill()
         try:
-            await proc.wait()
+            await asyncio.wait_for(proc.wait(), timeout=3)
         except Exception:
             pass
         raise

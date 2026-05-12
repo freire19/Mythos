@@ -45,6 +45,7 @@ from alpha.display import (
     print_silent_turn,
     print_tool_call,
     print_tool_result,
+    render_markdown,
 )
 from alpha.display.core import live_label_for_tool
 from alpha.history import generate_session_id, save_session
@@ -62,14 +63,32 @@ install_lifecycle_hooks()
 
 
 async def _run_once(messages, user_message, provider, temperature, get_tool_fn, tools, workspace=None):
-    """Run a single agent turn and display events."""
+    """Run a single agent turn and display events.
+
+    Streamed tokens are buffered, not echoed live — the spinner shows
+    progress while text accumulates. At each boundary (tool call, done,
+    error) the pending segment passes through `render_markdown` so
+    tables, bold, code, and headers reach the terminal as ANSI instead
+    of raw markdown."""
     from alpha.agent import run_agent
 
     full_reply = ""
+    pending_text = ""
     indicator = ThinkingIndicator("Think")
     indicator.start()
     pending_args: dict[str, dict] = {}
     any_visible = False
+
+    def flush_text() -> None:
+        nonlocal pending_text
+        if not pending_text:
+            return
+        rendered = render_markdown(pending_text)
+        sys.stdout.write(rendered)
+        if not rendered.endswith("\n"):
+            sys.stdout.write("\n")
+        sys.stdout.flush()
+        pending_text = ""
 
     aborted = False
     try:
@@ -87,17 +106,13 @@ async def _run_once(messages, user_message, provider, temperature, get_tool_fn, 
 
             if event_type == "token":
                 text = event.get("text", "")
-                sys.stdout.write(text)
-                sys.stdout.flush()
+                pending_text += text
                 full_reply += text
                 any_visible = True
                 indicator.add_streamed_text(text)
 
             elif event_type == "tool_call":
-                if full_reply and not full_reply.endswith("\n"):
-                    sys.stdout.write("\n")
-                    sys.stdout.flush()
-                    full_reply += "\n"
+                flush_text()
                 tc_args = event.get("args", {}) or {}
                 print_tool_call(event["name"], tc_args, event.get("safety", "safe"))
                 pending_args[event["name"]] = tc_args if isinstance(tc_args, dict) else {}
@@ -122,23 +137,21 @@ async def _run_once(messages, user_message, provider, temperature, get_tool_fn, 
                 any_visible = True
 
             elif event_type == "done":
-                used_inline_spinner = (
-                    getattr(indicator, "_enabled", False)
-                    and not getattr(indicator, "_scroll_active", False)
-                )
                 indicator.stop()
                 reply = event.get("reply", "")
+                # Fallback: if nothing was ever streamed, take the `done`
+                # payload. Otherwise trust the buffered tokens — earlier
+                # segments have already been flushed at tool-call boundaries,
+                # so we can only render what's still pending.
+                if reply and not full_reply:
+                    pending_text = reply
+                    full_reply = reply
+                flush_text()
                 if reply:
-                    if not full_reply:
-                        sys.stdout.write(reply)
-                        sys.stdout.flush()
-                        full_reply = reply
-                    elif used_inline_spinner:
-                        sys.stdout.write(reply)
-                        sys.stdout.flush()
                     any_visible = True
 
             elif event_type == "error":
+                flush_text()
                 indicator.stop()
                 print_error(event.get("message", "Unknown error"))
                 any_visible = True
@@ -147,12 +160,9 @@ async def _run_once(messages, user_message, provider, temperature, get_tool_fn, 
         raise
     finally:
         indicator.stop()
+        flush_text()
         if not any_visible and not aborted:
             print_silent_turn()
-
-    # Ensure newline after streaming
-    if full_reply and not full_reply.endswith("\n"):
-        print()
 
     return full_reply
 

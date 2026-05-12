@@ -3,9 +3,10 @@
 import os
 import re
 import tempfile
+from pathlib import Path
 
 from . import ToolCategory, ToolDefinition, ToolSafety, register_tool
-from ._composite_helpers import _run_tool
+from ._composite_helpers import _run_tool, _violation
 from .file_tools import _validate_path_no_symlink
 from .path_helpers import _validate_path
 
@@ -18,10 +19,17 @@ async def _search_and_replace(
     dry_run: bool = True,
 ) -> dict:
     """Search and replace across multiple files."""
-    target_path = _validate_path(path)
+    try:
+        target_path = _validate_path(path)
+    except PermissionError as e:
+        return _violation(str(e))
 
     # Find files with matches
     search_result = await _run_tool("search_files", path=str(target_path), pattern=re.escape(search))
+    # #D037: post-filter by file_pattern (search_files doesn't accept it)
+    if file_pattern != "**/*":
+        results = search_result.get("results", [])
+        search_result["results"] = [r for r in results if Path(r.get("file", "")).match(file_pattern)]
     if "error" in search_result:
         return search_result
 
