@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.8.2](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.8.1...alpha-code-v1.8.2) (2026-05-12)
+
+
+### Bug Fixes
+
+* audit findings DL035 / DL036 / DL037 ([820ebba](https://github.com/freire19/Alpha_Code/commit/820ebbaa12a4c0bb9e027137b4b52ec2c5a2919e))
+* resilience + sub-agent hardening ([9fbddab](https://github.com/freire19/Alpha_Code/commit/9fbddabfd65c119ca09977d877eb7fb7b29f065d))
+
 ## [1.8.1](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.8.0...alpha-code-v1.8.1) (2026-05-12)
 
 
