@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.8.1](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.8.0...alpha-code-v1.8.1) (2026-05-12)
+
+
+### Refactoring
+
+* /simplify pass 2 — dedupe truncate/recovery, cap raw buffer ([73c1883](https://github.com/freire19/Alpha_Code/commit/73c18835322f3a4e37472907200d110a885cbded))
+
 ## [1.8.0](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.7.0...alpha-code-v1.8.0) (2026-05-11)
 
 
