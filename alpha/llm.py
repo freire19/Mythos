@@ -89,6 +89,9 @@ class DsmlStripper:
 # sem editar este arquivo (#DM011).
 _LOW_TEMPERATURE = 0.2
 
+# Rolling cap for raw_content_for_recovery — see streaming loop for rationale.
+_RAW_RECOVERY_CAP = 8192
+
 
 # #026/#076: cliente httpx compartilhado por loop. Antes, cada call ao LLM
 # criava `AsyncClient(...)` e fechava no fim, gastando 1 TLS handshake +
@@ -148,6 +151,21 @@ _DSML_ATTR_NAME_RE = re.compile(r'name="([^"]+)"', re.IGNORECASE)
 _DSML_ATTR_STRING_RE = re.compile(r'string="(true|false)"', re.IGNORECASE)
 
 
+def _finalize_recovered_call(name: str, args_str: str, id_prefix: str) -> dict | None:
+    """Common tail for the two recovery paths: registry check + deterministic
+    id (hash-of-input so repeated parses of the same payload yield the same
+    id; `usedforsecurity=False` is the standard bandit/ruff B324 escape hatch
+    — this is a tool-call id, not a cryptographic hash)."""
+    from .tools import get_tool
+    if get_tool(name) is None:
+        logger.debug("Recovered tool call '%s' not in registry — discarding", name)
+        return None
+    digest = hashlib.sha1(
+        (name + args_str).encode("utf-8"), usedforsecurity=False
+    ).hexdigest()[:8]
+    return {"id": f"call_{id_prefix}_{digest}", "name": name, "arguments": args_str}
+
+
 def _recover_tool_call_from_dsml(content: str) -> dict | None:
     """Recover a tool call from <|DSML|invoke>/<|DSML|parameter> blocks.
 
@@ -157,8 +175,6 @@ def _recover_tool_call_from_dsml(content: str) -> dict | None:
     runs and the agent stalls waiting for an approval that never comes.
     This parser converts the markup back into a proper tool_call dict.
     """
-    if "invoke" not in content.lower():
-        return None
     invoke_match = _DSML_INVOKE_RE.search(content)
     if not invoke_match:
         return None
@@ -182,21 +198,7 @@ def _recover_tool_call_from_dsml(content: str) -> dict | None:
         params[key] = value
     if not params:
         return None
-
-    from .tools import get_tool
-    if get_tool(name) is None:
-        logger.debug("Recovered DSML tool call '%s' not in registry — discarding", name)
-        return None
-
-    args_str = json.dumps(params, ensure_ascii=False)
-    digest = hashlib.sha1(
-        (name + args_str).encode("utf-8"), usedforsecurity=False
-    ).hexdigest()[:8]
-    return {
-        "id": f"call_dsml_{digest}",
-        "name": name,
-        "arguments": args_str,
-    }
+    return _finalize_recovered_call(name, json.dumps(params, ensure_ascii=False), "dsml")
 
 
 def _recover_tool_call_from_content(content: str) -> dict | None:
@@ -252,27 +254,8 @@ def _recover_tool_call_from_content(content: str) -> dict | None:
         args_str = args
     else:
         return None
-
-    # DL028: validate that the recovered tool name actually exists in the
-    # registry. Ollama models can hallucinate tool names; passing them
-    # forward reaches the executor which sees unknown_tool and wastes an
-    # iteration. Better to discard here so the LLM emits a real one.
-    from .tools import get_tool
-    if get_tool(name) is None:
-        logger.debug("Recovered tool call '%s' not in registry — discarding", name)
-        return None
-
-    # Determinismo por input vence hash() (seed-randomizado entre processos).
-    # `usedforsecurity=False` silencia bandit/ruff B324 — uso e id de tool call,
-    # nao hash criptografico.
-    digest = hashlib.sha1(
-        (name + args_str).encode("utf-8"), usedforsecurity=False
-    ).hexdigest()[:8]
-    return {
-        "id": f"call_recovered_{digest}",
-        "name": name,
-        "arguments": args_str,
-    }
+    # DL028: discard names not in the registry — Ollama hallucinates these.
+    return _finalize_recovered_call(name, args_str, "recovered")
 
 
 def _calc_backoff(attempt: int, retry_after: float | None = None) -> float:
@@ -440,15 +423,19 @@ async def stream_chat_with_tools(
                         data = json.loads(data_str)
                         delta = data["choices"][0].get("delta", {})
 
-                        # Content tokens — strip DSML noise before yielding.
                         # `dsml_stripper` buffers any unclosed `<…` tail so a
                         # tag split across SSE chunks is still removed cleanly.
-                        # raw_content_for_recovery preserves the unstripped
-                        # stream so _recover_tool_call_from_dsml can parse
-                        # any leaked <|DSML|invoke> blocks at end-of-stream.
+                        # raw_content_for_recovery is a rolling 8KB tail kept
+                        # only so end-of-stream DSML recovery has something
+                        # to parse — DSML blocks always land at the end and
+                        # accumulating the full stream would double memory
+                        # on long responses for a path that fires <1% of turns.
                         content = delta.get("content", "")
                         if content:
-                            raw_content_for_recovery += content
+                            if not tool_calls_acc:
+                                raw_content_for_recovery += content
+                                if len(raw_content_for_recovery) > _RAW_RECOVERY_CAP:
+                                    raw_content_for_recovery = raw_content_for_recovery[-_RAW_RECOVERY_CAP:]
                             safe = dsml_stripper.feed(content)
                             if safe:
                                 accumulated_content += safe

@@ -34,19 +34,18 @@ class C:
     ITALIC = "\033[3m"
     UNDERLINE = "\033[4m"
 
-    # Core palette — solid tones, less neon. Slot 82 (#5fff5f) and 46
-    # (#00ff00) vibrate too much on dark terminals; switched to forest
-    # 34 (#00af00). Same idea for cyan/yellow: pull saturation back so
-    # the violet brand stays the loudest thing on screen.
-    GREEN = "\033[38;5;34m"       # #00af00 forest green (solid)
-    GREEN_DARK = "\033[38;5;28m"  # #008700 darker shade
-    GREEN_NEON = "\033[38;5;46m"  # #00ff00 reserved for thinking pulse only
-    RED = "\033[38;5;160m"        # #d70000 solid red (was 196 — neon)
+    # Core palette — solid tones. GREEN_NEON is reserved for the
+    # thinking-indicator pulse; everything else stays muted enough that
+    # the violet brand reads as the loudest thing on the screen.
+    GREEN = "\033[38;5;34m"       # #00af00 forest green
+    GREEN_DARK = "\033[38;5;28m"  # #008700
+    GREEN_NEON = "\033[38;5;46m"  # #00ff00 (thinking pulse only)
+    RED = "\033[38;5;160m"        # #d70000
     RED_DARK = "\033[38;5;124m"   # #af0000
-    YELLOW = "\033[38;5;178m"     # #d7af00 gold (was 220 — neon yellow)
-    ORANGE = "\033[38;5;172m"     # #d78700 (was 208 — neon orange)
+    YELLOW = "\033[38;5;178m"     # #d7af00 gold
+    ORANGE = "\033[38;5;172m"     # #d78700
     BLUE = "\033[38;5;33m"        # #0087ff
-    CYAN = "\033[38;5;37m"        # #00afaf teal (was 51 — neon cyan)
+    CYAN = "\033[38;5;37m"        # #00afaf teal
     MAGENTA = "\033[38;5;135m"    # Purple (sub-agents)
 
     # Refined violet palette — the Alpha brand color. Picked over the
@@ -103,6 +102,13 @@ _SAFETY_ICONS = {
     "unknown": "?",
 }
 
+
+def _truncate(s: str, limit: int) -> str:
+    """Trim `s` to fit within `limit` characters, marking truncation with `…`."""
+    if len(s) <= limit:
+        return s
+    return s[: limit - 1] + "…"
+
 # Category icons for /tools display.
 # Chaves baterem com `td.category` em register_tool. Antes tinha `file`
 # (tool usa `filesystem`), `pipeline` (nenhuma tool), e faltava
@@ -140,19 +146,27 @@ def _display_tool_name(name: str) -> str:
 # ─── Display functions ───
 
 
-def _tool_args_preview(args: dict) -> str:
-    """Pick the most informative arg and truncate it for the header line."""
+_HEADER_PREVIEW_KEYS = ("path", "command", "query", "action", "pattern", "file", "code")
+_LIVE_LABEL_KEYS = ("path", "command", "query", "action", "pattern", "file", "task", "tasks")
+
+
+def _tool_args_preview(
+    args: dict,
+    keys: tuple = _HEADER_PREVIEW_KEYS,
+    limit: int = None,
+) -> str:
+    """Pick the most informative arg and truncate it. `keys` controls which
+    keys are tried (default = header set); `limit` overrides truncation
+    width (default = DISPLAY_PREVIEW_TRUNCATE)."""
     if not isinstance(args, dict) or not args:
         return ""
-    for key in ("path", "command", "query", "action", "pattern", "file", "code"):
+    for key in keys:
         if key in args:
             val = str(args[key])
             break
     else:
         val = str(next(iter(args.values())))
-    if len(val) > DISPLAY_PREVIEW_TRUNCATE:
-        val = val[:DISPLAY_PREVIEW_TRUNCATE - 1] + "…"
-    return val.replace("\n", " ")
+    return _truncate(val, limit or DISPLAY_PREVIEW_TRUNCATE).replace("\n", " ")
 
 
 def _format_tool_call_header(name: str, args: dict, safety: str) -> str:
@@ -258,27 +272,21 @@ def _render_diff(old_text: str, new_text: str, path: str | None = None) -> None:
                 new_n = int(m.group(2))
             print(f"  {gutter} {c(C.CYAN + C.DIM, line[:DISPLAY_LINE_TRUNCATE])}")
         elif line.startswith("+"):
-            text = line[1:]
-            if len(text) > DISPLAY_LINE_TRUNCATE:
-                text = text[:DISPLAY_LINE_TRUNCATE - 1] + "…"
+            text = _truncate(line[1:], DISPLAY_LINE_TRUNCATE)
             num = c(C.GRAY_DARK, f"{new_n:>4}")
             print(_diff_line_full_width(
                 f"  {gutter} {num} ", C.BG_GREEN, C.WHITE, f"+ {text}",
             ))
             new_n += 1
         elif line.startswith("-"):
-            text = line[1:]
-            if len(text) > DISPLAY_LINE_TRUNCATE:
-                text = text[:DISPLAY_LINE_TRUNCATE - 1] + "…"
+            text = _truncate(line[1:], DISPLAY_LINE_TRUNCATE)
             num = c(C.GRAY_DARK, f"{old_n:>4}")
             print(_diff_line_full_width(
                 f"  {gutter} {num} ", C.BG_RED, C.WHITE, f"- {text}",
             ))
             old_n += 1
         else:
-            text = line[1:] if line.startswith(" ") else line
-            if len(text) > DISPLAY_LINE_TRUNCATE:
-                text = text[:DISPLAY_LINE_TRUNCATE - 1] + "…"
+            text = _truncate(line[1:] if line.startswith(" ") else line, DISPLAY_LINE_TRUNCATE)
             num = c(C.GRAY_DARK, f"{new_n:>4}")
             print(f"  {gutter} {num} {c(C.GRAY, '  ' + text)}")
             old_n += 1
@@ -314,10 +322,7 @@ def _result_summary_line(result: dict) -> str:
         keys = [k for k in result if not k.startswith("_")]
         if keys:
             short = str(result[keys[0]])[:DISPLAY_LINE_TRUNCATE - 20]
-    short = str(short)
-    if len(short) > DISPLAY_LINE_TRUNCATE - 10:
-        short = short[:DISPLAY_LINE_TRUNCATE - 11] + "…"
-    return short
+    return _truncate(str(short), DISPLAY_LINE_TRUNCATE - 10)
 
 
 _DELEGATE_TASK_MAX_STEPS = 5
@@ -338,8 +343,7 @@ def _print_delegate_step(step: object) -> None:
         text = f"{name}: {preview}" if preview else name
     else:
         text = str(step)
-    if len(text) > DISPLAY_PREVIEW_TRUNCATE:
-        text = text[:DISPLAY_PREVIEW_TRUNCATE - 1] + "…"
+    text = _truncate(text, DISPLAY_PREVIEW_TRUNCATE)
     check = c(C.GREEN, "✔")
     print(f"        {check} {c(C.GRAY, _strike(text))}")
 
@@ -348,9 +352,7 @@ def _print_delegate_single(task_label: str, result: dict) -> None:
     """Render a single sub-agent result as an inline Task block."""
     steps = result.get("tools_used") or []
     iterations = result.get("iterations", len(steps))
-    short = task_label[:DISPLAY_PROMPT_VALUE_TRUNCATE]
-    if len(task_label) > DISPLAY_PROMPT_VALUE_TRUNCATE:
-        short = short[:-1] + "…"
+    short = _truncate(task_label, DISPLAY_PROMPT_VALUE_TRUNCATE)
     suffix = f"({iterations} steps)"
     print(f"  {c(C.VIOLET + C.BOLD, '✪')} {c(C.WHITE + C.BOLD, short)} {c(C.GRAY, suffix)}")
     shown = min(len(steps), _DELEGATE_TASK_MAX_STEPS)
@@ -900,14 +902,7 @@ def live_label_for_tool(name: str, args: dict) -> str:
     Falls back to the bare verb when args has no obviously informative key
     (avoids "Working {}" garbage)."""
     verb = label_for_tool(name)
-    if not isinstance(args, dict) or not args:
-        return verb
-    for key in ("path", "command", "query", "action", "pattern", "file", "task", "tasks"):
-        if key in args:
-            val = str(args[key]).replace("\n", " ")
-            if len(val) > _LIVE_LABEL_MAX_VALUE:
-                val = val[:_LIVE_LABEL_MAX_VALUE - 1] + "…"
-            return f"{verb} {val}"
-    return verb
+    preview = _tool_args_preview(args, keys=_LIVE_LABEL_KEYS, limit=_LIVE_LABEL_MAX_VALUE)
+    return f"{verb} {preview}" if preview else verb
 
 
