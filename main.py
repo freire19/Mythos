@@ -42,6 +42,7 @@ from alpha.display import (
     print_error,
     print_phase,
     print_providers_list,
+    print_silent_turn,
     print_tool_call,
     print_tool_result,
 )
@@ -68,13 +69,9 @@ async def _run_once(messages, user_message, provider, temperature, get_tool_fn, 
     indicator = ThinkingIndicator("Think")
     indicator.start()
     pending_args: dict[str, dict] = {}
-    # any_visible counts everything the user can see come out of this turn:
-    # streamed tokens, tool calls, tool results, context-compressed notice,
-    # error messages, OR a non-empty done reply. If at end-of-turn this is
-    # still False the catch-all marker in `finally` fires so the user
-    # doesn't see a bare prompt and assume the agent froze.
     any_visible = False
 
+    aborted = False
     try:
         async for event in run_agent(
             messages,
@@ -145,18 +142,13 @@ async def _run_once(messages, user_message, provider, temperature, get_tool_fn, 
                 indicator.stop()
                 print_error(event.get("message", "Unknown error"))
                 any_visible = True
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        aborted = True
+        raise
     finally:
         indicator.stop()
-        # Catch-all: if the entire turn produced no visible output (silent
-        # done, generator returned without a done event, or any other exit
-        # path where neither a token nor a tool nor an error reached the
-        # screen), print a marker so the user knows the turn ended and the
-        # REPL is waiting for input.
-        if not any_visible:
-            print(
-                f"  {c(C.GRAY_DARK, '·')} "
-                f"{c(C.GRAY, '(turno encerrado — envie próxima instrução)')}"
-            )
+        if not any_visible and not aborted:
+            print_silent_turn()
 
     # Ensure newline after streaming
     if full_reply and not full_reply.endswith("\n"):

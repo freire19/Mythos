@@ -365,9 +365,11 @@ async def _git_operation(
             return {"error": err}
         if not tag_args:
             return {"error": "tag_create requer pelo menos o nome da tag"}
-        # #DL036: tag_args pode conter flags (-a, -m) antes do nome da tag.
-        # Extrai o primeiro positional como nome e passa tudo pro git.
-        tag_name = next((p for p in tag_args if not p.startswith("-")), tag_args[-1])
+        # #DL036: tag_args may carry flags (-a, -m) before the positional
+        # tag name. Pick the first non-flag token; refuse if there isn't one.
+        tag_name = next((p for p in tag_args if not p.startswith("-")), None)
+        if tag_name is None:
+            return {"error": "tag_create requer um nome de tag positional"}
         if message:
             return await _run_git(["tag", "-a", tag_name, "-m", message], cwd)
         return await _run_git(["tag"] + tag_args, cwd)

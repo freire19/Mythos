@@ -58,11 +58,12 @@ GIT_READ_ACTIONS = frozenset({
 
 
 def _auto_approve_no_callback(name: str, args: dict) -> bool:
-    """Approval default quando sub-agent nao tem callback humano.
+    """Approval default when a sub-agent has no human callback.
 
-    Aprova qualquer tool por default (ja que tools perigosas estao removidas
-    via SUBAGENT_DESTRUCTIVE_BLOCKLIST), exceto git_operation onde precisamos
-    distinguir read de write actions.
+    Auto-approves only tools listed in AUTO_APPROVE_TOOLS (read/list/search
+    style — already the parent's auto-approve surface), plus read-only
+    git_operation actions. Everything else is denied so the sub-agent
+    can't run destructive tools the parent policy would have gated.
     """
     if name == "git_operation":
         return (args or {}).get("action") in GIT_READ_ACTIONS

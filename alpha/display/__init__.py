@@ -33,6 +33,7 @@ from .core import (
     print_phase,
     print_providers_list,
     print_sessions_list,
+    print_silent_turn,
     print_subagent_event,
     print_tool_call,
     print_tool_result,

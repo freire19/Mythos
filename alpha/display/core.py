@@ -574,6 +574,12 @@ def print_error(message: str) -> None:
     print(f"\n  {c(C.RED + C.BOLD, '✗ Error:')} {c(C.RED, message)}")
 
 
+def print_silent_turn() -> None:
+    """Marker for turns that produced no visible output — keeps the user
+    from staring at a bare prompt and wondering whether the agent froze."""
+    print(f"  {c(C.GRAY_DARK, '·')} {c(C.GRAY, '(turno encerrado — envie próxima instrução)')}")
+
+
 def print_context_compressed(before: int, after: int) -> None:
     """Display context compression event with stats."""
     saved = before - after
