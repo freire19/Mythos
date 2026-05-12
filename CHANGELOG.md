@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.8.4](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.8.3...alpha-code-v1.8.4) (2026-05-12)
+
+
+### Bug Fixes
+
+* trigger release for simplify pass 3 patches ([0488c5a](https://github.com/freire19/Alpha_Code/commit/0488c5ac51093096f43cd8ab546e304f8c16af47))
+
 ## [1.8.3](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.8.2...alpha-code-v1.8.3) (2026-05-12)
 
 
