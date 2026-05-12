@@ -66,7 +66,8 @@ def _auto_approve_no_callback(name: str, args: dict) -> bool:
     """
     if name == "git_operation":
         return (args or {}).get("action") in GIT_READ_ACTIONS
-    return True
+    from ..approval import AUTO_APPROVE_TOOLS
+    return name in AUTO_APPROVE_TOOLS
 
 
 def _load_subagent_prompt() -> str:

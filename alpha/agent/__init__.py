@@ -161,8 +161,9 @@ async def run_agent(
                     }
                 except Exception as ce:
                     logger.error(f"Aggressive compression failed: {ce}")
-                    yield {"type": "error", "message": err}
-                    return
+                    from ..context import hard_truncate_messages
+                    hard_truncate_messages(messages)
+                    # Continue — let the LLM retry with truncated context
                 continue  # retry the LLM call once
 
             break

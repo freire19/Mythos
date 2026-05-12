@@ -454,7 +454,9 @@ async def execute_tool_calls(
         if isinstance(r, Exception):
             tc, tool_name, args, _ = runnable[i]
             logger.error(f"Parallel tool execution error ({tool_name}): {type(r).__name__}: {r}")
-            result = {"error": f"{type(r).__name__}: {r}"}
+            result = _annotate_error(
+                {"error": f"{type(r).__name__}: {r}"}, "runtime"
+            )
             yield {"type": "tool_result", "name": tool_name, "result": result}
             _append_tool_msg(messages, tc["id"], result, tool_name)
             continue
