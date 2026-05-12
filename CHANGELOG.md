@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.8.6](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.8.5...alpha-code-v1.8.6) (2026-05-12)
+
+
+### Bug Fixes
+
+* zerar DEEP_BUGS, DEEP_LOGIC, e ALTOs do DEEP_RESILIENCE ([dc56b13](https://github.com/freire19/Alpha_Code/commit/dc56b13567101f957ec572b1075aea704931632e))
+
 ## [1.8.5](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.8.4...alpha-code-v1.8.5) (2026-05-12)
 
 
