@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.8.5](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.8.4...alpha-code-v1.8.5) (2026-05-12)
+
+
+### Bug Fixes
+
+* make todo_write always emit a visible inline line ([35f9bbd](https://github.com/freire19/Alpha_Code/commit/35f9bbd98b2551e562ff7001bf4230673c972048))
+
 ## [1.8.4](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.8.3...alpha-code-v1.8.4) (2026-05-12)
 
 
