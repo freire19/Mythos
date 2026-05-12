@@ -105,9 +105,23 @@ async def _execute_shell(command: str, cwd: str = None, timeout: int | None = No
             }
 
         # Execute pipes safely via chained subprocess_exec (NEVER use subprocess_shell)
-        has_pipe = "|" in command
+        # #DL037: detecta pipe via shlex.parse (cmd_parts) — "|" como token
+        # standalone = pipe real; "|" dentro de aspas = literal, preservado.
+        has_pipe = "|" in cmd_parts
         if has_pipe:
-            pipe_segments = [s.strip() for s in command.split("|") if s.strip()]
+            # Reconstroi segmentos do pipe a partir dos tokens parseados,
+            # respeitando quoting (shlex.join preserva aspas necessarias).
+            pipe_segments: list[str] = []
+            current: list[str] = []
+            for part in cmd_parts:
+                if part == "|":
+                    if current:
+                        pipe_segments.append(shlex.join(current))
+                        current = []
+                else:
+                    current.append(part)
+            if current:
+                pipe_segments.append(shlex.join(current))
             prev_output = None
             all_stderr = b""
             last_returncode = 0

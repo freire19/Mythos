@@ -266,8 +266,9 @@ async def _git_operation(
         extra, err = _sanitize_git_args("show", args)
         if err:
             return {"error": err}
-        ref = extra[0] if extra else "HEAD"
-        return await _run_git(["show", "--stat", ref], cwd)
+        # #DL035: extra pode conter flags + positional. Passa tudo pro git;
+        # fallback HEAD quando vazio (evitava extra[0] que confundia flag com ref).
+        return await _run_git(["show", "--stat"] + (extra or ["HEAD"]), cwd)
 
     elif action == "blame":
         if not files:
@@ -364,8 +365,11 @@ async def _git_operation(
             return {"error": err}
         if not tag_args:
             return {"error": "tag_create requer pelo menos o nome da tag"}
+        # #DL036: tag_args pode conter flags (-a, -m) antes do nome da tag.
+        # Extrai o primeiro positional como nome e passa tudo pro git.
+        tag_name = next((p for p in tag_args if not p.startswith("-")), tag_args[-1])
         if message:
-            return await _run_git(["tag", "-a", tag_args[0], "-m", message], cwd)
+            return await _run_git(["tag", "-a", tag_name, "-m", message], cwd)
         return await _run_git(["tag"] + tag_args, cwd)
 
     return {"error": f"Ação '{action}' não implementada"}
