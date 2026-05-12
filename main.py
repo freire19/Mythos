@@ -68,6 +68,12 @@ async def _run_once(messages, user_message, provider, temperature, get_tool_fn, 
     indicator = ThinkingIndicator("Think")
     indicator.start()
     pending_args: dict[str, dict] = {}
+    # any_visible counts everything the user can see come out of this turn:
+    # streamed tokens, tool calls, tool results, context-compressed notice,
+    # error messages, OR a non-empty done reply. If at end-of-turn this is
+    # still False the catch-all marker in `finally` fires so the user
+    # doesn't see a bare prompt and assume the agent froze.
+    any_visible = False
 
     try:
         async for event in run_agent(
@@ -87,9 +93,7 @@ async def _run_once(messages, user_message, provider, temperature, get_tool_fn, 
                 sys.stdout.write(text)
                 sys.stdout.flush()
                 full_reply += text
-                # Provider usage payload arrives only at end-of-stream, so
-                # the spinner shows a chars/4 estimate accumulated as bytes
-                # arrive (rounding deferred to render time).
+                any_visible = True
                 indicator.add_streamed_text(text)
 
             elif event_type == "tool_call":
@@ -101,11 +105,13 @@ async def _run_once(messages, user_message, provider, temperature, get_tool_fn, 
                 print_tool_call(event["name"], tc_args, event.get("safety", "safe"))
                 pending_args[event["name"]] = tc_args if isinstance(tc_args, dict) else {}
                 indicator.start(live_label_for_tool(event["name"], tc_args))
+                any_visible = True
 
             elif event_type == "tool_result":
                 tr_args = pending_args.pop(event["name"], None)
                 print_tool_result(event["name"], event.get("result", {}), args=tr_args)
                 indicator.start("Think")
+                any_visible = True
 
             elif event_type == "approval_needed":
                 # Hide the spinner so input() echoes cleanly. Scroll region
@@ -116,6 +122,7 @@ async def _run_once(messages, user_message, provider, temperature, get_tool_fn, 
             elif event_type == "context_compressed":
                 print_context_compressed(event.get("before", 0), event.get("after", 0))
                 indicator.start("Think")
+                any_visible = True
 
             elif event_type == "done":
                 used_inline_spinner = (
@@ -132,22 +139,24 @@ async def _run_once(messages, user_message, provider, temperature, get_tool_fn, 
                     elif used_inline_spinner:
                         sys.stdout.write(reply)
                         sys.stdout.flush()
-                elif not full_reply:
-                    # Silent end-of-turn: no streamed text and no done reply.
-                    # Usually means the LLM treated the last tool_call as the
-                    # work for this turn (todo_write check-off, etc.). Without
-                    # a marker the user sees the bare prompt and thinks the
-                    # agent froze, so they retype the instruction.
-                    print(
-                        f"  {c(C.GRAY_DARK, '·')} "
-                        f"{c(C.GRAY, '(turno encerrado — envie próxima instrução)')}"
-                    )
+                    any_visible = True
 
             elif event_type == "error":
                 indicator.stop()
                 print_error(event.get("message", "Unknown error"))
+                any_visible = True
     finally:
         indicator.stop()
+        # Catch-all: if the entire turn produced no visible output (silent
+        # done, generator returned without a done event, or any other exit
+        # path where neither a token nor a tool nor an error reached the
+        # screen), print a marker so the user knows the turn ended and the
+        # REPL is waiting for input.
+        if not any_visible:
+            print(
+                f"  {c(C.GRAY_DARK, '·')} "
+                f"{c(C.GRAY, '(turno encerrado — envie próxima instrução)')}"
+            )
 
     # Ensure newline after streaming
     if full_reply and not full_reply.endswith("\n"):
