@@ -409,7 +409,14 @@ def print_tool_result(name: str, result: dict, args: dict | None = None) -> None
         from .thinking import get_active_indicator, set_pinned_todos
         ind = get_active_indicator()
         if ind is not None and ind._scroll_active:
+            # Pin to the panel for at-a-glance progress, but ALSO emit an
+            # inline summary so the scroll history shows the turn produced
+            # a visible result. Without this line the tool_call header sat
+            # alone with no `└ …` follow-up, looking like the agent froze.
             set_pinned_todos(todos)
+            done = sum(1 for t in todos if t.get("status") == "completed")
+            total = len(todos)
+            print(f"  {c(C.GRAY_DARK, '└')} {c(C.GRAY, f'{total} todos pinned ({done} completed)')}")
         else:
             _print_todo_list(todos)
         warning = result.get("warning")

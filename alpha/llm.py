@@ -523,6 +523,17 @@ async def stream_chat_with_tools(
                         "error": None,
                     }
                 else:
+                    # If the raw buffer carried DSML markup but neither
+                    # recoverer could turn it into a real tool_call, log a
+                    # warning. Otherwise the turn ends silently and the user
+                    # sees a blank prompt without knowing the model emitted
+                    # un-parseable markup.
+                    if raw_content_for_recovery and "invoke" in raw_content_for_recovery.lower():
+                        logger.warning(
+                            "DSML/invoke markup detected in content but recovery "
+                            "failed (provider=%s, len=%d) — turn will end silent",
+                            provider, len(raw_content_for_recovery),
+                        )
                     yield {
                         "type": "final",
                         "content": accumulated_content,
