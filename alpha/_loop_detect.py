@@ -107,7 +107,7 @@ def detect_cycle(calls: list[str]) -> bool:
     """Detect A→B→A→B style cycles in recent calls."""
     if len(calls) < 6:
         return False
-    for cycle_len in (2, 3):
+    for cycle_len in range(2, len(calls) // 3 + 1):
         needed = cycle_len * 3
         if len(calls) < needed:
             continue

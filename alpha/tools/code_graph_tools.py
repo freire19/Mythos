@@ -45,8 +45,11 @@ async def index_codebase(
     from alpha.embeddings import chunk_codebase, CodeIndex
     from alpha.depgraph import DependencyGraph
 
-    # Build embeddings index
-    idx = CodeIndex()
+    # Build embeddings index (cached globally, #088)
+    idx = getattr(_index_codebase, '_cached_index', None)
+    if idx is None:
+        idx = CodeIndex()
+        _index_codebase._cached_index = idx
     cache_file = root / ".alpha_code_index.pkl"
     embedding_ok = False
     if cache_file.exists() and not force_rebuild:

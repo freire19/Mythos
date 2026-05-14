@@ -14,8 +14,8 @@ from .loader import load_agent_file
 from .scope import AgentScope
 
 _SEARCH_PATHS = [
-    _PROJECT_ROOT / "agents",
     Path.home() / ".alpha" / "agents",
+    _PROJECT_ROOT / "agents",
 ]
 
 _registry: FileBackedRegistry[AgentScope] = FileBackedRegistry(

@@ -1,7 +1,9 @@
 """Run tests — composite tool for test framework detection and execution."""
 
 import logging
+import os
 import shlex
+from pathlib import Path
 
 from . import ToolCategory, ToolDefinition, ToolSafety, register_tool
 from ._composite_helpers import _annotate_error, _run_tool, _violation
@@ -34,10 +36,23 @@ async def _run_tests(
         elif (target_path / "go.mod").exists():
             framework = "go"
         else:
-            test_files = [
-                p for p in target_path.rglob("*.py")
-                if p.name.startswith("test_") or p.name.endswith("_test.py")
-            ]
+            # #D028: use os.walk with skip-dirs instead of rglob
+            # to avoid traversing .git/.venv/node_modules/__pycache__.
+            _SKIP_TEST_DIRS = {
+                ".git", "node_modules", ".venv", "__pycache__",
+                ".mypy_cache", ".pytest_cache", ".ruff_cache",
+                "dist", "build", ".tox",
+            }
+            test_files = []
+            for dirpath, dirs, files in os.walk(str(target_path)):
+                dirs[:] = [d for d in dirs if d not in _SKIP_TEST_DIRS and not d.startswith(".")]
+                for fname in files:
+                    if (fname.startswith("test_") or fname.endswith("_test.py")) and fname.endswith(".py"):
+                        test_files.append(Path(dirpath) / fname)
+                        if len(test_files) >= 5:  # early exit: we only need to know they EXIST
+                            break
+                if len(test_files) >= 5:
+                    break
             if test_files:
                 framework = "pytest"
             else:

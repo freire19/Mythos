@@ -27,29 +27,55 @@ def _parse_python_imports(source: str, file_path: str) -> tuple[set[str], set[st
     except SyntaxError:
         return set(), set(), set(), []
 
+    # Find try/except ImportError blocks — imports inside these are optional.
+    optional_ranges: set[tuple[int, int]] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Try):
+            continue
+        for handler in node.handlers:
+            if handler.type is None:
+                continue
+            type_name = (
+                handler.type.id if isinstance(handler.type, ast.Name)
+                else None
+            )
+            if type_name == "ImportError":
+                optional_ranges.add((node.lineno, node.end_lineno or node.lineno))
+
     imports: set[str] = set()
+    optional_imports: set[str] = set()
     all_imports: set[str] = set()
     exports: set[str] = set()
     call_graph: list[dict] = []
 
+    # Pre-build scope map for O(1) _enclosing_function lookups (#081)
+    scope_map = _build_scope_map(tree)
+
     for node in ast.walk(tree):
+        in_optional = (
+            hasattr(node, 'lineno')
+            and node.lineno is not None
+            and any(lo <= node.lineno <= hi for lo, hi in optional_ranges)
+        )
+        target = optional_imports if in_optional else imports
+
         # Import statements
         if isinstance(node, ast.Import):
             for alias in node.names:
                 name = alias.name.split(".")[0]
-                imports.add(name)
+                target.add(name)
                 all_imports.add(name)
         elif isinstance(node, ast.ImportFrom):
             if node.module:
                 base = node.module.split(".")[0]
-                imports.add(base)
+                target.add(base)
                 all_imports.add(base)
             for alias in node.names:
                 full = f"{node.module}.{alias.name}" if node.module else alias.name
                 if alias.name == "*":
-                    imports.add(f"{node.module}.*")
+                    target.add(f"{node.module}.*")
                 else:
-                    imports.add(full)
+                    target.add(full)
 
         # __all__ exports
         if isinstance(node, ast.Assign):
@@ -71,7 +97,7 @@ def _parse_python_imports(source: str, file_path: str) -> tuple[set[str], set[st
 
         # Call graph: track who calls what
         if isinstance(node, ast.Call):
-            caller = _enclosing_function(tree, node)
+            caller = _enclosing_function(tree, node, scope_map)
             callee = _resolve_callee(node)
             if caller and callee:
                 call_graph.append({
@@ -99,19 +125,53 @@ def _is_stdlib_or_third_party(name: str) -> bool:
     return name in stdlib_top or name.startswith(("_", "test_"))
 
 
-def _enclosing_function(tree: ast.Module, node: ast.AST) -> str | None:
-    """Find the enclosing function/class name for a call node."""
+def _build_scope_map(tree: ast.Module) -> dict[int, str | None]:
+    """Single-pass: map every line number to its enclosing scope name.
+
+    Returns dict where key=lineno, value='ClassName.method' or 'func' or None.
+    """
+    scope_map: dict[int, str | None] = {}
+    scope_stack: list[tuple[int, int, str]] = []  # (start, end, name)
+
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            name = node.name
+            end = getattr(node, 'end_lineno', node.lineno)
+            # Check for enclosing class
+            for start, cls_end, cls_name in reversed(scope_stack):
+                if start <= node.lineno <= cls_end:
+                    name = f"{cls_name}.{name}"
+                    break
+            scope_stack.append((node.lineno, end, name))
+        elif isinstance(node, ast.ClassDef):
+            end = getattr(node, 'end_lineno', node.lineno)
+            scope_stack.append((node.lineno, end, node.name))
+
+    # Populate scope_map from scope_stack
+    for start, end, name in scope_stack:
+        for line in range(start, end + 1):
+            scope_map.setdefault(line, name)
+
+    return scope_map
+
+
+def _enclosing_function(tree: ast.Module, node: ast.AST, scope_map: dict[int, str | None] | None = None) -> str | None:
+    """Find the enclosing function/class name for a call node.
+
+    Uses pre-built scope_map for O(1) lookup. Falls back to AST walk.
+    """
+    if scope_map is not None:
+        return scope_map.get(node.lineno) if hasattr(node, 'lineno') else None
+
     for parent in ast.walk(tree):
         if isinstance(parent, (ast.FunctionDef, ast.AsyncFunctionDef)):
             if _contains(parent, node):
-                # Check if inside a class
-                for cls in ast.walk(tree):
+                for cls in ast.iter_child_nodes(tree):
                     if isinstance(cls, ast.ClassDef) and _contains(cls, parent):
                         return f"{cls.name}.{parent.name}"
                 return parent.name
         elif isinstance(parent, ast.ClassDef):
             if _contains(parent, node):
-                # Direct method call in class body
                 return parent.name
     return None
 
@@ -161,6 +221,7 @@ class DependencyGraph:
         self.modules: dict[str, dict] = {} # module_name → {files, exports}
         self.call_graph: list[dict] = []   # all caller→callee edges
         self._source_cache: dict[str, str] = {}  # file → source
+        self._adj_cache: dict | None = None      # cached adjacency for find_paths
 
     def build(self, root: str, glob_pattern: str = "**/*.py") -> dict:
         """Build dependency graph by parsing all Python files in the codebase.
@@ -171,6 +232,7 @@ class DependencyGraph:
         self.modules.clear()
         self.call_graph.clear()
         self._source_cache.clear()
+        self._adj_cache = None  # invalidate cached adjacency
 
         base = Path(root)
         files_parsed = 0
@@ -197,7 +259,7 @@ class DependencyGraph:
             except Exception:
                 continue
 
-            self._source_cache[str(file_path)] = source
+            self._source_cache[str(file_path.relative_to(base))] = source
             local_imports, all_imports, exports, calls = _parse_python_imports(source, str(file_path))
 
             rel_path = str(file_path.relative_to(base))
@@ -287,12 +349,15 @@ class DependencyGraph:
 
         Returns list of paths, each with ['nodes', 'edges', 'depth'].
         """
-        # Build adjacency from call graph
-        adj: dict[str, list[tuple[str, str, int]]] = defaultdict(list)
-        for cg in self.call_graph:
-            caller = f"{cg['file']}:{cg['caller']}"
-            callee = cg["callee"]
-            adj[caller].append((callee, cg["file"], cg["line"]))
+        # Build adjacency from call graph (cached)
+        if self._adj_cache is None:
+            adj: dict[str, list[tuple[str, str, int]]] = defaultdict(list)
+            for cg in self.call_graph:
+                caller = f"{cg['file']}:{cg['caller']}"
+                callee = cg["callee"]
+                adj[caller].append((callee, cg["file"], cg["line"]))
+            self._adj_cache = adj
+        adj = self._adj_cache
 
         # Find entry points in the source module
         starts = [

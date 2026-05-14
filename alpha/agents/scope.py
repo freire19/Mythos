@@ -24,14 +24,21 @@ class AgentScope:
     path: Path | None = None
 
     def filter_names(self, names: list[str], allow: list[str], deny: list[str]) -> list[str]:
-        """Apply allow/deny filters to a list of names. Allow wins over deny."""
+        """Apply allow/deny filters. Deny always wins over allow."""
+        result = names
+        if allow and deny:
+            logger.warning(
+                "Agent '%s' has both tools_allow and tools_deny set — "
+                "deny will restrict the allow list. Check your agent YAML.",
+                self.name,
+            )
         if allow:
             allowset = set(allow)
-            return [n for n in names if n in allowset]
+            result = [n for n in result if n in allowset]
         if deny:
             denyset = set(deny)
-            return [n for n in names if n not in denyset]
-        return names
+            result = [n for n in result if n not in denyset]
+        return result
 
     def filter_skills(self, names: list[str]) -> list[str]:
         return self.filter_names(names, self.skills_allow, self.skills_deny)

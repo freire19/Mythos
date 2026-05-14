@@ -31,9 +31,10 @@ _DSN_PASSWORD_RE = re.compile(r"(?i)(password\s*=\s*)([^\s&;]+)")
 _URL_USERINFO_RE = re.compile(
     r"(?P<scheme>[a-zA-Z][a-zA-Z0-9+.\-]*://)(?P<user>[^:@/\s]+):(?P<pwd>[^@\s]+)@"
 )
-# sk-XXX (OpenAI), api-XXX, ANTHROPIC_API_KEY-style — 16+ chars after prefix
+# sk-*, dsk-*, xai-*, ghp_*, hf_*, glpat-*, pk-*, github_pat_*, etc.
 _API_KEY_PREFIX_RE = re.compile(
-    r"\b(sk|api|key|token)[-_]([A-Za-z0-9_-]{16,})", re.IGNORECASE
+    r"\b(sk(?:-ant)?|dsk|xai|gh[po]_|github_pat|glpat|hf|pk-[a-z]+|[a-z]+-api)-([A-Za-z0-9_-]{16,})",
+    re.IGNORECASE,
 )
 
 

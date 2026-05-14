@@ -18,16 +18,12 @@ logger = logging.getLogger(__name__)
 
 # ─── Helpers ───
 
-def _resolve_path(path: str) -> Path:
-    """Resolve a path string to an absolute Path, defaulting to CWD."""
-    p = Path(path)
-    if not p.is_absolute():
-        p = Path.cwd() / p
-    return p.resolve()
+from .path_helpers import _validate_path
 
 
 async def _run(cmd: list[str], cwd: str | None = None, timeout: int = 120) -> dict:
     """Run a command and return {ok, stdout, stderr, exit_code}."""
+    proc = None
     try:
         proc = await asyncio.create_subprocess_exec(
             *cmd,
@@ -45,7 +41,21 @@ async def _run(cmd: list[str], cwd: str | None = None, timeout: int = 120) -> di
             "exit_code": proc.returncode,
         }
     except asyncio.TimeoutError:
+        if proc is not None:
+            try:
+                proc.kill()
+                await proc.wait()
+            except Exception:
+                pass
         return {"ok": False, "stdout": "", "stderr": f"Timeout after {timeout}s", "exit_code": -1}
+    except (asyncio.CancelledError, KeyboardInterrupt):
+        if proc is not None:
+            try:
+                proc.kill()
+                await proc.wait()
+            except Exception:
+                pass
+        raise
     except FileNotFoundError:
         return {"ok": False, "stdout": "", "stderr": f"Command not found: {cmd[0]}", "exit_code": -2}
     except Exception as e:
@@ -68,7 +78,7 @@ async def scan_vulnerabilities(
     
     Returns scan results — findings with severity, file, line, and CWE mapping.
     """
-    target = _resolve_path(path)
+    target = _validate_path(path)
     results: list[dict] = []
     tool_used: str | None = None
 
@@ -119,7 +129,7 @@ async def audit_dependencies(
     
     Returns list of vulnerable packages with CVE IDs and severity.
     """
-    target = _resolve_path(path)
+    target = _validate_path(path)
     findings: list[dict] = []
 
     # Detect ecosystem
@@ -154,7 +164,7 @@ async def audit_dependencies(
     }
 
 
-async def analyze_binary(
+async def scan_binary(
     path: str,
     deep: bool = False,
 ) -> dict:
@@ -166,7 +176,7 @@ async def analyze_binary(
     
     Returns file type, strings, symbols, sections, and entropy when deep=True.
     """
-    target = _resolve_path(path)
+    target = _validate_path(path)
     if not target.is_file():
         return {"ok": False, "error": f"Not a file: {path}"}
 
@@ -321,7 +331,7 @@ async def check_misconfigurations(
     Checks: debug mode, exposed secrets, weak perms, missing security headers,
     default credentials, open ports in configs.
     """
-    target = _resolve_path(path)
+    target = _validate_path(path)
     findings: list[dict] = []
 
     # Check for .env files with secrets
@@ -433,7 +443,7 @@ register_tool(ToolDefinition(
 ))
 
 register_tool(ToolDefinition(
-    name="analyze_binary",
+    name="scan_binary",
     description="Analyze a binary file for security-relevant characteristics (strings, symbols, sections).",
     parameters={
         "type": "object",
@@ -444,7 +454,7 @@ register_tool(ToolDefinition(
         "required": ["path"],
     },
     safety=ToolSafety.SAFE,
-    executor=analyze_binary,
+    executor=scan_binary,
     category=ToolCategory.SECURITY,
 ))
 

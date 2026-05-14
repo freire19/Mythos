@@ -8,6 +8,7 @@ Green/red dominant palette, safety-aware tool display, hacker aesthetic.
 import asyncio
 import json
 import os
+import re
 import shutil
 import sys
 import time
@@ -24,6 +25,13 @@ DISPLAY_PREVIEW_TRUNCATE = 120    # last-reply preview / TUI status
 DISPLAY_PROMPT_VALUE_TRUNCATE = 100  # approval prompt arg values (followed by ...)
 DISPLAY_MAX_LINES = 8             # max lines from a tool result
 DISPLAY_SUBAGENT_TRUNCATE = 80    # sub-agent event arg preview
+
+_ANSI_RE = re.compile(r'\x1b\[[0-9;]*m')
+
+
+def _strip_ansi(text: str) -> str:
+    """Strip ANSI escape sequences so truncation doesn't cut mid-code."""
+    return _ANSI_RE.sub('', text)
 
 
 # ─── ANSI Colors (Kali Linux palette) ───
@@ -252,7 +260,7 @@ def print_tool_result(name: str, result: dict, args: dict | None = None) -> None
     if isinstance(result, dict):
         # Error results in red
         if result.get("error"):
-            print(f"  {c(C.RED, '✗')} {c(C.RED, str(result['error'])[:DISPLAY_LINE_TRUNCATE])}")
+            print(f"  {c(C.RED, '✗')} {c(C.RED, _strip_ansi(str(result['error']))[:DISPLAY_LINE_TRUNCATE])}")
             return
 
         # Skipped/denied results
@@ -305,7 +313,7 @@ def print_tool_result(name: str, result: dict, args: dict | None = None) -> None
         if isinstance(output, str) and output.strip():
             lines = output.strip().split("\n")
             for line in lines[:DISPLAY_MAX_LINES]:
-                print(f"  {border} {line[:DISPLAY_LINE_TRUNCATE]}")
+                print(f"  {border} {_strip_ansi(line)[:DISPLAY_LINE_TRUNCATE]}")
             if len(lines) > DISPLAY_MAX_LINES:
                 remaining = len(lines) - DISPLAY_MAX_LINES
                 print(f"  {border} {c(C.GRAY, f'... ({remaining} more lines)')}")
@@ -322,7 +330,7 @@ def print_tool_result(name: str, result: dict, args: dict | None = None) -> None
                 short = str(short)[:DISPLAY_LINE_TRUNCATE - 13] + "..."
             print(f"  {border} {c(C.GRAY, str(short))}")
     else:
-        result_str = str(result)[:DISPLAY_LINE_TRUNCATE]
+        result_str = _strip_ansi(str(result))[:DISPLAY_LINE_TRUNCATE]
         print(f"  {border} {result_str}")
 
 
@@ -697,7 +705,7 @@ _TOOL_LABEL_MAP: dict[frozenset[str], str] = {
     frozenset({"web_fetch", "web_search", "http_request", "fetch"}): "Fetching",
     frozenset({"run_tests", "deploy_check"}): "Testing",
     frozenset({"query_database", "describe_table"}): "Querying",
-    frozenset({"scan_vulnerabilities", "audit_dependencies", "analyze_binary",
+    frozenset({"scan_vulnerabilities", "audit_dependencies", "scan_binary",
                "fuzz_endpoint", "check_misconfigurations"}): "Scanning",
     frozenset({"nmap_scan", "ffuf_fuzz", "banner_grab", "payload_inject",
                "traffic_capture", "port_knock", "exploit_loop"}): "Attacking",

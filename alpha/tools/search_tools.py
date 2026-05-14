@@ -21,11 +21,21 @@ async def _web_search(
     """Search the web and optionally extract page content."""
     from ..web_search import extract_multiple_pages, search_multiple_queries
 
-    try:
-        raw_results = await search_multiple_queries(
-            [query], max_results_per_query=min(max_results, 10)
-        )
+    last_error = None
+    for attempt in range(2):
+        try:
+            raw_results = await search_multiple_queries(
+                [query], max_results_per_query=min(max_results, 10)
+            )
+            break
+        except Exception as e:
+            last_error = e
+            if attempt == 0:
+                await asyncio.sleep(1.0)
+    else:
+        return {"results": [], "message": f"Search failed: {last_error}"}
 
+    try:
         if not raw_results:
             return {"results": [], "message": "Nenhum resultado encontrado."}
 

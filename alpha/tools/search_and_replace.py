@@ -30,7 +30,7 @@ async def _search_and_replace(
     if "error" in search_result:
         return search_result
 
-    results_list = search_result.get("results", [])
+    results_list = search_result.get("results", [])[:100]  # cap at 100 files (#086)
     if not results_list:
         return {"matches": 0, "message": f"Nenhuma ocorrencia de '{search}' encontrada"}
 

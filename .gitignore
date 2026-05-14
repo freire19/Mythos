@@ -73,3 +73,14 @@ skills/audit-2-front-review/
 skills/audit-3-front-ux/
 skills/audit-4-front-perf/
 skills/audit-front-deep/
+
+# Alpha runtime logs/sessions
+.alpha/runs/
+
+# Shell injection artifact directories (#103, NP-003)
+&&/
+cd/
+clone/
+git/
+https:/
+earthkit_audit*/

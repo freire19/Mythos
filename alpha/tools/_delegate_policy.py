@@ -35,7 +35,7 @@ SUBAGENT_DESTRUCTIVE_BLOCKLIST = frozenset({
     "traffic_capture", "port_knock", "exploit_loop",
     "check_mitigations", "generate_rop_chain", "generate_shellcode",
     "inject_payload", "analyze_binary", "run_exploit", "sandbox_test",
-    "auto_exploit", "tune_offset", "analyze_crash_output",
+    "auto_exploit", "auto_exploit_multi", "tune_offset", "analyze_crash_output",
 })
 
 # Read-only git actions que sub-agents podem chamar sem callback.

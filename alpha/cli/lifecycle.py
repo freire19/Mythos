@@ -25,29 +25,20 @@ from alpha.repl_input import cleanup_temp_images
 def _shutdown_browser_session() -> None:
     """atexit hook: close any persistent browser session.
 
-    `asyncio.run` falha com RuntimeError se ja existe um loop rodando
-    (raro em atexit, mas acontece em testes / embedding). Quando isso
-    ocorre, usamos um loop dedicado para o shutdown e logamos qualquer
-    erro real ao inves de engolir tudo (#055).
+    When called from a running event loop (tests, embedding), schedule
+    the shutdown as a task instead of trying to create a new loop.
     """
     try:
         from alpha.tools.browser_session import shutdown_browser
 
         try:
-            asyncio.get_running_loop()
-            new_loop = asyncio.new_event_loop()
-            try:
-                new_loop.run_until_complete(shutdown_browser())
-            finally:
-                new_loop.close()
+            running = asyncio.get_running_loop()
+            running.create_task(shutdown_browser())
         except RuntimeError:
             asyncio.run(shutdown_browser())
     except ImportError:
         pass  # Playwright nao instalado, sem session pra fechar
     except Exception as e:
-        # Logar para diagnostico — antes era engolido em `except: pass`.
-        # `print` em vez de logger porque atexit roda apos shutdown do
-        # logging em alguns paths.
         try:
             print(
                 f"shutdown_browser_session: {type(e).__name__}: {e}",

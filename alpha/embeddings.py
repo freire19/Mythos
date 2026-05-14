@@ -336,11 +336,37 @@ class CodeIndex:
 
     def __init__(self):
         self.chunks: list[dict] = []
-        self.index: Any = None  # faiss.IndexFlatIP
+        self.index: Any = None
         self._dim: int | None = None
+        self._file_hashes: dict[str, str] = {}  # file→hash for incremental rebuild (#084)
 
     def build(self, chunks: list[dict], use_api: bool = False) -> dict:
-        """Build FAISS index from chunks. Returns stats dict."""
+        """Build FAISS index from chunks. Skips unchanged files (#084)."""
+        import hashlib
+
+        # Compute file hashes to detect changes
+        new_hashes: dict[str, str] = {}
+        new_chunks = []
+        skipped = 0
+        for c in chunks:
+            fpath = c.get("file", "")
+            if fpath:
+                try:
+                    content = c.get("content", "") or ""
+                    fhash = hashlib.md5(content.encode()).hexdigest()
+                except Exception:
+                    fhash = ""
+                new_hashes[fpath] = fhash
+                if self._file_hashes.get(fpath) == fhash:
+                    skipped += 1
+                    continue
+            new_chunks.append(c)
+
+        if skipped > 0:
+            logger.debug("Skipped %d unchanged chunks (of %d total)", skipped, len(chunks))
+
+        chunks = new_chunks if new_chunks else chunks
+        self._file_hashes = new_hashes
         self.chunks = chunks
         if not chunks:
             return {"ok": False, "error": "No chunks to index", "total_chunks": 0}

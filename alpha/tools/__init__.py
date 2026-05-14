@@ -27,12 +27,13 @@ Tool module index (where each tool lives, see #096):
 - skill_tools.py   — load_skill
 - apify_tools.py   — apify_run_actor, apify_search_actors
 - security_tools.py — scan_vulnerabilities, audit_dependencies,
-                       analyze_binary, fuzz_endpoint,
+                       scan_binary, fuzz_endpoint,
                        check_misconfigurations
 """
 
 import importlib
 import logging
+import os
 import pkgutil
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -95,6 +96,14 @@ _tools_loaded = False
 
 def register_tool(tool_def: ToolDefinition):
     """Register a tool in the global registry."""
+    existing = TOOL_REGISTRY.get(tool_def.name)
+    if existing is not None:
+        if existing.executor is tool_def.executor:
+            return  # idempotent re-registration
+        raise RuntimeError(
+            f"Tool '{tool_def.name}' já registrada com executor diferente. "
+            f"Colisão entre módulos. Renomeie uma delas."
+        )
     TOOL_REGISTRY[tool_def.name] = tool_def
     logger.debug(f"Tool registered: {tool_def.name} [{tool_def.category}]")
 
@@ -187,6 +196,13 @@ def _discover_plugins():
 
     for item in sorted(plugins_dir.iterdir()):
         if item.suffix == ".py" and not item.name.startswith("_"):
+            # Only load plugins owned by the current user (#D042)
+            try:
+                if item.stat().st_uid != os.getuid():
+                    logger.warning("Skipping plugin %s: not owned by current user", item.name)
+                    continue
+            except OSError:
+                continue
             module_name = item.stem
             qualified = f"alpha_plugin_{module_name}"
             try:

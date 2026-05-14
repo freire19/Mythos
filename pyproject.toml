@@ -71,6 +71,7 @@ mythos = "main:main"
 
 [tool.setuptools]
 py-modules = ["main"]
+package-dir = {"" = "."}
 
 [tool.setuptools.packages.find]
 include = ["alpha*"]

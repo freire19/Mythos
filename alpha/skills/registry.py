@@ -13,8 +13,8 @@ from ..config import _PROJECT_ROOT
 from .loader import Skill, load_skill_file
 
 _SEARCH_PATHS = [
-    _PROJECT_ROOT / "skills",
     Path.home() / ".alpha" / "skills",
+    _PROJECT_ROOT / "skills",
 ]
 
 _registry: FileBackedRegistry[Skill] = FileBackedRegistry(

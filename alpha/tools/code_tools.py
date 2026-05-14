@@ -161,6 +161,12 @@ def _validate_code_safety(code: str) -> str | None:
             sl = node.slice
             if isinstance(sl, ast.Constant) and sl.value in _BLOCKED_NAME_TOKENS:
                 return _format_block(f"[{sl.value!r}]")
+        # Block string concatenation bypass: '__im' + 'port__' (#025)
+        elif isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+            if isinstance(node.left, ast.Constant) and isinstance(node.right, ast.Constant):
+                combined = str(node.left.value) + str(node.right.value)
+                if combined in _BLOCKED_NAME_TOKENS:
+                    return _format_block(f"'{combined}' (via string concat)")
     return None
 
 

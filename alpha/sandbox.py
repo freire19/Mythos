@@ -12,6 +12,7 @@ import asyncio
 import logging
 import os
 import resource
+import secrets
 import signal
 import tempfile
 import time
@@ -23,6 +24,19 @@ logger = logging.getLogger(__name__)
 
 _docker_available: bool | None = None
 _podman_available: bool | None = None
+
+
+async def _docker_kill(runtime: str, container_name: str) -> None:
+    """Kill the container on the daemon, not just the client process."""
+    try:
+        kill_proc = await asyncio.create_subprocess_exec(
+            runtime, "kill", "--signal=KILL", container_name,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        await asyncio.wait_for(kill_proc.wait(), timeout=5)
+    except Exception:
+        pass
 
 
 def _get_container_runtime() -> str | None:
@@ -175,9 +189,11 @@ async def _run_container_sandbox(
     if not bin_path.is_file():
         return {"ok": False, "error": f"Binary not found: {binary}"}
     mount_dir = str(bin_path.parent)
+    container_name = f"alpha-sbx-{secrets.token_hex(6)}"
 
     container_cmd = [
         runtime, "run", "--rm",
+        "--name", container_name,
         "-v", f"{mount_dir}:/target:ro",
         "--memory", f"{mem_limit_mb}m",
         "--memory-swap", f"{mem_limit_mb}m",
@@ -207,8 +223,22 @@ async def _run_container_sandbox(
             proc.communicate(input=input_data), timeout=timeout + 5
         )
     except asyncio.TimeoutError:
+        await _docker_kill(runtime, container_name)  # container name
+        try:
+            proc.kill()
+            await proc.wait()
+        except Exception:
+            pass
         return {"ok": False, "timeout": True, "exit_code": -1,
                 "stdout": "", "stderr": "Container timeout", "crashed": False}
+    except (asyncio.CancelledError, KeyboardInterrupt):
+        await _docker_kill(runtime, container_name)
+        try:
+            proc.kill()
+            await proc.wait()
+        except Exception:
+            pass
+        raise
     except FileNotFoundError:
         return {"ok": False, "error": f"{runtime} not found", "crashed": False}
     except Exception as e:
@@ -279,7 +309,10 @@ async def run_exploit(
 
     bin_path = str(Path(binary).resolve())
 
-    if use_container and _get_container_runtime():
+    if use_container:
+        runtime = _get_container_runtime()
+        if runtime is None:
+            return {"ok": False, "error": "use_container=True but no container runtime (docker/podman) found. Install docker or set use_container=False."}
         result = await _run_container_sandbox(
             bin_path, input_data, args, timeout, mem_limit_mb, env or {}
         )

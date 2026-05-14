@@ -42,21 +42,29 @@ class FileBackedRegistry(Generic[T]):
         """Scan and populate. Idempotent unless `force=True`."""
         if self._loaded and not force:
             return self._registry
-        if force:
-            self._registry.clear()
+        if getattr(self, '_loading', False):
+            return self._registry
+        self._loading = True
+        try:
+            if force:
+                self._registry.clear()
 
-        for base in self._search_paths:
-            if not base.is_dir():
-                continue
-            for path in sorted(base.glob(self._glob_pattern)):
-                try:
-                    entry = self._loader(path)
-                    self._registry[entry.name] = entry
-                except Exception as e:
-                    logger.warning(f"Failed to load {self._kind} {path}: {e}")
+            for base in self._search_paths:
+                if not base.is_dir():
+                    continue
+                for path in sorted(base.glob(self._glob_pattern)):
+                    try:
+                        entry = self._loader(path)
+                        if entry.name in self._registry:
+                            continue  # project vence — ja carregado de path anterior
+                        self._registry[entry.name] = entry
+                    except Exception as e:
+                        logger.warning(f"Failed to load {self._kind} {path}: {e}")
 
-        self._loaded = True
-        logger.info(f"{self._kind.capitalize()}s loaded: {len(self._registry)}")
+            self._loaded = True
+            logger.info(f"{self._kind.capitalize()}s loaded: {len(self._registry)}")
+        finally:
+            self._loading = False
         return self._registry
 
     def get(self, name: str) -> T | None:

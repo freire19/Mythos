@@ -71,19 +71,37 @@ async def analyze_codebase(path: str = ".", language: str = "auto",
 
     lang = language if language != "auto" else _detect_language(str(root))
 
+    # Cache analyzer classes to avoid repeated lazy imports (#085)
+    _ANALYZER_CACHE: dict[str, type] = {}
+
     if lang == "c":
-        from alpha.c_analyzer import CASTAnalyzer
-        a = CASTAnalyzer()
-        result = a.scan_codebase(str(root))
+        cls = _ANALYZER_CACHE.get("c")
+        if cls is None:
+            from alpha.c_analyzer import CASTAnalyzer
+            cls = CASTAnalyzer
+            _ANALYZER_CACHE["c"] = cls
+        result = cls().scan_codebase(str(root))
     elif lang == "javascript":
-        from alpha.js_analyzer import JSAnalyzer
-        result = JSAnalyzer().scan_codebase(str(root))
+        cls = _ANALYZER_CACHE.get("js")
+        if cls is None:
+            from alpha.js_analyzer import JSAnalyzer
+            cls = JSAnalyzer
+            _ANALYZER_CACHE["js"] = cls
+        result = cls().scan_codebase(str(root))
     elif lang == "go":
-        from alpha.go_analyzer import GoAnalyzer
-        result = GoAnalyzer().scan_codebase(str(root))
+        cls = _ANALYZER_CACHE.get("go")
+        if cls is None:
+            from alpha.go_analyzer import GoAnalyzer
+            cls = GoAnalyzer
+            _ANALYZER_CACHE["go"] = cls
+        result = cls().scan_codebase(str(root))
     elif lang == "rust":
-        from alpha.rust_analyzer import RustAnalyzer
-        result = RustAnalyzer().scan_codebase(str(root))
+        cls = _ANALYZER_CACHE.get("rust")
+        if cls is None:
+            from alpha.rust_analyzer import RustAnalyzer
+            cls = RustAnalyzer
+            _ANALYZER_CACHE["rust"] = cls
+        result = cls().scan_codebase(str(root))
     elif lang == "python":
         # Use depgraph for Python — entry points + sinks
         from alpha.depgraph import DependencyGraph

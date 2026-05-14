@@ -25,6 +25,9 @@ logger = logging.getLogger(__name__)
 
 
 
+_REDIRECT_RE = re.compile(r"(2>>|2>|>>|>|<)\s*(\S+)")
+
+
 def _validate_redirect_paths(pipeline: str) -> str | None:
     """Ensure redirect targets are within workspace.
 
@@ -32,18 +35,17 @@ def _validate_redirect_paths(pipeline: str) -> str | None:
     cria arquivo. Pular esses para evitar tanto criar arquivos chamados
     `&1` quanto rejeitar pipelines comuns como `cmd 2>&1 | grep ...`.
     """
-    redirects = re.findall(r"(?:>>?|2>>?)\s*(\S+)", pipeline)
-    for target in redirects:
+    for match in _REDIRECT_RE.finditer(pipeline):
+        op, target = match.group(1), match.group(2)
         if target.startswith("&"):
             continue  # &1, &2 sao FD references, nao paths
+        if op == "<":
+            continue  # input redirect, no file creation
         target_path = Path(target).expanduser().resolve()
         err = assert_within_workspace(target_path)
         if err:
             return err
     return None
-
-
-_REDIRECT_RE = re.compile(r"(2>>|2>|>>|>|<)\s*(\S+)")
 
 
 def _parse_segment(segment: str) -> tuple[list[str], dict[str, str]]:

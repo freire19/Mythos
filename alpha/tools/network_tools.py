@@ -121,6 +121,16 @@ async def _http_request(
         import aiohttp  # noqa: F401 — usado por aiohttp.ClientTimeout abaixo
 
         req_headers = dict(headers) if headers else {}
+        # Block sensitive headers that could exfiltrate credentials (#022)
+        _SENSITIVE_HEADERS = frozenset({
+            "authorization", "cookie", "set-cookie",
+            "x-api-key", "x-amz-", "x-goog-",
+            "proxy-authorization", "www-authenticate",
+        })
+        for h in list(req_headers):
+            hl = h.lower()
+            if any(hl == s or hl.startswith(s) for s in _SENSITIVE_HEADERS):
+                return {"error": f"Header '{h}' bloqueado por segurança.", "blocked": True}
         req_headers.setdefault("User-Agent", "ALPHA-Agent/1.0")
 
         parsed = urlparse(url)

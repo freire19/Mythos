@@ -17,6 +17,7 @@ from . import ToolCategory, ToolDefinition, ToolSafety, register_tool
 from ..config import FEATURES
 from ..display import print_subagent_event
 from ._delegate_policy import (
+    GIT_READ_ACTIONS,
     SUBAGENT_DESTRUCTIVE_BLOCKLIST,
     _auto_approve_no_callback,
     _load_subagent_prompt,
@@ -101,7 +102,27 @@ async def _run_subagent(
     tools = [t for t in all_tools if t["function"]["name"] not in _blocked]
 
     if tools_filter:
-        allowed = {s.strip() for s in tools_filter.split(",")}
+        import fnmatch
+        raw_names = {s.strip() for s in tools_filter.split(",")}
+        # Expand wildcards against TOOL_REGISTRY (#046)
+        allowed: set[str] = set()
+        unknown: list[str] = []
+        for name in raw_names:
+            if '*' in name or '?' in name:
+                expanded = {n for n in TOOL_REGISTRY if fnmatch.fnmatch(n, name)}
+                if not expanded:
+                    unknown.append(name)
+                allowed |= expanded
+            elif name in TOOL_REGISTRY:
+                allowed.add(name)
+            else:
+                unknown.append(name)
+        if unknown:
+            logger.warning(
+                "tools_filter contains unknown/wildcard names: %s — "
+                "these will not match any tool. Available: %s",
+                unknown, sorted(TOOL_REGISTRY.keys())[:20],
+            )
         tools = [t for t in tools if t["function"]["name"] in allowed]
     else:
         allowed = None

@@ -27,8 +27,6 @@ logger = logging.getLogger(__name__)
 from ._loop_detect import (
     _CYCLE_WINDOW,
     _LOOP_DETECT_MIN_CALLS,
-    _LOOP_DETECT_MIN_ITER,
-    _STALE_WINDOW,
     call_signature,
     detect_loop,
     result_preview,

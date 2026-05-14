@@ -20,15 +20,12 @@ logger = logging.getLogger(__name__)
 
 # ─── Helpers ───
 
-def _resolve_path(path: str) -> Path:
-    p = Path(path)
-    if not p.is_absolute():
-        p = Path.cwd() / p
-    return p.resolve()
+from .path_helpers import _validate_path
 
 
 async def _run(cmd: list[str], cwd: str | None = None, timeout: int = 120) -> dict:
     """Run a command and return {ok, stdout, stderr, exit_code}."""
+    proc = None
     try:
         proc = await asyncio.create_subprocess_exec(
             *cmd,
@@ -46,7 +43,21 @@ async def _run(cmd: list[str], cwd: str | None = None, timeout: int = 120) -> di
             "exit_code": proc.returncode,
         }
     except asyncio.TimeoutError:
+        if proc is not None:
+            try:
+                proc.kill()
+                await proc.wait()
+            except Exception:
+                pass
         return {"ok": False, "stdout": "", "stderr": f"Timeout after {timeout}s", "exit_code": -1}
+    except (asyncio.CancelledError, KeyboardInterrupt):
+        if proc is not None:
+            try:
+                proc.kill()
+                await proc.wait()
+            except Exception:
+                pass
+        raise
     except FileNotFoundError:
         return {"ok": False, "stdout": "", "stderr": f"Command not found: {cmd[0]}", "exit_code": -2}
     except Exception as e:
@@ -103,7 +114,30 @@ async def nmap_scan(
     cmd.extend(["-oX", "-"])  # XML to stdout
 
     if extra_args:
-        cmd.extend(extra_args.split())
+        # Allowlist: only safe nmap flags (#023). Block script engine,
+        # file I/O, and output redirection flags.
+        _NMAPA_SAFE_FLAGS = frozenset({
+            "-sS", "-sT", "-sU", "-sV", "-sC", "-sA", "-sW",
+            "-p", "-T", "-v", "-vv",
+            "--min-rate", "--max-rate", "--max-retries",
+            "--max-scan-delay", "--host-timeout",
+            "--open", "-Pn", "-n", "-r", "--reason",
+            "--disable-arp-ping", "-PE", "-PP", "-PM",
+            "-PS", "-PA", "-PU", "-PY",
+        })
+        for flag in extra_args.split():
+            # Allow flags with values: -p 80, --min-rate 100
+            if flag in _NMAPA_SAFE_FLAGS:
+                cmd.append(flag)
+                continue
+            # Block dangerous patterns
+            if flag in ("--script", "-iL", "-oN", "-oX", "-oG", "-oA",
+                        "--stylesheet", "--iflist", "-iR"):
+                return {"error": f"Flag nmap '{flag}' bloqueada por segurança.", "blocked": True}
+            # Block any flag starting with -o (output) or --script
+            if flag.startswith(("-o", "--script")):
+                return {"error": f"Flag nmap '{flag}' bloqueada por segurança.", "blocked": True}
+            cmd.append(flag)
 
     cmd.append(target)
 

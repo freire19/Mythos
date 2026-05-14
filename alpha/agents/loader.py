@@ -36,7 +36,7 @@ def load_agent_file(path: Path) -> AgentScope:
     skills_cfg = data.get("skills") or {}
     tools_cfg = data.get("tools") or {}
 
-    temperature = model_cfg.get("temperature")
+    temperature = model_cfg.get("temperature") or data.get("temperature")
     if temperature is not None:
         temperature = float(temperature)
 

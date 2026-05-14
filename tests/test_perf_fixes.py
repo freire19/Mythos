@@ -8,7 +8,7 @@ import asyncio
 
 import pytest
 
-from alpha.agent import _detect_loop
+from alpha._loop_detect import detect_loop
 from alpha.context import MAX_MESSAGES, MIN_MESSAGES_FOR_COMPRESSION, needs_compression
 
 
@@ -21,14 +21,14 @@ class TestLoopDetectionStillWorks:
     def test_exact_repeat_detected(self):
         sig = "read_file:{\"path\": \"/x\"}"
         recent = [sig] * 4
-        result = _detect_loop([sig], recent, [])
+        result = detect_loop([sig], recent, [])
         assert result is not None
         assert "exact repeat" in result
 
     def test_below_threshold_not_flagged(self):
         sig = "read_file:{\"path\": \"/x\"}"
         recent = [sig] * 2  # menor que _MAX_REPEAT_CALLS=3
-        assert _detect_loop([sig], recent, []) is None
+        assert detect_loop([sig], recent, []) is None
 
     def test_different_tools_no_false_positive(self):
         # 5 calls, todos com nomes diferentes -> nao loop
@@ -40,13 +40,13 @@ class TestLoopDetectionStillWorks:
             "search_files:{\"pattern\": \"foo\"}",
         ]
         new_sig = "git_operation:{\"action\": \"status\"}"
-        assert _detect_loop([new_sig], recent, []) is None
+        assert detect_loop([new_sig], recent, []) is None
 
     def test_similar_calls_with_repeated_arg_detected(self):
         # 5 calls com EXATAMENTE o mesmo argumento -> exact repeat (#D013)
         sig = "read_file:{\"path\": \"/long/path/file_1.py\"}"
         recent = [sig] * 5
-        result = _detect_loop([sig], recent, [])
+        result = detect_loop([sig], recent, [])
         assert result is not None
 
     def test_sibling_paths_not_flagged_as_loop(self):
@@ -62,7 +62,7 @@ class TestLoopDetectionStillWorks:
             "read_file:{\"path\": \"/home/u/proj/alpha/display.py\"}",
         ]
         new_sig = "read_file:{\"path\": \"/home/u/proj/alpha/hooks.py\"}"
-        assert _detect_loop([new_sig], recent, []) is None
+        assert detect_loop([new_sig], recent, []) is None
 
     def test_sibling_directories_not_flagged_as_loop(self):
         # Regressao do bug reportado: list_directory em irmaos do mesmo
@@ -76,7 +76,7 @@ class TestLoopDetectionStillWorks:
             "list_directory:{\"path\": \"/home/u/Documents/MyProjects/MyApp/skills\"}",
         ]
         new_sig = "list_directory:{\"path\": \"/home/u/Documents/MyProjects/MyApp/docs\"}"
-        assert _detect_loop([new_sig], recent, []) is None
+        assert detect_loop([new_sig], recent, []) is None
 
 
 # ─── #D015 ───────────────────────────────────────────────────────

@@ -65,7 +65,7 @@ def build_assistant_tool_message(
             for tc in tool_calls
         ],
     }
-    if content:
+    if content is not None or tool_calls:
         msg["content"] = content
     if reasoning_content:
         msg["reasoning_content"] = reasoning_content
@@ -88,7 +88,7 @@ def _format_result(result: dict, tool_name: str) -> str:
     # `_previous_content` used to render the edit diff in the terminal,
     # but pointless and bloating to send back to the LLM).
     result = {k: v for k, v in result.items() if not (isinstance(k, str) and k.startswith("_"))}
-    estimated = sum(len(str(v)) for v in result.values()) + 100
+    estimated = sum(len(json.dumps(v, default=str)) for v in result.values()) + 100
     if estimated <= TOOL_RESULT_MAX_CHARS:
         return json.dumps(result, ensure_ascii=False)
 
@@ -159,7 +159,7 @@ def _record_skip(tc: dict, tool_name: str, result: dict, messages: list[dict]) -
     """Append a denied/skipped result to messages and return the event dict."""
     annotated = _annotate_error(result, "denied")
     _append_tool_msg(messages, tc["id"], annotated, tool_name)
-    return {"type": "tool_result", "name": tool_name, "result": annotated, "denied": True}
+    return {"type": "tool_result", "name": tool_name, "result": annotated, "denied": True, "id": tc["id"]}
 
 
 def _record_result(tc: dict, tool_name: str, result: dict, messages: list[dict]) -> None:
@@ -363,17 +363,49 @@ async def execute_tool_calls(
         prep_tuple, error = _prepare_tool_call(tc, get_tool_fn, workspace)
         if error is not None:
             yield {"type": "tool_call", "name": tc["name"], "args": {}, "safety": "denied"}
-            yield {"type": "tool_result", "name": tc["name"], "result": error}
+            yield {"type": "tool_result", "name": tc["name"], "result": error, "id": tc["id"]}
             _append_tool_msg(messages, tc["id"], error, tc["name"])
             continue
 
         prepared.append(prep_tuple)
 
     for tc, tool_name, args, tool_def, safety_str in prepared:
-        yield {"type": "tool_call", "name": tool_name, "args": args, "safety": safety_str}
+        yield {"type": "tool_call", "name": tool_name, "args": args, "safety": safety_str, "id": tc["id"]}
 
     approved = []
-    for tc, tool_name, args, tool_def, _ in prepared:
+    # If present_plan is in the batch, process it first so the user
+    # approves/rejects the plan before other tools execute (#D043)
+    plan_items = [(tc, n, a, td) for tc, n, a, td, _ in prepared if n == "present_plan"]
+    other_items = [(tc, n, a, td, s) for tc, n, a, td, s in prepared if n != "present_plan"]
+
+    for tc, tool_name, args, tool_def in plan_items:
+        denied, reason = is_denied_fn(tool_name, args)
+        if denied:
+            result = {"skipped": True, "reason": reason, "denied_by_rule": True}
+            yield _record_skip(tc, tool_name, result, messages)
+            continue
+        if needs_approval_fn(tool_name, args):
+            yield {"type": "approval_needed", "name": tool_name, "args": args}
+            try:
+                user_approved = (
+                    await asyncio.to_thread(approval_callback, tool_name, args)
+                    if approval_callback else False
+                )
+            except (asyncio.CancelledError, KeyboardInterrupt):
+                result = {"skipped": True, "reason": "Cancelled by user"}
+                yield _record_skip(tc, tool_name, result, messages)
+                raise
+            if not user_approved:
+                result = {"skipped": True, "reason": "User denied plan — cancelling batch"}
+                yield _record_skip(tc, tool_name, result, messages)
+                # Skip all remaining tools in the batch
+                for tc2, tool_name2, _, _ in other_items:
+                    result2 = {"skipped": True, "reason": "Plan rejected"}
+                    yield _record_skip(tc2, tool_name2, result2, messages)
+                return
+        approved.append((tc, tool_name, args, tool_def))
+
+    for tc, tool_name, args, tool_def, _ in other_items:
         denied, reason = is_denied_fn(tool_name, args)
         if denied:
             result = {"skipped": True, "reason": reason, "denied_by_rule": True}
@@ -382,10 +414,15 @@ async def execute_tool_calls(
 
         if needs_approval_fn(tool_name, args):
             yield {"type": "approval_needed", "name": tool_name, "args": args}
-            user_approved = (
-                await asyncio.to_thread(approval_callback, tool_name, args)
-                if approval_callback else False
-            )
+            try:
+                user_approved = (
+                    await asyncio.to_thread(approval_callback, tool_name, args)
+                    if approval_callback else False
+                )
+            except (asyncio.CancelledError, KeyboardInterrupt):
+                result = {"skipped": True, "reason": "Cancelled by user"}
+                yield _record_skip(tc, tool_name, result, messages)
+                raise
             if not user_approved:
                 result = {"skipped": True, "reason": "User denied this action"}
                 yield _record_skip(tc, tool_name, result, messages)
@@ -428,13 +465,13 @@ async def execute_tool_calls(
             tc, tool_name, args, _ = runnable[i]
             logger.error(f"Parallel tool execution error ({tool_name}): {type(r).__name__}: {r}")
             result = {"error": f"{type(r).__name__}: {r}"}
-            yield {"type": "tool_result", "name": tool_name, "result": result}
+            yield {"type": "tool_result", "name": tool_name, "result": result, "id": tc["id"]}
             _append_tool_msg(messages, tc["id"], result, tool_name)
             continue
 
         tc, tool_name, args, result = r
         post_tasks.append(_fire_post_tool(tool_name, args, result, workspace))
-        yield {"type": "tool_result", "name": tool_name, "result": result}
+        yield {"type": "tool_result", "name": tool_name, "result": result, "id": tc["id"]}
         _record_result(tc, tool_name, result, messages)
 
     if post_tasks:
@@ -453,13 +490,13 @@ async def _execute_sequential(
     for tc in tool_calls:
         prepared, error = _prepare_tool_call(tc, get_tool_fn, workspace)
         if error is not None:
-            yield {"type": "tool_call", "name": tc["name"], "args": {}, "safety": "denied"}
-            yield {"type": "tool_result", "name": tc["name"], "result": error}
+            yield {"type": "tool_call", "name": tc["name"], "args": {}, "safety": "denied", "id": tc["id"]}
+            yield {"type": "tool_result", "name": tc["name"], "result": error, "id": tc["id"]}
             _append_tool_msg(messages, tc["id"], error, tc["name"])
             continue
 
         tc, tool_name, args, tool_def, safety_str = prepared
-        yield {"type": "tool_call", "name": tool_name, "args": args, "safety": safety_str}
+        yield {"type": "tool_call", "name": tool_name, "args": args, "safety": safety_str, "id": tc["id"]}
 
         denied, reason = is_denied_fn(tool_name, args)
         if denied:
@@ -490,5 +527,5 @@ async def _execute_sequential(
 
         result = await _execute_single_tool(tool_def, tool_name, args, workspace=workspace)
         await _fire_post_tool(tool_name, args, result, workspace)
-        yield {"type": "tool_result", "name": tool_name, "result": result}
+        yield {"type": "tool_result", "name": tool_name, "result": result, "id": tc["id"]}
         _record_result(tc, tool_name, result, messages)

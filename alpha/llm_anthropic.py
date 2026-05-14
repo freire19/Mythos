@@ -39,42 +39,8 @@ _TRANSIENT_HTTPX_ERRORS = (
     httpx.PoolTimeout,
 )
 
-# Loop-aware shared client; mirrors llm.py. Single-shot CLI (`asyncio.run`)
-# creates a new loop per invocation but the module stays import-cached, so we
-# rebuild when the loop or client is stale.
-_client: httpx.AsyncClient | None = None
-_client_loop: object | None = None
-_client_lock = asyncio.Lock()
-
-
-async def _get_client(timeout: float) -> httpx.AsyncClient:
-    """Return a loop-aware shared httpx.AsyncClient for Anthropic."""
-    global _client, _client_loop
-    loop = asyncio.get_running_loop()
-    if (
-        _client is not None
-        and not _client.is_closed
-        and _client_loop is loop
-    ):
-        return _client
-    async with _client_lock:
-        if (
-            _client is not None
-            and not _client.is_closed
-            and _client_loop is loop
-        ):
-            return _client
-        if _client is not None and not _client.is_closed:
-            try:
-                await _client.aclose()
-            except Exception:
-                pass
-        _client = httpx.AsyncClient(
-            timeout=httpx.Timeout(timeout, connect=10.0),
-            limits=httpx.Limits(max_keepalive_connections=5, max_connections=20),
-        )
-        _client_loop = loop
-    return _client
+# Shared httpx client pool in _http_clients.py (#D026 consolidation).
+from ._http_clients import get_llm_client
 
 
 # ── OpenAI → Anthropic conversion ──
@@ -246,22 +212,32 @@ async def stream_anthropic(
     accumulated_content = ""
     blocks: dict[int, dict] = {}  # index → {"type": "text"|"tool_use", ...}
     yielded_any = False
-    dsml_stripper = DsmlStripper()
 
-    client = await _get_client(timeout)
+    client = await get_llm_client(timeout)
     last_error: str | None = None
 
     for attempt in range(_ANTHROPIC_RETRY_MAX + 1):
+        dsml_stripper = DsmlStripper()
         try:
             async with client.stream(
-                "POST", f"{base_url}/messages", json=payload, headers=headers
+                "POST", f"{base_url}/messages", json=payload, headers=headers,
+                timeout=httpx.Timeout(timeout, connect=10.0),
             ) as response:
                 if response.status_code >= 400:
                     body = await response.aread()
-                    logger.error(
-                        f"Anthropic HTTP {response.status_code}: "
-                        f"{sanitize_for_log(body[:500].decode('utf-8', errors='replace'))}"
-                    )
+                    body_text = body[:500].decode('utf-8', errors='replace')
+                    logger.error(f"Anthropic HTTP {response.status_code}: {sanitize_for_log(body_text)}")
+                    # Retry on rate-limit and server errors (matching llm.py behavior)
+                    if response.status_code in (429, 500, 502, 503, 504) and attempt < _ANTHROPIC_RETRY_MAX:
+                        last_error = f"HTTP {response.status_code}"
+                        backoff = _calc_backoff(attempt)
+                        logger.warning(
+                            f"Anthropic HTTP {response.status_code} (attempt {attempt + 1}/{_ANTHROPIC_RETRY_MAX + 1}), "
+                            f"retrying in {backoff:.1f}s"
+                        )
+                        blocks = {}
+                        await asyncio.sleep(backoff)
+                        continue
                     yield {
                         "type": "final",
                         "content": "",
@@ -346,12 +322,21 @@ async def stream_anthropic(
             break
 
     if last_error:
-        yield {
-            "type": "final",
-            "content": "",
-            "tool_calls": [],
-            "error": last_error,
-        }
+        if yielded_any:
+            yield {
+                "type": "final",
+                "content": accumulated_content,
+                "tool_calls": [],
+                "error": f"Stream truncated by network error after partial output: {last_error}",
+                "truncated": True,
+            }
+        else:
+            yield {
+                "type": "final",
+                "content": "",
+                "tool_calls": [],
+                "error": f"Anthropic error: {last_error}",
+            }
         return
 
     tool_calls = []

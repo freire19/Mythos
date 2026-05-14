@@ -62,7 +62,9 @@ MIN_MESSAGES_FOR_COMPRESSION = 12
 # de tokens. Tool results pequenos (< 200 chars) podem nao gatilhar o
 # threshold por tokens mesmo com milhares de messages, mas cada iteracao
 # reserializa toda a lista para JSON e o `_detect_loop` itera N entradas.
-MAX_MESSAGES = 500
+from .config import LIMITS
+
+MAX_MESSAGES: int = LIMITS["max_messages"]
 
 
 def estimate_tokens(text: str) -> int:
@@ -355,7 +357,10 @@ async def compress_context(
         logger.exception(f"Compression LLM call raised {type(e).__name__}: {e}")
         summary = ""
 
-    if not summary:
+    if not summary or len(summary.strip()) < 10:
+        # #DL009: summaries shorter than 10 chars (e.g. "ok", "done") are
+        # effectively empty — treat as compression failure to avoid
+        # replacing real context with noise.
         failures = _compress_consecutive_failures.get() + 1
         _compress_consecutive_failures.set(failures)
         if failures >= _COMPRESS_FAIL_TRUNCATE_THRESHOLD:

@@ -15,6 +15,7 @@ from pathlib import Path
 from urllib.parse import quote, urlparse
 
 from .._security_log import sanitize_for_log
+from ..config import TOOL_TIMEOUTS
 from ..net_utils import (
     is_private_ip as _is_private_ip,
     resolve_and_validate as _resolve_and_validate,
@@ -262,6 +263,7 @@ async def _query_sqlite(db_path: str, query: str, read_only: bool) -> dict:
             conn = sqlite3.connect(uri, uri=True)
         else:
             conn = sqlite3.connect(db_path)
+        conn.set_progress_handler(lambda: None, 100)  # allow interrupt (#067)
         conn.row_factory = sqlite3.Row
         try:
             cursor = conn.cursor()

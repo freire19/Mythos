@@ -47,6 +47,24 @@ async def _read_file(path: str, offset: int = 0, limit: int = 500) -> dict:
     if not p.is_file():
         return {"error": f"Não é um arquivo: {path}"}
     try:
+        # #D027: stream line-by-line for files >1MB to avoid
+        # materializing the whole file in memory for small offset/limit.
+        file_size = p.stat().st_size
+        if file_size > 1_000_000:
+            import itertools
+            with open(p, errors="replace") as f:
+                selected = list(itertools.islice(f, offset, offset + limit))
+            numbered = "\n".join(
+                f"{i + offset + 1}: {line.rstrip()}"
+                for i, line in enumerate(selected)
+            )
+            return {
+                "path": str(p),
+                "total_lines": None,  # unknown for large files
+                "offset": offset,
+                "lines_returned": len(selected),
+                "content": numbered,
+            }
         text = p.read_text(errors="replace")
         lines = text.splitlines()
         selected = lines[offset : offset + limit]
@@ -349,18 +367,20 @@ def _search_with_python(regex: "re.Pattern[str]", root: Path, max_results: int) 
             try:
                 if fpath.stat().st_size > 1_000_000:
                     continue
-                text = fpath.read_text(errors="replace")
+                # #037: stream line-by-line instead of read_text()+splitlines()
+                # to avoid materializing the whole file in memory.
+                with open(fpath, errors="replace") as f:
+                    for i, line in enumerate(f, 1):
+                        if regex.search(line):
+                            out.append({
+                                "file": str(fpath),
+                                "line": i,
+                                "content": line.strip()[:200],
+                            })
+                            if len(out) >= max_results:
+                                break
             except (PermissionError, OSError):
                 continue
-            for i, line in enumerate(text.splitlines(), 1):
-                if regex.search(line):
-                    out.append({
-                        "file": str(fpath),
-                        "line": i,
-                        "content": line.strip()[:200],
-                    })
-                    if len(out) >= max_results:
-                        break
     return out
 
 
