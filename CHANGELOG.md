@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.8.7](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.8.6...alpha-code-v1.8.7) (2026-05-15)
+
+
+### Bug Fixes
+
+* classify questions vs tasks + assorted UX/robustness polish ([90de216](https://github.com/freire19/Alpha_Code/commit/90de21664054709b784a453de8c9f1f9644f0409))
+
 ## [1.8.6](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.8.5...alpha-code-v1.8.6) (2026-05-12)
 
 
