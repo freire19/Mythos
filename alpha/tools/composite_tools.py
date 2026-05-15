@@ -1,14 +1,14 @@
-"""Composite tools (macros) for ALPHA agent.
+"""Composite tools (macros) — DEPRECATED (#109).
 
-Split into 4 focused modules (#030):
-- project_overview.py — _project_overview
-- run_tests.py        — _run_tests
-- search_and_replace.py — _search_and_replace
-- deploy_check.py     — _deploy_check
-
-This module re-exports for backward compatibility. New code should import
-directly from the sub-modules.
+This module is a backward-compatibility shim. Import directly from:
+  .project_overview, .run_tests, .search_and_replace, .deploy_check
 """
+
+import warnings
+warnings.warn(
+    "composite_tools.py is deprecated — import from sub-modules directly.",
+    DeprecationWarning, stacklevel=2,
+)
 
 from .deploy_check import _deploy_check
 from .project_overview import _project_overview

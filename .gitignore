@@ -34,6 +34,11 @@ ENV/
 credentials*.json
 secrets*.json
 
+# Artifact directories from refactor / shell injection fragments
+earthkit_audit*/
+_artifacts_*/
+_backups_*/
+
 # Databases
 *.db
 *.sqlite

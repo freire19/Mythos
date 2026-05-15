@@ -316,10 +316,19 @@ async def run_exploit(
         result = await _run_container_sandbox(
             bin_path, input_data, args, timeout, mem_limit_mb, env or {}
         )
-        # Fall back to process sandbox if container failed (docker installed
-        # but not running, or image missing, or mount failed).
         if not result.get("error"):
             return result
+        # Container failed: reject fallback to process-level isolation (#027).
+        # Process sandbox has only rlimits, no namespace isolation — silent
+        # degradation from container to process would violate the security
+        # expectation set by use_container=True.
+        return {
+            "ok": False,
+            "error": f"Container sandbox failed: {result.get('error')}. "
+                     f"Process fallback bloqueado por segurança. "
+                     f"Verifique se o container runtime está operacional "
+                     f"ou use use_container=False para sandbox via rlimits.",
+        }
 
     return await _run_process_sandbox(
         bin_path, input_data, args, timeout, mem_limit_mb, env or {}

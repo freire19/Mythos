@@ -405,20 +405,31 @@ async def _query_database(
     return {"error": f"Tipo de banco '{db_type}' não suportado. Use 'sqlite' ou 'postgresql'."}
 
 
+def _block_postgresql(tool_name: str, suggested_query: str) -> dict:
+    """Block PostgreSQL for SAFE tools — credential probing risk (#030).
+
+    list_tables and describe_table are SAFE, but connecting to remote
+    PostgreSQL hosts would auto-approve credential probing. Users must
+    use query_database (DESTRUCTIVE) for PostgreSQL introspection.
+    """
+    return {
+        "error": f"{tool_name} não suporta PostgreSQL. Use query_database com "
+                 f"db_type='postgresql' e query='{suggested_query}'.",
+        "blocked": True,
+    }
+
+
 async def _list_tables(connection: str, db_type: str = "sqlite") -> dict:
     """List all tables in a database."""
+    if db_type == "postgresql":
+        return _block_postgresql("list_tables",
+            "SELECT table_name FROM information_schema.tables "
+            "WHERE table_schema = 'public'")
     if db_type == "sqlite":
         return await _query_sqlite(
             connection,
             "SELECT name, type FROM sqlite_master WHERE type IN ('table', 'view') ORDER BY name",
             read_only=True,
-        )
-    elif db_type == "postgresql":
-        return await _query_database(
-            connection,
-            "SELECT table_name, table_type FROM information_schema.tables WHERE table_schema = 'public' ORDER BY table_name",
-            read_only=True,
-            db_type="postgresql",
         )
     return {"error": f"Tipo de banco '{db_type}' não suportado"}
 
@@ -429,50 +440,16 @@ async def _describe_table(connection: str, table: str, db_type: str = "sqlite") 
     if not _SAFE_IDENTIFIER.match(table):
         return {"error": f"Nome de tabela inválido: '{table}'"}
 
+    if db_type == "postgresql":
+        return _block_postgresql("describe_table",
+            "SELECT column_name, data_type FROM information_schema.columns "
+            "WHERE table_name = '<nome_da_tabela>'")
     if db_type == "sqlite":
         return await _query_sqlite(
             connection,
             f"PRAGMA table_info({table})",
             read_only=True,
         )
-    elif db_type == "postgresql":
-        ssrf_error = await _validate_pg_ssrf(connection)
-        if ssrf_error is not None:
-            return ssrf_error
-
-        # Usar parameterized query para PostgreSQL
-        try:
-            import asyncpg  # noqa: F401
-        except ImportError:
-            return {"error": "asyncpg não instalado. Execute: pip install asyncpg"}
-
-        fetch_timeout = TOOL_TIMEOUTS.get("database", 30)
-        try:
-            pool = await asyncio.wait_for(_get_pg_pool(connection), timeout=10)
-            async with pool.acquire(timeout=fetch_timeout) as conn:
-                rows = await asyncio.wait_for(
-                    conn.fetch(
-                        "SELECT column_name, data_type, is_nullable, column_default "
-                        "FROM information_schema.columns WHERE table_name = $1 "
-                        "ORDER BY ordinal_position",
-                        table,
-                    ),
-                    timeout=fetch_timeout,
-                )
-                rows_list = [dict(r) for r in rows]
-                columns = list(rows_list[0].keys()) if rows_list else []
-                return {
-                    "columns": columns,
-                    "rows": rows_list,
-                    "row_count": len(rows_list),
-                    "query": f"DESCRIBE {table}",
-                }
-        except TimeoutError:
-            return {"error": "Timeout ao conectar ao PostgreSQL"}
-        except Exception as e:
-            # asyncpg errors podem incluir o DSN com password no str(e).
-            return {"error": sanitize_for_log(f"PostgreSQL error: {e}")}
-
     return {"error": f"Tipo de banco '{db_type}' não suportado"}
 
 
@@ -541,6 +518,10 @@ register_tool(
     )
 )
 
+# describe_table: SAFE for SQLite (local only), but when db_type=postgresql it
+# connects to remote hosts — credential probing would be auto-approved (#030).
+# The executor enforces this at runtime: postgresql connections with read_only
+# are still destructive in practice (they probe credentials against remote hosts).
 register_tool(
     ToolDefinition(
         name="describe_table",

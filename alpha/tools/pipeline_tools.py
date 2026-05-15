@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 
 
 
-_REDIRECT_RE = re.compile(r"(2>>|2>|>>|>|<)\s*(\S+)")
+_REDIRECT_RE = re.compile(r"(2>>|2>|>>|>|<)\s*(\S+)", re.UNICODE)
 
 
 def _validate_redirect_paths(pipeline: str) -> str | None:

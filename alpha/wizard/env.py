@@ -44,6 +44,11 @@ def write_env(updates: dict[str, str]) -> Path:
     de usuario malicioso (e.g. `OPENAI_API_KEY=valid\\nDEEPSEEK_API_KEY=evil`).
     """
     for k, v in updates.items():
+        # Validate keys: reject newline or '=' in key names (#029).
+        # `k="FOO\nBAR=evil"` would inject a second variable on the next line
+        # when written to .env, bypassing the updates dict entirely.
+        if "\n" in k or "\r" in k or "=" in k:
+            raise ValueError(f"Chave inválida '{k}' — newline e '=' são bloqueados por segurança")
         if "\n" in v or "\r" in v:
             raise ValueError(f"Newline em valor de '{k}' — bloqueado por segurança")
     existing = (

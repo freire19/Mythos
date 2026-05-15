@@ -133,17 +133,22 @@ class MCPClient:
 
     def _read_stdout(self) -> None:
         assert self.proc is not None and self.proc.stdout is not None
-        for line in self.proc.stdout:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                msg = json.loads(line)
-            except json.JSONDecodeError:
-                logger.debug("MCP %s: non-JSON line discarded: %r", self.name, line[:200])
-                continue
-            self._inbox.put(msg)
-        # EOF: signal disconnection.
+        try:
+            for line in self.proc.stdout:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    msg = json.loads(line)
+                except json.JSONDecodeError:
+                    logger.debug("MCP %s: non-JSON line discarded: %r", self.name, line[:200])
+                    continue
+                self._inbox.put(msg)
+        except OSError as e:
+            # ConnectionResetError, BrokenPipeError — stdout stream died.
+            # Signal disconnection so the inbox consumer doesn't hang (#065).
+            logger.warning("MCP %s: stdout stream broken: %s", self.name, e)
+        # EOF or broken stream: signal disconnection.
         self._inbox.put(None)
 
     def _read_stderr(self) -> None:

@@ -2,6 +2,7 @@
 
 import logging
 import re
+from fnmatch import fnmatch as _fnmatch
 
 from . import ToolCategory, ToolDefinition, ToolSafety, register_tool
 from ._composite_helpers import _run_tool, _violation
@@ -27,6 +28,12 @@ async def _search_and_replace(
 
     # Find files with matches
     search_result = await _run_tool("search_files", path=str(target_path), pattern=re.escape(search))
+    # Apply file_pattern glob filter to results (#114)
+    if file_pattern != "**/*":
+        raw_results = search_result.get("results", [])
+        filtered = [r for r in raw_results
+                    if _fnmatch(r.get("file", r.get("path", "")), file_pattern)]
+        search_result = {**search_result, "results": filtered}
     if "error" in search_result:
         return search_result
 
