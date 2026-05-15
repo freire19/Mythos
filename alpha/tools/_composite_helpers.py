@@ -1,7 +1,6 @@
-"""Shared helpers for composite tool modules.
+"""Shared helpers for composite tools.
 
-Extraido de composite_tools.py durante o split em 4 modulos (#030).
-"""
+Extracted from composite_tools.py (#030 split)."""
 
 import asyncio
 import logging
@@ -34,7 +33,13 @@ async def _run_tool(name: str, *, timeout: float | None = None, **kwargs) -> dic
     gate de aprovacao do executor. A composite tool externa ja foi aprovada
     pelo usuario (todas as composites destrutivas sao DESTRUCTIVE). As
     sub-tools chamadas aqui ainda passam pelas suas proprias validacoes
-    (workspace, command allowlist, schema), mas nao re-prompto.
+    (workspace, command allowlist, schema), mas nao re-prompto. Nao chame
+    `_run_tool` com tool destrutiva sem garantir que a composite externa
+    seja DESTRUCTIVE — caso contrario o gate fica opaco para o usuario.
+
+    Erros desta funcao seguem o invariante `{ok: false, category, ...}` do
+    executor (via `_annotate_error`) — antes retornavam `{\"error\": str}`
+    cru, fazendo o modelo aprender N variantes de \"falhou\".
     """
     tool_def = get_tool(name)
     if not tool_def:
@@ -48,12 +53,9 @@ async def _run_tool(name: str, *, timeout: float | None = None, **kwargs) -> dic
 
     try:
         return await asyncio.wait_for(tool_def.executor(**kwargs), timeout=timeout)
-    except TimeoutError:
+    except (TimeoutError, asyncio.TimeoutError):
         return _annotate_error(
-            {
-                "error": f"Tool '{name}' excedeu timeout de {timeout}s",
-                "timeout": True,
-            },
+            {"error": f"Tool '{name}' excedeu timeout de {timeout}s", "timeout": True},
             "timeout",
         )
     except Exception as e:

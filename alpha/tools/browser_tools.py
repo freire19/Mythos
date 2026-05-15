@@ -10,6 +10,7 @@ import time
 from pathlib import Path
 from urllib.parse import urlparse
 
+from . import ToolCategory, ToolDefinition, ToolSafety, register_tool
 from .browser_session import (
     PLAYWRIGHT_AVAILABLE,
     BrowserSession,
@@ -417,6 +418,9 @@ async def _browser_close_tab(index: int | None = None) -> dict:
     if not session.pages:
         await session.close()
         return {"closed": index, "session_closed": True}
+    # Aba fechada antes da ativa desloca o índice ativo uma posição à esquerda
+    if index < session.active_idx:
+        session.active_idx -= 1
     session.active_idx = max(0, min(session.active_idx, len(session.pages) - 1))
     return {"closed": index, "tab_count": len(session.pages), "active_tab": session.active_idx}
 
@@ -488,6 +492,11 @@ async def _browser_execute_js(code: str) -> dict:
         return {"error": str(e)}
 
 
-# Trigger registrations (extracted to _browser_registrations.py — #081)
-from . import _browser_registrations  # noqa: F401
+# ─── Tool registrations ──────────────────────────────────────────
 
+_NO_PARAMS = {"type": "object", "properties": {}}
+
+
+
+# Tool registrations live in _browser_registrations.py (split #081)
+from . import _browser_registrations  # noqa: F401 — triggers registration

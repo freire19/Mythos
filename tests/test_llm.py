@@ -7,7 +7,12 @@ Tests assert the expected jitter window, not exact values.
 
 import statistics
 
-from alpha.llm import INITIAL_BACKOFF, MAX_BACKOFF, MAX_RETRIES, _calc_backoff
+from alpha.config import RETRY
+from alpha.llm import _calc_backoff
+
+INITIAL_BACKOFF = RETRY["llm"]["initial_backoff"]
+MAX_BACKOFF = RETRY["llm"]["max_backoff"]
+MAX_RETRIES = RETRY["llm"]["max_retries"]
 
 
 class TestBackoff:

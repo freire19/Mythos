@@ -13,11 +13,15 @@ from .path_helpers import (
     _fuzzy_resolve,
     _validate_path,
     _validate_path_no_symlink,
-    _atomic_write,
 )
 from .workspace import AGENT_WORKSPACE, assert_within_workspace
 
 logger = logging.getLogger(__name__)
+
+# Directories skipped during glob/recursive scans to avoid noise in monorepos
+_SKIP_DIRS = frozenset({".git", "node_modules", ".venv", "__pycache__",
+                         ".mypy_cache", ".pytest_cache", ".ruff_cache",
+                         "dist", "build"})
 
 
 # #025/#071 (V1.1): ripgrep (`rg`) e ~10-50x mais rapido que o scan Python
@@ -27,6 +31,11 @@ logger = logging.getLogger(__name__)
 _RIPGREP_BIN = shutil.which("rg")
 # Excluir os mesmos paths que o fallback Python pula
 _RG_EXCLUDES = (".git", "node_modules", "__pycache__", ".venv")
+
+# Inline edits load the whole file into memory; refuse anything larger so we
+# don't allocate runaway buffers (the previous unconditional 10MB read also
+# silently truncated bigger files).
+_EDIT_MAX_BYTES = 10_000_000
 
 
 # ─── Safe Tools ───
@@ -47,31 +56,29 @@ async def _read_file(path: str, offset: int = 0, limit: int = 500) -> dict:
     if not p.is_file():
         return {"error": f"Não é um arquivo: {path}"}
     try:
-        # #D027: stream line-by-line for files >1MB to avoid
-        # materializing the whole file in memory for small offset/limit.
-        file_size = p.stat().st_size
-        if file_size > 1_000_000:
-            import itertools
-            with open(p, errors="replace") as f:
-                selected = list(itertools.islice(f, offset, offset + limit))
-            numbered = "\n".join(
-                f"{i + offset + 1}: {line.rstrip()}"
-                for i, line in enumerate(selected)
-            )
-            return {
-                "path": str(p),
-                "total_lines": None,  # unknown for large files
-                "offset": offset,
-                "lines_returned": len(selected),
-                "content": numbered,
-            }
-        text = p.read_text(errors="replace")
-        lines = text.splitlines()
-        selected = lines[offset : offset + limit]
+        # DEEP_PERFORMANCE #D027: streaming read para arquivos grandes.
+        # read_text() + splitlines() materializa o arquivo inteiro em RAM
+        # mesmo com offset/limit pequenos. Para arquivos >= 100KB, fazemos
+        # streaming com open() — conta total de linhas e só guarda as do range.
+        # Custo: O(n) CPU (contar \n), O(limit) RAM (só as linhas visíveis).
+        fsize = p.stat().st_size
+        if fsize < 100_000:
+            text = p.read_text(errors="replace")
+            lines = text.splitlines()
+            selected = lines[offset : offset + limit]
+            total_lines = len(lines)
+        else:
+            selected: list[str] = []
+            total_lines = 0
+            with open(p, "r", errors="replace", buffering=65536) as f:
+                for i, line in enumerate(f):
+                    total_lines = i + 1
+                    if offset <= i < offset + limit:
+                        selected.append(line.rstrip("\n"))
         numbered = "\n".join(f"{i + offset + 1}: {line}" for i, line in enumerate(selected))
         return {
             "path": str(p),
-            "total_lines": len(lines),
+            "total_lines": total_lines,
             "offset": offset,
             "lines_returned": len(selected),
             "content": numbered,
@@ -367,9 +374,10 @@ def _search_with_python(regex: "re.Pattern[str]", root: Path, max_results: int) 
             try:
                 if fpath.stat().st_size > 1_000_000:
                     continue
-                # #037: stream line-by-line instead of read_text()+splitlines()
-                # to avoid materializing the whole file in memory.
-                with open(fpath, errors="replace") as f:
+                # DEEP_PERFORMANCE #037: streaming read em vez de
+                # read_text() + splitlines() que materializa o arquivo
+                # inteiro (até 999KB) em RAM duas vezes (string + lista).
+                with open(fpath, "r", errors="replace", buffering=65536) as f:
                     for i, line in enumerate(f, 1):
                         if regex.search(line):
                             out.append({
@@ -378,7 +386,7 @@ def _search_with_python(regex: "re.Pattern[str]", root: Path, max_results: int) 
                                 "content": line.strip()[:200],
                             })
                             if len(out) >= max_results:
-                                break
+                                return out
             except (PermissionError, OSError):
                 continue
     return out
@@ -397,8 +405,6 @@ async def _glob_files(pattern: str, path: str = ".") -> dict:
     # inteira antes de cortar a 200. Em monorepos com .git/node_modules
     # incluido, isso pode produzir 100K+ entradas. Itera o generator,
     # acumula 200, ordena no final.
-    _SKIP_DIRS = {".git", "node_modules", ".venv", "__pycache__", ".mypy_cache",
-                  ".pytest_cache", ".ruff_cache", "dist", "build"}
     matches = []
     skipped_outside = 0
     try:
@@ -416,8 +422,7 @@ async def _glob_files(pattern: str, path: str = ".") -> dict:
         # #D025: workspace dentro do glob — se p contem symlink que aponta
         # para fora, glob seguiria e listaria filenames externos. read_file
         # depois bloquearia, mas o filename ja vazou estrutura externa.
-        err = assert_within_workspace(match.resolve())
-        if err:
+        if assert_within_workspace(match.resolve()):
             skipped_outside += 1
             continue
         info = {"path": str(match), "type": "dir" if match.is_dir() else "file"}
@@ -473,10 +478,15 @@ async def _write_file(path: str, content: str) -> dict:
         p_resolved = Path(path).expanduser().resolve()
         err = assert_within_workspace(p_resolved)
         if err:
-            raise ValueError(err)
-        # Atomic write via tempfile + os.replace
+            raise PermissionError(err)
+        # Atomic write: O_NOFOLLOW prevents symlink race between validate and open
         data = content.encode("utf-8")
-        _atomic_write(p, data)
+        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW
+        fd = os.open(str(p), flags, 0o644)
+        try:
+            os.write(fd, data)
+        finally:
+            os.close(fd)
         return {
             "path": str(p),
             "bytes_written": len(data),
@@ -502,11 +512,17 @@ async def _edit_file(path: str, old_text: str, new_text: str) -> dict:
     if not p.exists():
         return {"error": f"Arquivo não encontrado: {path}"}
     try:
-        # O_NOFOLLOW previne TOCTOU entre validate e read — se o path
-        # virou symlink depois do check, open falha com ELOOP.
-        fd = os.open(str(path), os.O_RDONLY | os.O_NOFOLLOW)
+        # O_NOFOLLOW closes the TOCTOU race where a symlink could be created
+        # between the path validation above and this read.
+        fd = os.open(str(p), os.O_RDONLY | os.O_NOFOLLOW)
         try:
-            raw = os.read(fd, 10_000_000)  # 10MB cap
+            size = os.fstat(fd).st_size
+            if size > _EDIT_MAX_BYTES:
+                return {
+                    "error": f"Arquivo > {_EDIT_MAX_BYTES // 1_000_000}MB; "
+                    f"edição inline não suportada para arquivos desse tamanho"
+                }
+            raw = os.read(fd, size) if size > 0 else b""
             original = raw.decode("utf-8", errors="replace")
         finally:
             os.close(fd)
@@ -518,10 +534,15 @@ async def _edit_file(path: str, old_text: str, new_text: str) -> dict:
         p_resolved = Path(path).expanduser().resolve()
         err = assert_within_workspace(p_resolved)
         if err:
-            raise ValueError(err)
-        # Atomic write via tempfile + os.replace
+            raise PermissionError(err)
+        # Atomic write with O_NOFOLLOW to prevent symlink race
         data = updated.encode("utf-8")
-        _atomic_write(p, data)
+        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW
+        fd = os.open(str(p), flags, 0o644)
+        try:
+            os.write(fd, data)
+        finally:
+            os.close(fd)
         return {
             "path": str(p),
             "occurrences_found": count,

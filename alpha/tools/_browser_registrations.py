@@ -1,36 +1,19 @@
-"""Browser tool registrations (#081).
+"""Browser tool registrations.
 
-Extracted from browser_tools.py — all register_tool calls in one place
-so browser_tools.py stays focused on implementations.
+Auto-generated from browser_tools.py split (#081).
 """
 
 from . import ToolCategory, ToolDefinition, ToolSafety, register_tool
 from .browser_tools import (
-    _browser_back,
-    _browser_click,
-    _browser_close,
-    _browser_close_tab,
-    _browser_describe_page,
-    _browser_execute_js,
-    _browser_fill,
-    _browser_forward,
-    _browser_get_content,
-    _browser_list_tabs,
-    _browser_navigate,
-    _browser_new_tab,
-    _browser_open,
-    _browser_press_key,
-    _browser_query,
-    _browser_reload,
-    _browser_screenshot,
-    _browser_select_option,
-    _browser_status,
-    _browser_switch_tab,
-    _browser_wait_for,
+    _browser_open, _browser_close, _browser_status,
+    _browser_navigate, _browser_back, _browser_forward, _browser_reload,
+    _browser_get_content, _browser_screenshot, _browser_describe_page,
+    _browser_query, _browser_wait_for,
+    _browser_list_tabs, _browser_new_tab, _browser_switch_tab, _browser_close_tab,
+    _browser_click, _browser_fill, _browser_select_option,
+    _browser_press_key, _browser_execute_js,
+    _NO_PARAMS,
 )
-
-_NO_PARAMS = {"type": "object", "properties": {}}
-
 
 def _reg(name: str, desc: str, params: dict, executor, safety: ToolSafety):
     register_tool(

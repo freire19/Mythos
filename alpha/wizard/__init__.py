@@ -1,5 +1,5 @@
 """
-Onboarding wizard for Alpha Code.
+Onboarding wizard for Mythos.
 
 Entry point: run_wizard()
 """

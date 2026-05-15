@@ -1,4 +1,4 @@
-"""Declarative hook system for Alpha Code.
+"""Declarative hook system for Mythos.
 
 Hooks let users run shell commands at well-defined points in the agent
 lifecycle without modifying the codebase. Configured in `.alpha/settings.json`.

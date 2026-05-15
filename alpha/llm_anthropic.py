@@ -18,19 +18,20 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import random
 from collections.abc import AsyncGenerator
 
 import httpx
 
-from ._security_log import sanitize_for_log
-from .config import RETRY_CONFIG
+from ._rate_limiter import acquire_llm_token as _rate_limit_acquire
+
+from .config import RETRY
 from .llm import DsmlStripper, _calc_backoff
 
 logger = logging.getLogger(__name__)
 
 ANTHROPIC_VERSION = "2023-06-01"
 DEFAULT_MAX_TOKENS = 8192
-_ANTHROPIC_RETRY_MAX = RETRY_CONFIG["llm_max_retries"]
 _TRANSIENT_HTTPX_ERRORS = (
     httpx.ConnectError,
     httpx.RemoteProtocolError,
@@ -39,8 +40,44 @@ _TRANSIENT_HTTPX_ERRORS = (
     httpx.PoolTimeout,
 )
 
-# Shared httpx client pool in _http_clients.py (#D026 consolidation).
-from ._http_clients import get_llm_client
+# Loop-aware shared client; mirrors llm.py. Single-shot CLI (`asyncio.run`)
+# creates a new loop per invocation but the module stays import-cached, so we
+# rebuild when the loop or client is stale.
+_client: httpx.AsyncClient | None = None
+_client_loop: object | None = None
+_client_lock = asyncio.Lock()
+
+
+async def _get_client(timeout: float) -> httpx.AsyncClient:
+    """Return a loop-aware shared httpx.AsyncClient for Anthropic."""
+    global _client, _client_loop
+    loop = asyncio.get_running_loop()
+    if (
+        _client is not None
+        and not _client.is_closed
+        and _client_loop is loop
+    ):
+        return _client
+    # Lock protects the aclose() + reassign window from concurrent coroutines
+    # creating duplicate clients (mirrors the same guard in llm.py).
+    async with _client_lock:
+        if (
+            _client is not None
+            and not _client.is_closed
+            and _client_loop is loop
+        ):
+            return _client
+        if _client is not None and not _client.is_closed:
+            try:
+                await _client.aclose()
+            except Exception:
+                pass
+        _client = httpx.AsyncClient(
+            timeout=httpx.Timeout(timeout, connect=10.0),
+            limits=httpx.Limits(max_keepalive_connections=5, max_connections=20),
+        )
+        _client_loop = loop
+    return _client
 
 
 # ── OpenAI → Anthropic conversion ──
@@ -212,32 +249,20 @@ async def stream_anthropic(
     accumulated_content = ""
     blocks: dict[int, dict] = {}  # index → {"type": "text"|"tool_use", ...}
     yielded_any = False
+    dsml_stripper = DsmlStripper()
 
-    client = await get_llm_client(timeout)
+    client = await _get_client(timeout)
     last_error: str | None = None
 
-    for attempt in range(_ANTHROPIC_RETRY_MAX + 1):
-        dsml_stripper = DsmlStripper()
+    for attempt in range(RETRY["llm"]["max_retries"] + 1):
         try:
+            await _rate_limit_acquire("anthropic")
             async with client.stream(
-                "POST", f"{base_url}/messages", json=payload, headers=headers,
-                timeout=httpx.Timeout(timeout, connect=10.0),
+                "POST", f"{base_url}/messages", json=payload, headers=headers
             ) as response:
                 if response.status_code >= 400:
                     body = await response.aread()
-                    body_text = body[:500].decode('utf-8', errors='replace')
-                    logger.error(f"Anthropic HTTP {response.status_code}: {sanitize_for_log(body_text)}")
-                    # Retry on rate-limit and server errors (matching llm.py behavior)
-                    if response.status_code in (429, 500, 502, 503, 504) and attempt < _ANTHROPIC_RETRY_MAX:
-                        last_error = f"HTTP {response.status_code}"
-                        backoff = _calc_backoff(attempt)
-                        logger.warning(
-                            f"Anthropic HTTP {response.status_code} (attempt {attempt + 1}/{_ANTHROPIC_RETRY_MAX + 1}), "
-                            f"retrying in {backoff:.1f}s"
-                        )
-                        blocks = {}
-                        await asyncio.sleep(backoff)
-                        continue
+                    logger.error(f"Anthropic HTTP {response.status_code}: {body[:500]}")
                     yield {
                         "type": "final",
                         "content": "",
@@ -298,18 +323,19 @@ async def stream_anthropic(
                 yielded_any = True
                 yield {"type": "content_token", "token": tail}
 
+            # Success — break out of retry loop
             last_error = None
             break
 
         except _TRANSIENT_HTTPX_ERRORS as e:
             last_error = f"{type(e).__name__}: {e}"
-            # Once any token has been yielded the partial stream is committed
-            # downstream — replaying would duplicate it.
-            if yielded_any or attempt >= _ANTHROPIC_RETRY_MAX:
+            # Once any token has been yielded to the caller the partial stream
+            # is already committed downstream — replaying would duplicate it.
+            if yielded_any or attempt >= RETRY["llm"]["max_retries"]:
                 break
             backoff = _calc_backoff(attempt)
             logger.warning(
-                f"Anthropic transient error (attempt {attempt + 1}/{_ANTHROPIC_RETRY_MAX + 1}), "
+                f"Anthropic transient error (attempt {attempt + 1}/{RETRY["llm"]["max_retries"] + 1}), "
                 f"retrying in {backoff:.1f}s: {e}"
             )
             blocks = {}
@@ -322,21 +348,12 @@ async def stream_anthropic(
             break
 
     if last_error:
-        if yielded_any:
-            yield {
-                "type": "final",
-                "content": accumulated_content,
-                "tool_calls": [],
-                "error": f"Stream truncated by network error after partial output: {last_error}",
-                "truncated": True,
-            }
-        else:
-            yield {
-                "type": "final",
-                "content": "",
-                "tool_calls": [],
-                "error": f"Anthropic error: {last_error}",
-            }
+        yield {
+            "type": "final",
+            "content": "",
+            "tool_calls": [],
+            "error": last_error,
+        }
         return
 
     tool_calls = []

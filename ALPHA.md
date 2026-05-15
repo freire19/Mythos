@@ -32,6 +32,16 @@ Treat changes here as changes to your own runtime.
 
 ---
 
+## Asking the user to pick from a list
+
+When a skill or task needs the user to pick one option from a discrete
+set (audit category, target file, environment, etc.), **call the
+`ask_choice` tool — never print bullets, numbered lists, or a markdown
+table of choices**. Those formats render as raw text in the terminal
+and force the user to retype the answer. `ask_choice` pops a numbered
+menu and returns `chosen_value` directly. This applies to every skill,
+including ones whose SKILL.md still shows the old table format.
+
 ## House rules
 
 - Python ≥ 3.11. Type hints on new code, but don't rewrite untyped legacy.

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Mythos — Autonomous cybersecurity agent.
+Mythos — Autonomous vulnerability hunter. Red-team cybersecurity agent.
 
 Usage:
     python main.py                           # interactive REPL
@@ -13,6 +13,11 @@ import asyncio
 import os
 import sys
 import textwrap
+
+# init_console DEVE rodar antes de `from alpha.display` — senao os
+# primeiros ANSI escapes saem pro terminal Windows sem traducao.
+from alpha._platform import init_console
+init_console()
 
 from alpha.agents import get_agent
 from alpha.attachments import build_user_content
@@ -30,15 +35,20 @@ from alpha.display import (
     C,
     ThinkingIndicator,
     c,
-    label_for_tool,
+    format_context_indicator,
+    is_auto_accept,
     print_banner,
     print_context_compressed,
+    print_context_warning,
     print_error,
     print_phase,
     print_providers_list,
+    print_silent_turn,
     print_tool_call,
     print_tool_result,
+    render_markdown,
 )
+from alpha.display.core import live_label_for_tool
 from alpha.history import generate_session_id, save_session
 from alpha.cli.commands import DispatchResult, ReplContext, dispatch
 from alpha.cli.lifecycle import install_lifecycle_hooks
@@ -54,14 +64,34 @@ install_lifecycle_hooks()
 
 
 async def _run_once(messages, user_message, provider, temperature, get_tool_fn, tools, workspace=None):
-    """Run a single agent turn and display events."""
+    """Run a single agent turn and display events.
+
+    Streamed tokens are buffered, not echoed live — the spinner shows
+    progress while text accumulates. At each boundary (tool call, done,
+    error) the pending segment passes through `render_markdown` so
+    tables, bold, code, and headers reach the terminal as ANSI instead
+    of raw markdown."""
     from alpha.agent import run_agent
 
     full_reply = ""
+    pending_text = ""
     indicator = ThinkingIndicator("Think")
     indicator.start()
-    pending_args: dict[str, dict] = {}  # key=tool_call_id
+    pending_args: dict[str, dict] = {}
+    any_visible = False
 
+    def flush_text() -> None:
+        nonlocal pending_text
+        if not pending_text:
+            return
+        rendered = render_markdown(pending_text)
+        sys.stdout.write(rendered)
+        if not rendered.endswith("\n"):
+            sys.stdout.write("\n")
+        sys.stdout.flush()
+        pending_text = ""
+
+    aborted = False
     try:
         async for event in run_agent(
             messages,
@@ -75,54 +105,69 @@ async def _run_once(messages, user_message, provider, temperature, get_tool_fn, 
         ):
             event_type = event.get("type", "")
 
-            # Scroll-region mode keeps the spinner pinned at the bottom while
-            # output flows above — no more stop()/start() around every event.
-            # We only pause around `approval_needed` so the input() prompt
-            # echoes cleanly; the next tool_call/tool_result implicitly resumes.
             if event_type == "token":
                 text = event.get("text", "")
-                sys.stdout.write(text)
-                sys.stdout.flush()
+                pending_text += text
                 full_reply += text
+                any_visible = True
                 indicator.add_streamed_text(text)
 
             elif event_type == "tool_call":
-                if full_reply and not full_reply.endswith("\n"):
-                    sys.stdout.write("\n")
-                    sys.stdout.flush()
-                    full_reply += "\n"
+                flush_text()
                 tc_args = event.get("args", {}) or {}
                 print_tool_call(event["name"], tc_args, event.get("safety", "safe"))
-                pending_args[event["id"]] = tc_args if isinstance(tc_args, dict) else {}
-                indicator.start(label_for_tool(event["name"]))
+                pending_args[event["name"]] = tc_args if isinstance(tc_args, dict) else {}
+                indicator.start(live_label_for_tool(event["name"], tc_args))
+                any_visible = True
 
             elif event_type == "tool_result":
-                tr_args = pending_args.pop(event.get("id"), None)
+                tr_args = pending_args.pop(event["name"], None)
                 print_tool_result(event["name"], event.get("result", {}), args=tr_args)
                 indicator.start("Think")
+                any_visible = True
 
             elif event_type == "approval_needed":
-                indicator.pause()
+                # Pause only when the callback will actually block on input().
+                # With auto-accept on, print_approval_request short-circuits
+                # (one-line "auto-approved" print, no input) — pausing here
+                # would freeze the spinner through the entire tool execution.
+                # The visible silence during a slow tool (delegate_parallel
+                # can run 30s+) was the user-reported symptom.
+                if not is_auto_accept():
+                    indicator.pause()
 
             elif event_type == "context_compressed":
                 print_context_compressed(event.get("before", 0), event.get("after", 0))
                 indicator.start("Think")
+                any_visible = True
 
             elif event_type == "done":
                 indicator.stop()
                 reply = event.get("reply", "")
+                # Fallback: if nothing was ever streamed, take the `done`
+                # payload. Otherwise trust the buffered tokens — earlier
+                # segments have already been flushed at tool-call boundaries,
+                # so we can only render what's still pending.
                 if reply and not full_reply:
+                    pending_text = reply
                     full_reply = reply
+                flush_text()
+                if reply:
+                    any_visible = True
 
             elif event_type == "error":
+                flush_text()
                 indicator.stop()
                 print_error(event.get("message", "Unknown error"))
+                any_visible = True
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        aborted = True
+        raise
     finally:
         indicator.stop()
-
-    # Ensure newline after streaming
-    if full_reply and not full_reply.endswith("\n"):
-        print()
+        flush_text()
+        if not any_visible and not aborted:
+            print_silent_turn()
 
     return full_reply
 
@@ -145,6 +190,7 @@ def run_repl(provider: str, temperature: float):
     messages = [{"role": "system", "content": system_prompt}]
     history = []
     session_id = generate_session_id()
+    announced_thresholds: set[int] = set()
 
     get_tool_fn, tools = _get_tools_for_agent(active_agent)
 
@@ -183,7 +229,17 @@ def run_repl(provider: str, temperature: float):
 
     while True:
         try:
-            prompt = f"{c(C.RED + C.BOLD, '❯')} "
+            from alpha.context import estimate_messages_tokens, get_context_limit
+            _used = estimate_messages_tokens(messages)
+            _limit = get_context_limit(provider)
+            _pct = int((_used / _limit * 100)) if _limit else 0
+            for _t in (50, 70, 90):
+                if _pct >= _t and _t not in announced_thresholds:
+                    print_context_warning(_pct, _used, _limit)
+                    announced_thresholds.add(_t)
+                    break
+            ctx_chip = format_context_indicator(messages, provider)
+            prompt = f"{ctx_chip}{c(C.VIOLET + C.BOLD, '❯')} "
             user_input, image_paths = read_input(prompt)
             user_input = user_input.strip()
         except (KeyboardInterrupt, EOFError):
@@ -375,7 +431,7 @@ def run_single(provider: str, temperature: float, message: str):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Mythos — Autonomous cybersecurity agent",
+        description="Alpha Code — Standalone terminal agent",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=textwrap.dedent("""
             Examples:

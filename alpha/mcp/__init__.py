@@ -1,4 +1,4 @@
-"""Model Context Protocol (MCP) integration for Alpha Code.
+"""Model Context Protocol (MCP) integration for Mythos.
 
 Exposes a stdio-only client that connects to external MCP servers and
 auto-registers their tools into the global alpha TOOL_REGISTRY under the

@@ -1,16 +1,14 @@
-"""Search and replace — composite tool for bulk file modifications."""
+"""search_and_replace tool — composite (#030 split)."""
 
-import logging
+import os
 import re
-from fnmatch import fnmatch as _fnmatch
+import tempfile
+from pathlib import Path
 
 from . import ToolCategory, ToolDefinition, ToolSafety, register_tool
 from ._composite_helpers import _run_tool, _violation
 from .file_tools import _validate_path_no_symlink
-from .path_helpers import _atomic_write, _validate_path
-from .workspace import AGENT_WORKSPACE
-
-logger = logging.getLogger(__name__)
+from .path_helpers import _validate_path
 
 
 async def _search_and_replace(
@@ -28,16 +26,14 @@ async def _search_and_replace(
 
     # Find files with matches
     search_result = await _run_tool("search_files", path=str(target_path), pattern=re.escape(search))
-    # Apply file_pattern glob filter to results (#114)
+    # #D037: post-filter by file_pattern (search_files doesn't accept it)
     if file_pattern != "**/*":
-        raw_results = search_result.get("results", [])
-        filtered = [r for r in raw_results
-                    if _fnmatch(r.get("file", r.get("path", "")), file_pattern)]
-        search_result = {**search_result, "results": filtered}
+        results = search_result.get("results", [])
+        search_result["results"] = [r for r in results if Path(r.get("file", "")).match(file_pattern)]
     if "error" in search_result:
         return search_result
 
-    results_list = search_result.get("results", [])[:100]  # cap at 100 files (#086)
+    results_list = search_result.get("results", [])
     if not results_list:
         return {"matches": 0, "message": f"Nenhuma ocorrencia de '{search}' encontrada"}
 
@@ -61,6 +57,7 @@ async def _search_and_replace(
             "message": "Execute com dry_run=false para aplicar as mudancas",
         }
 
+    # Apply replacements: read once, replace ALL in memory, write once.
     changed_files = []
     errors = []
 
@@ -78,15 +75,32 @@ async def _search_and_replace(
         except OSError as e:
             errors.append({"file": filepath, "error": str(e)})
             continue
+
         count = original.count(search)
         if count == 0:
             continue
+
         updated = original.replace(search, replace)
+        tmp_path: str | None = None
         try:
-            _atomic_write(p, updated.encode("utf-8"))
+            fd, tmp_path = tempfile.mkstemp(prefix=".sr_", dir=str(p.parent))
+            try:
+                os.fchmod(fd, 0o644)
+                os.write(fd, updated.encode("utf-8"))
+            finally:
+                os.close(fd)
+            os.replace(tmp_path, p)
+            tmp_path = None
         except OSError as e:
             errors.append({"file": filepath, "error": str(e)})
             continue
+        except BaseException:
+            if tmp_path:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+            raise
         changed_files.append({"file": filepath, "replacements": count})
 
     return {
@@ -104,25 +118,15 @@ register_tool(
     ToolDefinition(
         name="search_and_replace",
         description=(
-            "Buscar e substituir texto em multiplos arquivos. "
-            "Modo dry_run por padrao (mostra o que seria alterado sem alterar). "
-            "Use dry_run=false para aplicar."
+            "Buscar e substituir texto em multiplos arquivos. Modo dry_run por padrao "
+            "(mostra o que seria alterado sem alterar). Use dry_run=false para aplicar."
         ),
         parameters={
             "type": "object",
             "properties": {
-                "path": {
-                    "type": "string",
-                    "description": "Diretorio raiz para busca",
-                },
-                "search": {
-                    "type": "string",
-                    "description": "Texto a buscar",
-                },
-                "replace": {
-                    "type": "string",
-                    "description": "Texto de substituicao",
-                },
+                "path": {"type": "string", "description": "Diretorio raiz para busca"},
+                "search": {"type": "string", "description": "Texto a buscar"},
+                "replace": {"type": "string", "description": "Texto de substituicao"},
                 "file_pattern": {
                     "type": "string",
                     "description": "Padrao glob para filtrar arquivos (ex: '**/*.py'). Padrao: **/*",

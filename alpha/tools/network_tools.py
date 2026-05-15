@@ -18,21 +18,17 @@ from ..net_utils import (
     validate_url as _validate_url,
     resolve_and_validate as _resolve_and_validate,
 )
+from ..config import RETRY, TOOL_TIMEOUTS
 from . import ToolCategory, ToolDefinition, ToolSafety, register_tool
-from ..config import RETRY_CONFIG, TOOL_TIMEOUTS, TOOL_TIMEOUT_CAPS
 
 logger = logging.getLogger(__name__)
 
 _MAX_RESPONSE_SIZE = 1_000_000  # 1MB
 _ALLOWED_METHODS = frozenset({"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"})
 
-# Retry config (#057): metodos seguros (GET/HEAD/OPTIONS) podem retentar
-# erros transientes (connection reset, DNS hiccup) sem risco de duplicar
-# efeito. Metodos de escrita (POST/PUT/PATCH/DELETE) NUNCA retentam —
-# duplicar pagamentos / criacoes seria pior do que falhar uma vez.
-_RETRY_SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
-_HTTP_MAX_RETRIES = RETRY_CONFIG["http_max_retries"]
-_HTTP_INITIAL_BACKOFF = RETRY_CONFIG["http_initial_backoff"]
+# Retry config (#DM036): centralizado em config.RETRY["http"].
+# Metodos seguros (GET/HEAD/OPTIONS) podem retentar erros transientes
+# sem risco de duplicar efeito. Escrita NUNCA retenta.
 
 
 # #D008-PERF: aiohttp.ClientSession compartilhada por loop. Antes, cada
@@ -115,22 +111,13 @@ async def _http_request(
     if url_error:
         return {"error": url_error, "blocked": True}
 
+    from ..config import TOOL_TIMEOUT_CAPS
     timeout = min(timeout, TOOL_TIMEOUT_CAPS.get("network", 60))
 
     try:
         import aiohttp  # noqa: F401 — usado por aiohttp.ClientTimeout abaixo
 
         req_headers = dict(headers) if headers else {}
-        # Block sensitive headers that could exfiltrate credentials (#022)
-        _SENSITIVE_HEADERS = frozenset({
-            "authorization", "cookie", "set-cookie",
-            "x-api-key", "x-amz-", "x-goog-",
-            "proxy-authorization", "www-authenticate",
-        })
-        for h in list(req_headers):
-            hl = h.lower()
-            if any(hl == s or hl.startswith(s) for s in _SENSITIVE_HEADERS):
-                return {"error": f"Header '{h}' bloqueado por segurança.", "blocked": True}
         req_headers.setdefault("User-Agent", "ALPHA-Agent/1.0")
 
         parsed = urlparse(url)
@@ -173,83 +160,88 @@ async def _http_request(
             req_kwargs["server_hostname"] = hostname
         resp = await session.request(**req_kwargs)
 
-        # Manual redirect following com re-validação DNS+IP
-        redirect_count = 0
-        while resp.status in (301, 302, 303, 307, 308) and redirect_count < 5:
-            redirect_url = resp.headers.get("Location")
-            if not redirect_url:
-                break
-
-            # Resolver URL relativo
-            if redirect_url.startswith("/"):
-                port = parsed.port
-                port_str = f":{port}" if port else ""
-                redirect_url = f"{parsed.scheme}://{hostname}{port_str}{redirect_url}"
-
-            # Re-validar DNS + IP do destino do redirect
-            redirect_parsed = urlparse(redirect_url)
-            redirect_hostname = redirect_parsed.hostname
-            if not redirect_hostname:
-                break
-
-            try:
-                redirect_ip = await _resolve_and_validate(redirect_hostname)
-            except ValueError as e:
-                return {"error": f"Redirect bloqueado: {e}", "blocked": True}
-
-            fixed_redirect = _rewrite_url_with_ip(redirect_parsed, redirect_ip)
-            req_headers["Host"] = redirect_hostname
-
-            redirect_is_https = redirect_parsed.scheme == "https"
-            redirect_ssl = (
-                _ssl.create_default_context() if redirect_is_https else False
-            )
-            redirect_kwargs = dict(
-                method=method,
-                url=fixed_redirect,
-                headers=req_headers,
-                allow_redirects=False,
-                timeout=aiohttp.ClientTimeout(total=timeout),
-                ssl=redirect_ssl,
-            )
-            if redirect_is_https:
-                redirect_kwargs["server_hostname"] = redirect_hostname
-            resp = await session.request(**redirect_kwargs)
-            redirect_count += 1
-
-        # Read response with size limit
         try:
+            # Manual redirect following com re-validação DNS+IP
+            redirect_count = 0
+            while resp.status in (301, 302, 303, 307, 308) and redirect_count < 5:
+                redirect_url = resp.headers.get("Location")
+                if not redirect_url:
+                    break
+
+                # Resolver URL relativo
+                if redirect_url.startswith("/"):
+                    port = parsed.port
+                    port_str = f":{port}" if port else ""
+                    redirect_url = f"{parsed.scheme}://{hostname}{port_str}{redirect_url}"
+
+                # Re-validar DNS + IP do destino do redirect
+                redirect_parsed = urlparse(redirect_url)
+                redirect_hostname = redirect_parsed.hostname
+                if not redirect_hostname:
+                    break
+
+                try:
+                    redirect_ip = await _resolve_and_validate(redirect_hostname)
+                except ValueError as e:
+                    return {"error": f"Redirect bloqueado: {e}", "blocked": True}
+
+                fixed_redirect = _rewrite_url_with_ip(redirect_parsed, redirect_ip)
+                req_headers["Host"] = redirect_hostname
+
+                redirect_is_https = redirect_parsed.scheme == "https"
+                redirect_ssl = (
+                    _ssl.create_default_context() if redirect_is_https else False
+                )
+                redirect_kwargs = dict(
+                    method=method,
+                    url=fixed_redirect,
+                    headers=req_headers,
+                    allow_redirects=False,
+                    timeout=aiohttp.ClientTimeout(total=timeout),
+                    ssl=redirect_ssl,
+                )
+                if redirect_is_https:
+                    redirect_kwargs["server_hostname"] = redirect_hostname
+                # Release the previous response before starting the next one
+                # so its connection returns to the pool immediately.
+                old_resp = resp
+                resp = await session.request(**redirect_kwargs)
+                old_resp.release()
+                redirect_count += 1
+
+            # Read response with size limit
             raw = await resp.read()
-            if len(raw) > _MAX_RESPONSE_SIZE:
-                body_text = raw[:_MAX_RESPONSE_SIZE].decode(errors="replace")
-                body_text += f"\n... [truncado: resposta > {_MAX_RESPONSE_SIZE // 1000}KB]"
-            else:
-                body_text = raw.decode(errors="replace")
-
-            resp_headers = dict(resp.headers)
-
-            return {
-                "status_code": resp.status,
-                "headers": {
-                    k: v
-                    for k, v in resp_headers.items()
-                    if k.lower()
-                    in (
-                        "content-type",
-                        "content-length",
-                        "server",
-                        "date",
-                        "location",
-                        "x-request-id",
-                        "etag",
-                    )
-                },
-                "body": body_text[:15000],
-                "url": str(resp.url),
-                "method": method,
-            }
         finally:
+            # Release also covers the `read()` raising mid-stream.
             resp.release()
+        if len(raw) > _MAX_RESPONSE_SIZE:
+            body_text = raw[:_MAX_RESPONSE_SIZE].decode(errors="replace")
+            body_text += f"\n... [truncado: resposta > {_MAX_RESPONSE_SIZE // 1000}KB]"
+        else:
+            body_text = raw.decode(errors="replace")
+
+        resp_headers = dict(resp.headers)
+
+        return {
+            "status_code": resp.status,
+            "headers": {
+                k: v
+                for k, v in resp_headers.items()
+                if k.lower()
+                in (
+                    "content-type",
+                    "content-length",
+                    "server",
+                    "date",
+                    "location",
+                    "x-request-id",
+                    "etag",
+                )
+            },
+            "body": body_text[:15000],
+            "url": str(resp.url),
+            "method": method,
+        }
 
     except ImportError:
         # Fallback: use urllib (stdlib)
@@ -312,7 +304,10 @@ async def _http_request_urllib(
             timeout=timeout + 5,
         )
 
-        resp_body = resp.read(_MAX_RESPONSE_SIZE).decode(errors="replace")
+        try:
+            resp_body = resp.read(_MAX_RESPONSE_SIZE).decode(errors="replace")
+        finally:
+            resp.close()
         return {
             "status_code": resp.status,
             "headers": dict(resp.headers),
@@ -345,25 +340,25 @@ async def _http_request_with_retry(
     `transient` por `_http_request`.
     """
     method_upper = (method or "GET").upper()
-    if method_upper not in _RETRY_SAFE_METHODS:
+    if method_upper not in RETRY["http"]["safe_methods"]:
         return await _http_request(url, method, headers, body, timeout)
 
     last_result: dict = {}
-    for attempt in range(_HTTP_MAX_RETRIES + 1):
+    for attempt in range(RETRY["http"]["max_retries"] + 1):
         result = await _http_request(url, method, headers, body, timeout)
         if not result.get("transient"):
             return result
         last_result = result
-        if attempt < _HTTP_MAX_RETRIES:
-            backoff = _HTTP_INITIAL_BACKOFF * (2 ** attempt) * (1 + random.random() * 0.3)
+        if attempt < RETRY["http"]["max_retries"]:
+            backoff = RETRY["http"]["initial_backoff"] * (2 ** attempt) * (1 + random.random() * 0.3)
             logger.warning(
                 f"http_request transient error on {url} "
-                f"(attempt {attempt + 1}/{_HTTP_MAX_RETRIES + 1}), "
+                f"(attempt {attempt + 1}/{RETRY["http"]["max_retries"] + 1}), "
                 f"retrying in {backoff:.2f}s"
             )
             await asyncio.sleep(backoff)
     # Esgotou retries — retorna o ultimo erro com a info do retry budget.
-    last_result["retried"] = _HTTP_MAX_RETRIES + 1
+    last_result["retried"] = RETRY["http"]["max_retries"] + 1
     return last_result
 
 

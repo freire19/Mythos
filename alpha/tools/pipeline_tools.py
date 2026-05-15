@@ -14,18 +14,58 @@ import shlex
 from pathlib import Path
 
 from . import ToolCategory, ToolDefinition, ToolSafety, register_tool
-from ..config import TOOL_TIMEOUTS, TOOL_TIMEOUT_CAPS
 from .path_helpers import _validate_path_no_symlink
 from .safe_env import get_safe_env
+from ..config import TOOL_TIMEOUTS
 from ..security import HARD_BLOCKED_RE, validate_pipeline
 from .workspace import AGENT_WORKSPACE, assert_within_workspace
 
 logger = logging.getLogger(__name__)
 
+# Operators allowed in pipelines
+# Allowed pipe/redirect operators
+_PIPE_OPERATORS: frozenset[str] = frozenset()  # DM038: reservado para uso futuro
 
 
+_SHELL_EXPANSION_RE = re.compile(
+    r"\$\(|`"  # command substitution: $(...) or `...`
+    r"|\$\{"  # variable expansion: ${...}
+    r"|\$[A-Za-z_]"  # variable reference: $VAR
+    r"|<\("  # process substitution: <(...)
+    r"|\$\(\("  # arithmetic expansion: $((...))
+)
 
-_REDIRECT_RE = re.compile(r"(2>>|2>|>>|>|<)\s*(\S+)", re.UNICODE)
+
+def _validate_pipeline(pipeline: str) -> str | None:
+    """Validate a full pipeline string. Returns error message or None.
+
+    Denylist model: catastrophic patterns blocked; everything else runs.
+    """
+    # Block shell variable/command expansion (injection vector)
+    if _SHELL_EXPANSION_RE.search(pipeline):
+        return "Pipeline bloqueado: expansão de variáveis/comandos ($(), ``, ${}) não é permitida"
+
+    # Check hard-blocked patterns on the full string (combined regex, #D020)
+    if HARD_BLOCKED_RE.search(pipeline):
+        return "Pipeline bloqueado por segurança (padrão destrutivo detectado)"
+
+    # Syntactic check per segment (no allowlist; HARD_BLOCKED already gated)
+    segments = re.split(r"\s*(?:\|\||&&|;|\|)\s*", pipeline)
+    for segment in segments:
+        segment = segment.strip()
+        if not segment:
+            continue
+        cmd_part = re.split(r"\s*(?:>>?|2>>?|<)\s*", segment)[0].strip()
+        if not cmd_part:
+            continue
+        try:
+            parts = shlex.split(cmd_part)
+            if not parts:
+                continue
+        except ValueError:
+            return f"Segmento malformado no pipeline: {segment}"
+
+    return None
 
 
 def _validate_redirect_paths(pipeline: str) -> str | None:
@@ -35,17 +75,18 @@ def _validate_redirect_paths(pipeline: str) -> str | None:
     cria arquivo. Pular esses para evitar tanto criar arquivos chamados
     `&1` quanto rejeitar pipelines comuns como `cmd 2>&1 | grep ...`.
     """
-    for match in _REDIRECT_RE.finditer(pipeline):
-        op, target = match.group(1), match.group(2)
+    redirects = re.findall(r"(?:>>?|2>>?)\s*(\S+)", pipeline)
+    for target in redirects:
         if target.startswith("&"):
             continue  # &1, &2 sao FD references, nao paths
-        if op == "<":
-            continue  # input redirect, no file creation
         target_path = Path(target).expanduser().resolve()
         err = assert_within_workspace(target_path)
         if err:
-            return err
+            return f"Redirect para '{target}': {err}"
     return None
+
+
+_REDIRECT_RE = re.compile(r"(2>>|2>|>>|>|<)\s*(\S+)")
 
 
 def _parse_segment(segment: str) -> tuple[list[str], dict[str, str]]:
@@ -148,7 +189,9 @@ def _open_redirect_files(redirects: dict[str, str]) -> dict:
                     norm = Path(_osp.normpath(str(raw)))
                     err = assert_within_workspace(norm)
                     if err:
-                        raise PermissionError(err)
+                        raise PermissionError(
+                            f"Redirect '{target}': {err}"
+                        )
                     # Walk parents existentes — qualquer symlink no caminho
                     # ate a raiz seria explorado pelo open.
                     cur = norm.parent
@@ -243,7 +286,9 @@ async def _execute_pipe_chain(
                 # Sem kill, o subprocess vira zumbi ate ESGOTAR PIDs.
                 proc.kill()
                 try:
-                    await proc.wait()
+                    await asyncio.wait_for(proc.wait(), timeout=5)
+                except TimeoutError:
+                    logger.error(f"Pipeline process {proc.pid} didn't die after kill — may be in D state")
                 except Exception:
                     pass
                 raise
@@ -285,7 +330,9 @@ async def _execute_pipe_chain(
             except (TimeoutError, asyncio.CancelledError):
                 proc.kill()
                 try:
-                    await proc.wait()
+                    await asyncio.wait_for(proc.wait(), timeout=5)
+                except TimeoutError:
+                    logger.error(f"Pipeline process {proc.pid} didn't die after kill — may be in D state")
                 except Exception:
                     pass
                 raise
@@ -311,7 +358,7 @@ async def _execute_pipeline(pipeline: str, cwd: str = None, timeout: int | None 
         timeout = TOOL_TIMEOUTS.get("pipeline", 120)
 
     # Validate entire pipeline
-    block_reason = validate_pipeline(pipeline)
+    block_reason = _validate_pipeline(pipeline)
     if block_reason:
         return {"error": block_reason, "blocked": True}
 
@@ -330,6 +377,7 @@ async def _execute_pipeline(pipeline: str, cwd: str = None, timeout: int | None 
     else:
         cwd = str(AGENT_WORKSPACE)
 
+    from ..config import TOOL_TIMEOUT_CAPS
     timeout = min(timeout, TOOL_TIMEOUT_CAPS.get("pipeline", 120))
     env = get_safe_env()
 

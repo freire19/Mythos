@@ -1,5 +1,5 @@
 """
-Configuration for Alpha Code — provider settings, environment, system prompt.
+Configuration for Mythos — provider settings, environment, system prompt.
 """
 
 import os
@@ -9,8 +9,7 @@ from dotenv import load_dotenv
 
 # Load .env from project root (not CWD) so `alpha` works from any directory
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
-# .env preenche apenas variáveis NÃO exportadas pelo shell (12-factor).
-# override=False evita que o .env sobrescreva chaves inline do usuário (#DL034).
+# 12-factor: env vars sao a fonte de verdade; .env so preenche faltantes.
 load_dotenv(_PROJECT_ROOT / ".env", override=False)
 
 # ─── Defaults ───
@@ -23,7 +22,6 @@ DEFAULT_PROVIDER = os.getenv("ALPHA_PROVIDER", "deepseek")
 # aqui em vez de viver isolado em FEATURES.
 LIMITS = {
     "max_iterations": 100,          # iteracoes do agent loop principal
-    "subagent_max_iterations": 15,  # iteracoes do sub-agent loop
     "tool_result_max_chars": 12_000,
     "llm_timeout": 300,             # seconds per LLM call
     "max_messages": 500,            # hard cap antes de needs_compression
@@ -33,14 +31,23 @@ MAX_ITERATIONS = LIMITS["max_iterations"]
 TOOL_RESULT_MAX_CHARS = LIMITS["tool_result_max_chars"]
 LLM_TIMEOUT = LIMITS["llm_timeout"]
 
-# ─── Retry config ───
-# Fonte unica para constantes de retry (#DM036).
-# LLM: retry de chamadas streaming com jittered backoff.
-# HTTP: retry de requests idempotentes (GET/HEAD/OPTIONS).
-RETRY_CONFIG = {
-    "llm_max_retries": 3,
-    "http_max_retries": 2,
-    "http_initial_backoff": 1.0,
+# Retry config centralizado (#DM036). LLM e HTTP usam backoff exponencial
+# com jitter, mas com parametros diferentes (LLM calls sao mais caras e
+# toleram retry mais agressivo; HTTP safe-methods podem retentar erros
+# transientes sem duplicar efeito).
+RETRY = {
+    "llm": {
+        "max_retries": 3,
+        "initial_backoff": 1.0,
+        "max_backoff": 30.0,
+        "backoff_multiplier": 2.0,
+        "retryable_status_codes": frozenset({429, 500, 502, 503, 504}),
+    },
+    "http": {
+        "max_retries": 2,
+        "initial_backoff": 0.5,
+        "safe_methods": frozenset({"GET", "HEAD", "OPTIONS"}),
+    },
 }
 
 # Loop detection (#085 V1.1): consts agrupadas em um dict para inspecao
@@ -64,7 +71,6 @@ _PROVIDERS = {
         "api_key_env": "DEEPSEEK_API_KEY",
         "model_env": "DEEPSEEK_MODEL",
         "default_model": "deepseek-v4-pro",
-        "temperature": 0.5,
         # Vision: disponivel APENAS no chat web (chat.deepseek.com) como
         # beta fechado (Image Recognition Mode, Apr 2026). A API REST
         # NAO aceita image_url blocks — retorna HTTP 400.
@@ -75,7 +81,6 @@ _PROVIDERS = {
         "api_key_env": "OPENAI_API_KEY",
         "model_env": "OPENAI_MODEL",
         "default_model": "gpt-4o",
-        "temperature": 0.5,
         "supports_vision": True,
     },
     "anthropic": {
@@ -83,7 +88,6 @@ _PROVIDERS = {
         "api_key_env": "ANTHROPIC_API_KEY",
         "model_env": "ANTHROPIC_MODEL",
         "default_model": "claude-sonnet-4-6",
-        "temperature": 0.5,
         "api_format": "anthropic",
         "supports_vision": True,
     },
@@ -95,7 +99,6 @@ _PROVIDERS = {
         "api_key_env": "GEMINI_API_KEY",
         "model_env": "GEMINI_MODEL",
         "default_model": "gemini-2.5-flash",  # melhor custo-beneficio com visao
-        "temperature": 0.5,
         "supports_vision": True,
         "vision_format": "openai",
     },
@@ -104,7 +107,6 @@ _PROVIDERS = {
         "api_key_env": "GROK_API_KEY",
         "model_env": "GROK_MODEL",
         "default_model": "grok-4-1-fast-reasoning",
-        "temperature": 0.3,  # reasoning models benefit from lower temp
         "supports_vision": False,
     },
     "ollama": {
@@ -112,7 +114,6 @@ _PROVIDERS = {
         "api_key_env": None,
         "model_env": "OLLAMA_MODEL",
         "default_model": "qwen-heavy-abliterated:32b",
-        "temperature": 0.2,
         "low_temperature": True,
         "supports_vision": False,
     },
@@ -121,7 +122,6 @@ _PROVIDERS = {
         "api_key_env": None,
         "model_env": "OLLAMA_GEMMA_12B_MODEL",
         "default_model": "gemma3:12b",
-        "temperature": 0.2,
         "supports_tools": False,
         "low_temperature": True,
         "supports_vision": False,
@@ -131,7 +131,6 @@ _PROVIDERS = {
         "api_key_env": None,
         "model_env": "OLLAMA_GEMMA_27B_MODEL",
         "default_model": "gemma3:27b",
-        "temperature": 0.2,
         "supports_tools": False,
         "low_temperature": True,
         "supports_vision": False,
@@ -149,7 +148,7 @@ def get_provider_config(provider: str) -> dict:
     cfg = _PROVIDERS.get(provider)
     if not cfg:
         raise RuntimeError(
-            f"Unknown provider: {provider}. Available: {list(_PROVIDERS)}"
+            f"Provider desconhecido: {provider}. Disponíveis: {list(_PROVIDERS)}"
         )
 
     base_url = cfg["base_url"]

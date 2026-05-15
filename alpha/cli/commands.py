@@ -52,10 +52,12 @@ from alpha.display import (
     C,
     c,
     print_banner,
+    is_auto_accept,
     print_error,
     print_sessions_list,
     print_tools_list,
     reset_approve_all,
+    set_auto_accept,
 )
 from alpha.history import (
     generate_session_id,
@@ -157,6 +159,14 @@ def _handle_save(ctx: ReplContext, parts: list[str]) -> DispatchResult:
     return DispatchResult.CONTINUE
 
 
+def _apply_loaded_messages(ctx: ReplContext, loaded: list[dict]) -> None:
+    """Replace ctx.messages/history with loaded session content."""
+    ctx.messages[:] = [{"role": "system", "content": ctx.system_prompt}]
+    ctx.messages.extend(loaded)
+    ctx.history.clear()
+    ctx.history.extend(m for m in loaded if m["role"] in ("user", "assistant"))
+
+
 def _handle_load(ctx: ReplContext, parts: list[str]) -> DispatchResult:
     if len(parts) < 2:
         sessions = list_sessions(10)
@@ -178,10 +188,7 @@ def _handle_load(ctx: ReplContext, parts: list[str]) -> DispatchResult:
         print(c(C.RED, f"  Session not found: {parts[1]}"))
         return DispatchResult.CONTINUE
 
-    ctx.messages[:] = [{"role": "system", "content": ctx.system_prompt}]
-    ctx.messages.extend(loaded)
-    ctx.history.clear()
-    ctx.history.extend(m for m in loaded if m["role"] in ("user", "assistant"))
+    _apply_loaded_messages(ctx, loaded)
 
     # Default: new session_id so `/save` later doesn't overwrite the
     # source. `--inplace` opts into editing the original (#DL018).
@@ -202,6 +209,11 @@ def _handle_load(ctx: ReplContext, parts: list[str]) -> DispatchResult:
 
 
 def _handle_continue(ctx: ReplContext, parts: list[str]) -> DispatchResult:
+    """Resume the last session — delegates to /load with last session ID.
+
+    When a summary is available, wraps it in a context preamble instead
+    of loading all messages (avoids blowing the context window).
+    """
     last_id = get_last_session_id()
     if not last_id:
         print(c(C.GRAY, "  No previous session found."))
@@ -209,38 +221,32 @@ def _handle_continue(ctx: ReplContext, parts: list[str]) -> DispatchResult:
 
     summary = load_session_summary(last_id)
     if not summary:
-        loaded = load_session(last_id)
-        if loaded is None:
-            print(c(C.RED, f"  Failed to load session: {last_id}"))
-            return DispatchResult.CONTINUE
-        ctx.messages[:] = [{"role": "system", "content": ctx.system_prompt}]
-        ctx.messages.extend(loaded)
-        ctx.history.clear()
-        ctx.history.extend(m for m in loaded if m["role"] in ("user", "assistant"))
-        print(f"  {c(C.GREEN, f'Resumed {len(loaded)} messages from {last_id}')}")
-    else:
-        ctx.messages[:] = [{"role": "system", "content": ctx.system_prompt}]
-        ctx.messages.append(
-            {
-                "role": "user",
-                "content": (
-                    f"[CONTEXT FROM PREVIOUS SESSION {last_id}]\n\n"
-                    f"{summary}\n\n"
-                    "[End of previous context. Continue from here.]"
-                ),
-            }
-        )
-        ctx.messages.append(
-            {
-                "role": "assistant",
-                "content": (
-                    "Understood. I have the context from our previous session. "
-                    "How would you like to continue?"
-                ),
-            }
-        )
-        ctx.history.clear()
-        print(f"  {c(C.GREEN, f'Resumed with summary from {last_id}')}")
+        # No summary available — delegate directly to /load logic.
+        return _handle_load(ctx, ["/load", last_id])
+
+    # Summary available — inject as context preamble in new session.
+    ctx.messages[:] = [{"role": "system", "content": ctx.system_prompt}]
+    ctx.messages.append(
+        {
+            "role": "user",
+            "content": (
+                f"[CONTEXT FROM PREVIOUS SESSION {last_id}]\n\n"
+                f"{summary}\n\n"
+                "[End of previous context. Continue from here.]"
+            ),
+        }
+    )
+    ctx.messages.append(
+        {
+            "role": "assistant",
+            "content": (
+                "Understood. I have the context from our previous session. "
+                "How would you like to continue?"
+            ),
+        }
+    )
+    ctx.history.clear()
+    print(f"  {c(C.GREEN, f'Resumed with summary from {last_id}')}")
     ctx.session_id = generate_session_id()
     return DispatchResult.CONTINUE
 
@@ -452,6 +458,81 @@ def _handle_init(ctx: ReplContext, parts: list[str]) -> DispatchResult:
     return DispatchResult.FALL_THROUGH
 
 
+def _handle_context(ctx: ReplContext, parts: list[str]) -> DispatchResult:
+    """Show current context window usage."""
+    from alpha.context import (
+        COMPRESSION_THRESHOLD,
+        MAX_MESSAGES,
+        estimate_messages_tokens,
+        get_context_limit,
+    )
+
+    used = estimate_messages_tokens(ctx.messages)
+    limit = get_context_limit(ctx.provider)
+    pct = (used / limit * 100) if limit else 0.0
+    trigger_at = int(limit * COMPRESSION_THRESHOLD)
+
+    if pct >= 90:
+        bar_color = C.RED + C.BOLD
+    elif pct >= 70:
+        bar_color = C.YELLOW + C.BOLD
+    elif pct >= 50:
+        bar_color = C.YELLOW
+    else:
+        bar_color = C.GREEN
+
+    bar_len = 30
+    filled = min(bar_len, int(pct / 100 * bar_len))
+    if pct > 0 and filled == 0:
+        filled = 1
+    bar = c(bar_color, "█" * filled) + c(C.GRAY_DARK, "░" * (bar_len - filled))
+
+    print(f"  {c(C.CYAN, 'Provider:')}    {ctx.provider} ({ctx.cfg.get('model', '?')})")
+    print(f"  {c(C.CYAN, 'Tokens:')}      {used:,} / {limit:,} ({pct:.1f}%)")
+    print(f"  {c(C.CYAN, 'Usage:')}       {bar}")
+    print(f"  {c(C.CYAN, 'Messages:')}    {len(ctx.messages)} / {MAX_MESSAGES}")
+    print(
+        f"  {c(C.CYAN, 'Compresses:')}  at {int(COMPRESSION_THRESHOLD * 100)}% "
+        f"({trigger_at:,} tokens) or {MAX_MESSAGES} messages"
+    )
+    return DispatchResult.CONTINUE
+
+
+def _handle_accept_edits(ctx: ReplContext, parts: list[str]) -> DispatchResult:
+    """Toggle auto-approve mode for destructive tools (or set explicitly).
+
+    Usage:
+        /accept-edits          # toggle
+        /accept-edits on       # force on
+        /accept-edits off      # force off
+    """
+    if len(parts) > 1:
+        arg = parts[1].lower()
+        if arg in ("on", "true", "1", "yes", "y"):
+            set_auto_accept(True)
+        elif arg in ("off", "false", "0", "no", "n"):
+            set_auto_accept(False)
+        else:
+            print(f"  {c(C.YELLOW, 'Usage:')} /accept-edits [on|off]")
+            return DispatchResult.CONTINUE
+    else:
+        set_auto_accept(not is_auto_accept())
+
+    if is_auto_accept():
+        print(
+            f"  {c(C.GREEN + C.BOLD, '»»')} "
+            f"{c(C.GREEN, 'accept edits ON')} "
+            f"{c(C.GRAY, '— destructive tools auto-approved this session')}"
+        )
+    else:
+        print(
+            f"  {c(C.GRAY, '»»')} "
+            f"{c(C.YELLOW, 'accept edits OFF')} "
+            f"{c(C.GRAY, '— destructive tools will prompt')}"
+        )
+    return DispatchResult.CONTINUE
+
+
 def _handle_help(ctx: ReplContext, parts: list[str]) -> DispatchResult:
     print(f"  {c(C.CYAN, '/init')}     — Draft an ALPHA.md for this project")
     print(f"  {c(C.CYAN, '/clear')}    — Clear history and screen")
@@ -460,6 +541,8 @@ def _handle_help(ctx: ReplContext, parts: list[str]) -> DispatchResult:
     print(f"  {c(C.CYAN, '/load')}     — Load a previous session")
     print(f"  {c(C.CYAN, '/continue')} — Resume from last session")
     print(f"  {c(C.CYAN, '/sessions')} — List saved sessions")
+    print(f"  {c(C.CYAN, '/context')}  — Show context window usage")
+    print(f"  {c(C.CYAN, '/accept-edits')} — Toggle auto-approve for destructive tools (shift+tab)")
     print(f"  {c(C.CYAN, '/tools')}    — List available tools")
     print(f"  {c(C.CYAN, '/skills')}   — List registered skills (ready vs inactive)")
     print(f"  {c(C.CYAN, '/mcp')}      — List connected MCP servers")
@@ -492,6 +575,9 @@ _DISPATCH: dict[str, Callable[[ReplContext, list[str]], DispatchResult]] = {
     "/agent": _handle_agent,
     "/model": _handle_model,
     "/init": _handle_init,
+    "/context": _handle_context,
+    "/accept-edits": _handle_accept_edits,
+    "/accept_edits": _handle_accept_edits,
     "/help": _handle_help,
 }
 

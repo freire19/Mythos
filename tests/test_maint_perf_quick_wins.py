@@ -163,7 +163,7 @@ class TestSafeGetToolCommentUpdated:
 
 class TestBinAlphaMessage:
     def test_no_requirements_txt_reference(self):
-        bin_alpha = Path(__file__).parent.parent / "bin" / "alpha"
+        bin_alpha = Path(__file__).parent.parent / "bin" / "mythos"
         text = bin_alpha.read_text(encoding="utf-8")
         # requirements.txt nao existe no projeto; mensagem mencionava
         # esse arquivo, agora menciona `pip install -e .`

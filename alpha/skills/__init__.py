@@ -1,5 +1,5 @@
 """
-Skill bundle system for Alpha Code.
+Skill bundle system for Mythos.
 
 A skill is a self-contained markdown file (SKILL.md) with YAML frontmatter
 that teaches the agent how to do one thing well. Skills live in:

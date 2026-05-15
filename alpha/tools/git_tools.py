@@ -13,7 +13,7 @@ import shlex
 from pathlib import Path
 
 from . import ToolCategory, ToolDefinition, ToolSafety, register_tool
-from .._subprocess import run_subprocess
+from ._subprocess_helpers import SubprocessTimeoutError, run_subprocess_safe
 from ..config import TOOL_TIMEOUTS
 from .safe_env import get_safe_env
 from .workspace import AGENT_WORKSPACE, assert_within_workspace
@@ -44,7 +44,7 @@ _ALLOWED_GIT_FLAGS = {
     "show": {"--stat", "--no-color", "--format", "--pretty"},
     "push": {"--set-upstream", "-u", "--tags"},
     "reset": {"--soft", "--mixed"},  # --hard requer aprovação via _needs_approval
-    "tag_create": {"-a", "--annotate", "-m", "--message"},
+    "tag_create": {"-a", "--annotate", "-m", "--message"},  # DL035
 }
 
 # Flags globalmente bloqueadas (escape do workspace / configuração)
@@ -94,19 +94,17 @@ async def _run_git(args: list[str], cwd: str, timeout: int | None = None) -> dic
         timeout = TOOL_TIMEOUTS.get("git", 30)
     cmd = ["git"] + args
     try:
-        result = await run_subprocess(
-            cmd, timeout=timeout, cwd=cwd, env=get_safe_env()
-        )
-        if result.timed_out:
-            return {"error": f"git excedeu timeout de {timeout}s", "timeout": True}
-
-        return {
-            "exit_code": result.returncode,
-            "stdout": result.stdout.decode(errors="replace")[:15000],
-            "stderr": result.stderr.decode(errors="replace")[:3000],
-        }
+        r = await run_subprocess_safe(*cmd, timeout=timeout, cwd=cwd)
+    except SubprocessTimeoutError:
+        return {"error": f"git excedeu timeout de {timeout}s", "timeout": True}
     except Exception as e:
         return {"error": str(e)}
+
+    return {
+        "exit_code": r.returncode,
+        "stdout": r.stdout.decode(errors="replace")[:15000],
+        "stderr": r.stderr.decode(errors="replace")[:3000],
+    }
 
 
 def _find_git_repo(path: str) -> str | None:
@@ -163,6 +161,10 @@ def _sanitize_git_args(action: str, args: str) -> tuple[list[str], str | None]:
     if allowed is not None:
         for part in parts:
             if part.startswith("-"):
+                # `--` is the standard path separator in git ("git diff -- path/").
+                # Blocking it would block any path-scoped invocation.
+                if part == "--":
+                    continue
                 # Permitir flags numéricas como -20 para log
                 if part.lstrip("-").isdigit():
                     continue
@@ -264,8 +266,9 @@ async def _git_operation(
         extra, err = _sanitize_git_args("show", args)
         if err:
             return {"error": err}
-        ref = extra[0] if extra else "HEAD"
-        return await _run_git(["show", "--stat", ref], cwd)
+        # #DL035: extra pode conter flags + positional. Passa tudo pro git;
+        # fallback HEAD quando vazio (evitava extra[0] que confundia flag com ref).
+        return await _run_git(["show", "--stat"] + (extra or ["HEAD"]), cwd)
 
     elif action == "blame":
         if not files:
@@ -362,8 +365,13 @@ async def _git_operation(
             return {"error": err}
         if not tag_args:
             return {"error": "tag_create requer pelo menos o nome da tag"}
+        # #DL036: tag_args may carry flags (-a, -m) before the positional
+        # tag name. Pick the first non-flag token; refuse if there isn't one.
+        tag_name = next((p for p in tag_args if not p.startswith("-")), None)
+        if tag_name is None:
+            return {"error": "tag_create requer um nome de tag positional"}
         if message:
-            return await _run_git(["tag", "-a", tag_args[0], "-m", message], cwd)
+            return await _run_git(["tag", "-a", tag_name, "-m", message], cwd)
         return await _run_git(["tag"] + tag_args, cwd)
 
     return {"error": f"Ação '{action}' não implementada"}

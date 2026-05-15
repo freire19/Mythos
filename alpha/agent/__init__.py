@@ -1,5 +1,5 @@
 """
-Core agent loop for Alpha Code.
+Core agent loop for Mythos.
 
 Simplified autonomous engine: LLM call -> tool detection -> approval -> execution.
 Includes intelligent context compression, token tracking, and smart loop detection.
@@ -9,29 +9,31 @@ import json
 import logging
 from collections.abc import AsyncGenerator
 
-from .approval import is_denied, needs_approval
-from .config import MAX_ITERATIONS
-from .context import (
+from ..approval import is_denied, needs_approval
+from ..config import LOOP_DETECTION, MAX_ITERATIONS  # noqa: F401 — LOOP_DETECTION re-exported for back-compat
+from ..context import (
     compress_until_under_budget,
     estimate_messages_tokens,
     get_context_limit,
     is_context_overflow_error,
     needs_compression,
 )
-from .executor import build_assistant_tool_message, execute_tool_calls
-from .llm import stream_chat_with_tools
-
-logger = logging.getLogger(__name__)
-
-# ─── Loop detection (#DM037: extraido para _loop_detect.py) ───
-from ._loop_detect import (
+from ..executor import build_assistant_tool_message, execute_tool_calls
+from ..llm import stream_chat_with_tools
+from .loop import (
+    _call_signature,
     _CYCLE_WINDOW,
+    _detect_loop,
     _LOOP_DETECT_MIN_CALLS,
-    call_signature,
-    detect_loop,
-    result_preview,
+    _LOOP_DETECT_MIN_ITER,
+    _MAX_REPEAT_CALLS,
+    _result_preview,
+    _SIMILAR_REPEAT_CALLS,
+    _SIMILARITY_THRESHOLD,
+    _STALE_WINDOW,
 )
 
+logger = logging.getLogger(__name__)
 
 async def run_agent(
     messages: list[dict],
@@ -120,25 +122,17 @@ async def run_agent(
 
         while True:
             final_event = None
-            try:
-                async for event in stream_chat_with_tools(
-                    messages, tools, temperature, provider=provider
-                ):
-                    if event["type"] == "content_token":
-                        yield {"type": "token", "text": event["token"]}
-                    elif event["type"] == "stream_reset":
-                        # llm.py vai retentar; tokens ja yieldados sao da
-                        # tentativa abortada. Caller (REPL/main) pode limpar UI.
-                        yield event
-                    elif event["type"] == "final":
-                        final_event = event
-            except Exception as e:
-                logger.exception(f"LLM stream raised {type(e).__name__}")
-                yield {
-                    "type": "error",
-                    "message": f"LLM stream error: {type(e).__name__}: {e}",
-                }
-                return
+            async for event in stream_chat_with_tools(
+                messages, tools, temperature, provider=provider
+            ):
+                if event["type"] == "content_token":
+                    yield {"type": "token", "text": event["token"]}
+                elif event["type"] == "stream_reset":
+                    # llm.py vai retentar; tokens ja yieldados sao da
+                    # tentativa abortada. Caller (REPL/main) pode limpar UI.
+                    yield event
+                elif event["type"] == "final":
+                    final_event = event
 
             if final_event is None:
                 yield {"type": "error", "message": "No response from LLM"}
@@ -166,9 +160,11 @@ async def run_agent(
                         "after": tokens_after,
                     }
                 except Exception as ce:
-                    logger.error(f"Aggressive compression failed: {ce}")
-                    yield {"type": "error", "message": err}
-                    return
+                    logger.exception(f"Aggressive compression failed: {ce}")
+                    from ..context import _find_compressible_range, _hard_truncate
+                    start, end = _find_compressible_range(messages)
+                    if start < end:
+                        messages[:] = _hard_truncate(messages, start, end)
                 continue  # retry the LLM call once
 
             break
@@ -188,7 +184,7 @@ async def run_agent(
             return
 
         # ── Smart loop detection ──
-        call_sigs = [call_signature(tc) for tc in final_event["tool_calls"]]
+        call_sigs = [_call_signature(tc) for tc in final_event["tool_calls"]]
         _recent_calls.extend(call_sigs)
         if len(_recent_calls) > _CYCLE_WINDOW * 3:
             _recent_calls[:] = _recent_calls[-_CYCLE_WINDOW * 3:]
@@ -201,7 +197,7 @@ async def run_agent(
         if len(_recent_calls) < _LOOP_DETECT_MIN_CALLS:
             loop_reason = None
         else:
-            loop_reason = detect_loop(call_sigs, _recent_calls, _recent_results)
+            loop_reason = _detect_loop(call_sigs, _recent_calls, _recent_results)
 
         if loop_reason:
             logger.warning(
@@ -256,16 +252,18 @@ async def run_agent(
 
             # Force-text path nao pode sumir com erro do LLM em silencio:
             # o usuario veria reply vazio sem motivo. Propagar.
-            # #DL031: se o LLM nao retornar nenhum evento final (provider
-            # down, conexao caiu), forced_final fica None e o codigo caia
-            # em done silencioso com reply parcial.
+            # DL031: forced_final pode ser None se o LLM nunca emitir 'final'
+            # (provider timeout, conexao dropada). Evitar yield de done vazio.
             if forced_final is None:
                 yield {
                     "type": "error",
-                    "message": "Loop detection forced-text response: no final event from LLM",
+                    "message": (
+                        "Loop detection forced-text response: "
+                        "no final event from LLM (provider may be down)"
+                    ),
                 }
                 return
-            if forced_final.get("error"):
+            if forced_final and forced_final.get("error"):
                 yield {
                     "type": "error",
                     "message": (
@@ -301,13 +299,13 @@ async def run_agent(
                 # Track tool results for stale progress detection
                 if event.get("type") == "tool_result":
                     result = event.get("result", {})
-                    _recent_results.append(result_preview(result, 500))
+                    _recent_results.append(_result_preview(result, 500))
                     # Truncar para evitar leak de memoria em sessoes longas;
                     # `_recent_calls` ja faz isso, `_recent_results` nao fazia.
                     if len(_recent_results) > _CYCLE_WINDOW * 3:
                         _recent_results[:] = _recent_results[-_CYCLE_WINDOW * 3:]
         except Exception as e:
-            logger.error(f"Tool execution failed: {e}")
+            logger.exception(f"Tool execution failed: {e}")
             yield {"type": "error", "message": f"Tool execution failed: {e}"}
             return
         finally:

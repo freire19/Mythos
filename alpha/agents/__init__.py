@@ -1,5 +1,5 @@
 """
-Named agent profiles for Alpha Code.
+Named agent profiles for Mythos.
 
 A named agent is a persistent profile that scopes a session:
   - model/provider override

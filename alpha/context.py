@@ -1,5 +1,5 @@
 """
-Context management for Alpha Code.
+Context management for Mythos.
 
 Handles intelligent message compression, token estimation, and context window
 optimization. Instead of crude truncation, uses the LLM itself to summarize
@@ -24,6 +24,11 @@ CHARS_PER_TOKEN = 4
 # roughly 1k–3k tokens per typical screenshot; we use a conservative midpoint
 # so the compression trigger fires before the model's real budget is hit.
 IMAGE_TOKEN_COST = 1500
+
+# DEEP_PERFORMANCE #033: cache de estimate_messages_tokens.
+_last_messages_id: int | None = None
+_last_messages_len: int = 0
+_last_token_estimate: int = 0
 
 import contextvars  # noqa: E402 — keep grouped with the failure counter
 
@@ -62,9 +67,7 @@ MIN_MESSAGES_FOR_COMPRESSION = 12
 # de tokens. Tool results pequenos (< 200 chars) podem nao gatilhar o
 # threshold por tokens mesmo com milhares de messages, mas cada iteracao
 # reserializa toda a lista para JSON e o `_detect_loop` itera N entradas.
-from .config import LIMITS
-
-MAX_MESSAGES: int = LIMITS["max_messages"]
+MAX_MESSAGES = 500
 
 
 def estimate_tokens(text: str) -> int:
@@ -90,21 +93,33 @@ def _estimate_content_tokens(content) -> int:
 
 
 def estimate_messages_tokens(messages: list[dict]) -> int:
-    """Estimate total tokens across all messages."""
+    """Estimate total tokens across all messages.
+
+    DEEP_PERFORMANCE #033: cache por id(messages)+len. Chamada 4x por turno
+    (needs_compression, _context_pct, compress_until_under_budget, logging).
+    A lista é mutada in-place (append/pop), então len() captura mudanças.
+    """
+    global _last_messages_id, _last_messages_len, _last_token_estimate
+    mid = id(messages)
+    mlen = len(messages)
+    if mid == _last_messages_id and mlen == _last_messages_len:
+        return _last_token_estimate
+
     total = 0
     for msg in messages:
         total += _estimate_content_tokens(msg.get("content"))
-        # Tool calls in assistant messages add tokens too
         if msg.get("tool_calls"):
             for tc in msg["tool_calls"]:
                 fn = tc.get("function", {})
                 total += estimate_tokens(fn.get("name", ""))
                 total += estimate_tokens(fn.get("arguments", ""))
-        # AUDIT_V1.2 #022: reasoning_content (DeepSeek thinking) can be
-        # 10-50KB per turn and wasn't counted — context overflow invisible.
         reasoning = msg.get("reasoning_content")
         if reasoning:
             total += estimate_tokens(reasoning)
+
+    _last_messages_id = mid
+    _last_messages_len = mlen
+    _last_token_estimate = total
     return total
 
 
@@ -353,14 +368,13 @@ async def compress_context(
             elif event["type"] == "final":
                 if event.get("content"):
                     summary = event["content"]
-    except Exception as e:
-        logger.exception(f"Compression LLM call raised {type(e).__name__}: {e}")
+    except Exception:
+        # logger.exception preserves exc_info; logger.warning would drop the
+        # traceback we need to diagnose real failures here.
+        logger.exception("Compression LLM call failed")
         summary = ""
 
-    if not summary or len(summary.strip()) < 10:
-        # #DL009: summaries shorter than 10 chars (e.g. "ok", "done") are
-        # effectively empty — treat as compression failure to avoid
-        # replacing real context with noise.
+    if not summary:
         failures = _compress_consecutive_failures.get() + 1
         _compress_consecutive_failures.set(failures)
         if failures >= _COMPRESS_FAIL_TRUNCATE_THRESHOLD:

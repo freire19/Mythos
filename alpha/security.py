@@ -1,21 +1,19 @@
-"""Central security hub (#D002).
+"""Centralized security validation for Mythos.
 
-Consolidates command/pipeline validation primitives that were scattered
-across `shell_tools.py`, `pipeline_tools.py`, and `approval.py`.
+Unifies command/pipeline validation previously scattered across:
+- alpha/tools/shell_tools.py (_HARD_BLOCKED_PATTERNS, _validate_command)
+- alpha/tools/pipeline_tools.py (_SHELL_EXPANSION_RE, _validate_pipeline)
 
-Imports from here should be the single source of truth for:
-- Hard-blocked command patterns (denylist model)
-- Command validation
-- Pipeline validation
+Also provides the shared denylist constants both modules need (#D002).
 """
 
 import re
 import shlex
 
-# ─── Hard-blocked command patterns (denylist model) ───
-#
-# Shell commands that match these patterns are rejected before approval.
-# Approval layer decides user prompting for everything else (#D027).
+from ._platform import IS_WINDOWS
+
+# ─── Catastrophic shell patterns ─────────────────────────────────────
+
 _HARD_BLOCKED_PATTERNS = [
     # Recursive file deletion
     r"\brm\s+(?:-\S*[rR]\S*|--recursive\b)",
@@ -27,9 +25,9 @@ _HARD_BLOCKED_PATTERNS = [
     # Raw disk writes
     r"\bdd\s+[^\n]*of=/dev/(sd|nvme|hd|xvd|vd|mmcblk)",
     r">\s*/dev/(sd|nvme|hd|xvd|vd|mmcblk)",
-    # Fork bomb
+    # Fork bomb (case-sensitive — `:` literal)
     r":\(\)\s*\{\s*:\|:\s*&\s*\}\s*;?\s*:",
-    # su
+    # su (sudo is handled via pattern matches, not blanket-blocked)
     r"(^|[;&|]\s*)su(\s|$)",
     # Power / halt / reboot
     r"\b(shutdown|reboot|halt|poweroff)\b",
@@ -60,30 +58,71 @@ _HARD_BLOCKED_PATTERNS = [
     r"\bufw\s+(reset|disable)\b",
     # find with -fprint/-fprintf (sandbox escape)
     r"\bfind\s+.*-fprintf?\s",
+    # ─── Windows destructive patterns ───
+    r"\b(?:rmdir|rd)\s+(?:/s\b|/q\s+/s\b|/s\s+/q\b)",
+    r"\bdel\s+(?:/[fsq]\s*)*?/s\b",
+    r"\bRemove-Item\b[^\n]*-Recurse",
+    r"\bformat\s+[a-z]:\s",
+    r"\bdiskpart\b",
+    r"\bshutdown\s+/[rstpgha]",
+    r"\b(Stop-Computer|Restart-Computer)\b",
+    r"\breg\s+delete\b",
+    r"\bRemove-ItemProperty\b",
+    r"\bnet\s+user\s+\S+\s+/delete",
+    r"\bRemove-LocalUser\b",
 ]
 
-# Combined regex for single-pass matching (#D020).
+# Single combined regex (avoids 27+ individual searches per validation call, #D020).
 HARD_BLOCKED_RE = re.compile(
     "|".join(f"(?:{p})" for p in _HARD_BLOCKED_PATTERNS), re.IGNORECASE
 )
 
-# Shell expansion detection (pipeline injection vector).
+# Backwards compat: code that imports HARD_BLOCKED (e.g. pipeline_tools) still
+# works. Each element is a re.Pattern with .search().
+HARD_BLOCKED = [re.compile(p, re.IGNORECASE) for p in _HARD_BLOCKED_PATTERNS]
+
+# Shell expansion patterns (command/variable substitution, process substitution).
 _SHELL_EXPANSION_RE = re.compile(
-    r"\$\(|`|\$\{|\$[A-Za-z_]|<\(|\$\(\(|\\"
+    r"\$\("     # command substitution: $(...)
+    r"|`"       # backtick substitution
+    r"|\$\{"    # variable expansion: ${...}
+    r"|\$[A-Za-z_]"  # variable reference: $VAR
+    r"|<\(\)"    # process substitution: <(...)
+    r"|\$\(\(\("  # arithmetic expansion: $(((...)))
 )
 
 
+# ─── Validation functions ────────────────────────────────────────────
+
 def validate_command(command: str) -> str | None:
-    """Return error message if command matches hard-blocked patterns.
+    """Return error message if command is destructive, None otherwise.
 
     Denylist model: only catastrophic patterns (HARD_BLOCKED_RE) are rejected.
     Any other command runs. Approval layer decides user prompting.
     """
     if "\n" in command or "\r" in command:
-        return "Comando bloqueado: caracteres de newline nao sao permitidos"
+        return "Comando bloqueado: caracteres de newline não são permitidos"
 
     if HARD_BLOCKED_RE.search(command):
-        return "Comando bloqueado por seguranca (padrao destrutivo detectado)"
+        return "Comando bloqueado por segurança (padrão destrutivo detectado)"
+
+    # On Windows, cmd.exe parses the command — POSIX shlex breaks backslash
+    # paths and doesn't reflect cmd syntax. Newline + HARD_BLOCKED already
+    # checked above; nothing more to validate.
+    if IS_WINDOWS:
+        return None
+
+    segments = command.split("|") if "|" in command else [command]
+    for segment in segments:
+        segment = segment.strip()
+        if not segment:
+            continue
+        try:
+            parts = shlex.split(segment)
+            if not parts:
+                continue
+        except ValueError:
+            return "Comando malformado"
 
     return None
 
@@ -93,13 +132,15 @@ def validate_pipeline(pipeline: str) -> str | None:
 
     Denylist model: catastrophic patterns blocked; everything else runs.
     """
+    # Block shell variable/command expansion (injection vector)
     if _SHELL_EXPANSION_RE.search(pipeline):
-        return "Pipeline bloqueado: expansao de variaveis/comandos ($(), ``, ${{}}) nao e permitida"
+        return "Pipeline bloqueado: expansão de variáveis/comandos ($(), ``, ${}) não é permitida"
 
+    # Check hard-blocked patterns on the full string (combined regex, #D020)
     if HARD_BLOCKED_RE.search(pipeline):
-        return "Pipeline bloqueado por seguranca (padrao destrutivo detectado)"
+        return "Pipeline bloqueado por segurança (padrão destrutivo detectado)"
 
-    # Syntactic check per segment
+    # Syntactic check per segment (no allowlist; HARD_BLOCKED already gated)
     segments = re.split(r"\s*(?:\|\||&&|;|\|)\s*", pipeline)
     for segment in segments:
         segment = segment.strip()
@@ -109,8 +150,10 @@ def validate_pipeline(pipeline: str) -> str | None:
         if not cmd_part:
             continue
         try:
-            shlex.split(cmd_part)
+            parts = shlex.split(cmd_part)
+            if not parts:
+                continue
         except ValueError:
-            return f"Pipeline bloqueado: sintaxe invalida no segmento '{cmd_part[:80]}'"
+            return f"Segmento malformado no pipeline: {segment}"
 
     return None

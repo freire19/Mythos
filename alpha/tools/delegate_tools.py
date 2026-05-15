@@ -3,30 +3,32 @@
 Supports single delegation (delegate_task) and parallel delegation
 (delegate_parallel) with concurrency limited by max_parallel_agents.
 
-Split into focused modules (#082):
-- _delegate_policy.py  — blocklist, prompt loading, approval gate
-- _delegate_scratch.py — agent IDs, scratch dir creation, snapshots
+Apos #082 split: helpers extraidos para _delegate_core.py.
 """
 
 import asyncio
 import json
 import logging
-import sys
 
 from . import ToolCategory, ToolDefinition, ToolSafety, register_tool
 from ..config import FEATURES
 from ..display import print_subagent_event
-from ._delegate_policy import (
-    GIT_READ_ACTIONS,
-    SUBAGENT_DESTRUCTIVE_BLOCKLIST,
-    _auto_approve_no_callback,
-    _load_subagent_prompt,
-    _strip_control_chars,
-)
-from ._delegate_scratch import _create_scratch_dir, _new_agent_id, _snapshot_dir
+from ..display.core import flush_subagent_dup, _tool_args_preview
 from .workspace import AGENT_WORKSPACE
 
+from ._delegate_core import (
+    SUBAGENT_DESTRUCTIVE_BLOCKLIST,
+    GIT_READ_ACTIONS,
+    _auto_approve_no_callback,
+    _load_subagent_prompt,
+    _new_agent_id,
+    _create_scratch_dir,
+    _snapshot_dir,
+    _strip_control_chars,
+)
+
 logger = logging.getLogger(__name__)
+
 
 
 async def _run_subagent(
@@ -35,7 +37,6 @@ async def _run_subagent(
     tools_filter: str = "",
     provider: str = "",
     label: str = "",
-    stream_to_parent: bool = True,
     parent_approval_callback=None,
     parent_workspace: str | None = None,
 ) -> dict:
@@ -53,15 +54,13 @@ async def _run_subagent(
     from ..agent import run_agent
     from ..config import (
         DEFAULT_PROVIDER,
-        FEATURES as feat,
-        LIMITS,
         get_subagent_allow,
         get_subagent_extra_block,
         get_subagent_policy,
     )
     from . import get_openai_tools, get_tool
 
-    max_iterations = LIMITS.get("subagent_max_iterations", feat.get("subagent_max_iterations", 15))
+    max_iterations = FEATURES.get("subagent_max_iterations", 15)
     agent_provider = provider or DEFAULT_PROVIDER
     workspace_root = parent_workspace or str(AGENT_WORKSPACE)
 
@@ -69,11 +68,16 @@ async def _run_subagent(
     try:
         scratch_dir = _create_scratch_dir(workspace_root, agent_id)
     except OSError as e:
-        return {"error": f"Cannot create scratch dir for sub-agent: {e}"}
+        return {"ok": False, "category": "io_error", "error": f"Cannot create scratch dir for sub-agent: {e}"}
 
     # Build isolated context for the sub-agent
     system_prompt = _load_subagent_prompt()
 
+    # Paths relativos no contexto do sub-agent (#022): o workspace absoluto
+    # nao precisa estar no prompt — `validate_workspace_args` ja resolve
+    # paths relativos contra o workspace real. Vazar o absoluto no
+    # `task_content` deixava ele acessivel via tool results e logs, e
+    # convidava o modelo a hard-codar paths em vez de manter portabilidade.
     scratch_rel = scratch_dir.relative_to(workspace_root)
     task_content = (
         f"[AGENT_ID: {agent_id}]\n"
@@ -91,6 +95,16 @@ async def _run_subagent(
     ]
 
     # Get tools — filter out delegate tools to prevent recursion
+    # Also block destructive tools that could bypass approval if no callback.
+    # Policy lives in SUBAGENT_DESTRUCTIVE_BLOCKLIST (module level) so tests
+    # can validate the surface independently of an actual run.
+    #
+    # #D007 (V1.0): policy + extra_block + allow vem de env via getters
+    # (AUDIT_V1.2 #014: cache de import-time perdia mudancas runtime).
+    # - "strict" (default): bloqueia destructive em modo no-callback (comportamento antigo)
+    # - "relaxed": confia no sub-agent, so anti-recursao
+    # - extra_block: usuario pode fortalecer
+    # - allow: usuario pode aliviar (sobrepoe blocklist)
     _blocked = {"delegate_task", "delegate_parallel"}
     all_tools = get_openai_tools()
     policy = get_subagent_policy()
@@ -98,35 +112,22 @@ async def _run_subagent(
         _blocked = _blocked | SUBAGENT_DESTRUCTIVE_BLOCKLIST
     _blocked = _blocked | get_subagent_extra_block()
     _blocked = _blocked - get_subagent_allow()
+    # `delegate_*` continua bloqueado mesmo se usuario incluir em
+    # subagent_allow — anti-recursao e invariante, nao policy.
     _blocked = _blocked | {"delegate_task", "delegate_parallel"}
     tools = [t for t in all_tools if t["function"]["name"] not in _blocked]
 
     if tools_filter:
-        import fnmatch
-        raw_names = {s.strip() for s in tools_filter.split(",")}
-        # Expand wildcards against TOOL_REGISTRY (#046)
-        allowed: set[str] = set()
-        unknown: list[str] = []
-        for name in raw_names:
-            if '*' in name or '?' in name:
-                expanded = {n for n in TOOL_REGISTRY if fnmatch.fnmatch(n, name)}
-                if not expanded:
-                    unknown.append(name)
-                allowed |= expanded
-            elif name in TOOL_REGISTRY:
-                allowed.add(name)
-            else:
-                unknown.append(name)
-        if unknown:
-            logger.warning(
-                "tools_filter contains unknown/wildcard names: %s — "
-                "these will not match any tool. Available: %s",
-                unknown, sorted(TOOL_REGISTRY.keys())[:20],
-            )
+        allowed = {s.strip() for s in tools_filter.split(",")}
         tools = [t for t in tools if t["function"]["name"] in allowed]
     else:
         allowed = None
 
+    # Safe get_tool wrapper: aplica a politica de blocklist montada acima
+    # (delegate_* anti-recursao + SUBAGENT_DESTRUCTIVE_BLOCKLIST quando
+    # nao ha approval callback do parent + filtro tools_filter quando
+    # explicito). Centraliza o gate para que `run_agent` interno nao
+    # consiga "burlar" via lookup direto no TOOL_REGISTRY (#091).
     original_get_tool = get_tool
     _all_blocked = _blocked
     allowed_filter = allowed
@@ -138,13 +139,14 @@ async def _run_subagent(
             return None
         return original_get_tool(name)
 
-    is_tty = hasattr(sys.stdout, "isatty") and sys.stdout.isatty()
-    should_stream = stream_to_parent and is_tty
-
+    # Run sub-agent loop
     collected_text = ""
     tool_calls_made = []
     errors = []
 
+    # Sub-agents use parent's approval callback if available, otherwise the
+    # module-level _auto_approve_no_callback gate (handles git_operation
+    # read/write distinction).
     effective_approval = parent_approval_callback or _auto_approve_no_callback
 
     try:
@@ -162,23 +164,32 @@ async def _run_subagent(
             if event["type"] == "token":
                 collected_text += event.get("text", "")
             elif event["type"] == "tool_call":
-                tool_calls_made.append(event["name"])
-                if should_stream:
-                    print_subagent_event(event, label)
+                tool_calls_made.append({
+                    "name": event["name"],
+                    "args_preview": _tool_args_preview(event.get("args", {})),
+                })
+                # Surface sub-agent tool calls live so the REPL doesn't look frozen.
+                print_subagent_event(event, label)
             elif event["type"] == "done":
                 collected_text = event.get("reply", collected_text)
-                if should_stream:
-                    print_subagent_event(event, label)
             elif event["type"] == "error":
                 errors.append(event.get("message", "unknown error"))
+    except asyncio.CancelledError:
+        raise
     except Exception as e:
+        # #056: log full traceback (logger.error sem exc_info perdia o
+        # frame onde o bug realmente aconteceu).
         logger.error(f"Sub-agent {agent_id} failed: {e}", exc_info=True)
         return {
+            "ok": False,
+            "category": "subagent_error",
             "error": f"Sub-agent execution failed: {type(e).__name__}: {e}",
             "agent_id": agent_id,
         }
     finally:
-        # #D025: cleanup do scratch dir mesmo em CancelledError / Ctrl+C.
+        # Emit trailing `(×N)` so the last dedup count isn't lost.
+        flush_subagent_dup(label or "_")
+        # Cleanup on every exit path; keep scratch dir if sub-agent wrote artifacts.
         try:
             if scratch_dir.exists() and not any(scratch_dir.iterdir()):
                 scratch_dir.rmdir()
@@ -209,14 +220,13 @@ async def _delegate_task(
     context: str = "",
     tools_filter: str = "",
     provider: str = "",
-    parent_workspace: str | None = None,
 ) -> dict:
     """Spawn a single sub-agent to handle a task."""
     if not FEATURES.get("multi_agent_enabled"):
-        return {"error": "Multi-agent system is disabled. Set FEATURES['multi_agent_enabled']=True."}
+        return {"ok": False, "category": "feature_disabled", "error": "Multi-agent system is disabled. Set FEATURES['multi_agent_enabled']=True."}
     if not FEATURES.get("delegate_tool_enabled"):
-        return {"error": "Delegate tool is disabled. Enable 'delegate_tool_enabled' in config."}
-    return await _run_subagent(task, context, tools_filter, provider, parent_workspace=parent_workspace)
+        return {"ok": False, "category": "feature_disabled", "error": "Delegate tool is disabled. Enable 'delegate_tool_enabled' in config."}
+    return await _run_subagent(task, context, tools_filter, provider)
 
 
 # ── Parallel delegation ───────────────────────────────────────
@@ -226,21 +236,24 @@ async def _delegate_parallel(
     context: str = "",
     tools_filter: str = "",
     provider: str = "",
-    parent_workspace: str | None = None,
 ) -> dict:
     """Spawn multiple sub-agents in parallel, each handling one task."""
     if not FEATURES.get("multi_agent_enabled"):
-        return {"error": "Multi-agent system is disabled. Set FEATURES['multi_agent_enabled']=True."}
+        return {"ok": False, "category": "feature_disabled", "error": "Multi-agent system is disabled. Set FEATURES['multi_agent_enabled']=True."}
     if not FEATURES.get("delegate_tool_enabled"):
-        return {"error": "Delegate tool is disabled. Enable 'delegate_tool_enabled' in config."}
+        return {"ok": False, "category": "feature_disabled", "error": "Delegate tool is disabled. Enable 'delegate_tool_enabled' in config."}
 
+    # Parse tasks JSON array
     try:
         task_list = json.loads(tasks)
         if not isinstance(task_list, list) or not task_list:
-            return {"error": "tasks must be a non-empty JSON array of strings"}
+            return {"ok": False, "category": "invalid_args", "error": "tasks must be a non-empty JSON array of strings"}
     except json.JSONDecodeError as e:
-        return {"error": f"Invalid JSON in tasks: {e}"}
+        return {"ok": False, "category": "invalid_args", "error": f"Invalid JSON in tasks: {e}"}
 
+    # Cap total: max_parallel_agents so controla concorrencia, nao total.
+    # Sem cap, modelo pode submeter array de 100 tarefas — runaway de custo
+    # e disco (cada sub-agent gasta 15 iteracoes + scratch dir).
     max_total = FEATURES.get("max_delegate_total_tasks", 10)
     if len(task_list) > max_total:
         return {
@@ -260,15 +273,17 @@ async def _delegate_parallel(
             logger.info(f"Sub-agent #{idx + 1} starting: {task_desc[:60]}")
             result = await _run_subagent(
                 task_desc, context, tools_filter, provider,
-                label=f"#{idx + 1}", parent_workspace=parent_workspace,
+                label=f"#{idx + 1}",
             )
             result["task_index"] = idx
             result["task"] = task_desc
             return result
 
+    # Launch all sub-agents concurrently (limited by semaphore)
     coros = [_run_with_limit(i, t) for i, t in enumerate(task_list)]
     results = await asyncio.gather(*coros, return_exceptions=True)
 
+    # Format results
     formatted = []
     for i, r in enumerate(results):
         if isinstance(r, Exception):

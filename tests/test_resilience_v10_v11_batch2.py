@@ -122,8 +122,8 @@ class TestHttpRequestRetry:
 
         result = await network_tools._http_request_with_retry("https://example.com")
         # Budget = MAX_RETRIES + 1
-        assert call_count["n"] == network_tools._HTTP_MAX_RETRIES + 1
-        assert result.get("retried") == network_tools._HTTP_MAX_RETRIES + 1
+        assert call_count["n"] == network_tools.RETRY["http"]["max_retries"] + 1
+        assert result.get("retried") == network_tools.RETRY["http"]["max_retries"] + 1
 
 
 # ─── #051/#D012 — apify polling logging ────────────────────────────

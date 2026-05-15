@@ -1,5 +1,5 @@
 """
-LLM streaming client for Alpha Code.
+LLM streaming client for Mythos.
 
 Handles OpenAI-compatible chat completions with tool calling support.
 Streams SSE responses from providers (DeepSeek, OpenAI, Grok, Ollama).
@@ -16,18 +16,21 @@ from collections.abc import AsyncGenerator
 
 import httpx
 
+from ._rate_limiter import acquire_llm_token as _rate_limit_acquire
 from ._security_log import sanitize_for_log
-from .config import LLM_TIMEOUT, RETRY_CONFIG, get_provider_config
+from .config import LLM_TIMEOUT, RETRY, get_provider_config
 
 logger = logging.getLogger(__name__)
 
 # DSML/XML invoke blocks that DeepSeek (and similar reasoning models) emit as
 # raw text when they "think" about tool calls before the structured tool_calls
 # field arrives. Leaking these to the terminal is noisy; strip them from content.
-# `</?` covers both opening (<|DSML|name>) and closing (</|DSML|name>) tags.
-_DSML_RE = re.compile(r"</?\s*\|\s*DSML\s*\|[^>]*>", re.IGNORECASE)
+# `</?` covers both opening and closing tags. `[^>]*` is fully permissive —
+# earlier tighter forms missed exotic separators (fullwidth pipes, etc.).
+# Keywords (DSML, invoke, parameter, tool_calls) are unlikely in real prose.
+_DSML_RE = re.compile(r"</?[^>]*DSML[^>]*>", re.IGNORECASE)
 _XML_INVOKE_RE = re.compile(
-    r"</?\s*(invoke|parameter|tool_calls)\b[^>]*>",
+    r"</?[^>]*\b(invoke|parameter|tool_calls)\b[^>]*>",
     re.IGNORECASE,
 )
 
@@ -60,6 +63,7 @@ class DsmlStripper:
         self._buffer += chunk
         last_lt = self._buffer.rfind("<")
         if last_lt != -1 and ">" not in self._buffer[last_lt:]:
+            # Hold back the unclosed `<…` tail until its `>` arrives.
             emit = self._buffer[:last_lt]
             self._buffer = self._buffer[last_lt:]
         else:
@@ -75,11 +79,8 @@ class DsmlStripper:
 
 # ─── Retry / Rate-limit config ───
 
-MAX_RETRIES = RETRY_CONFIG["llm_max_retries"]
-INITIAL_BACKOFF = 1.0  # seconds
-MAX_BACKOFF = 30.0
-BACKOFF_MULTIPLIER = 2.0
-RETRYABLE_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
+# ─── Retry / Rate-limit config ───
+# Lido de config.RETRY["llm"] (#DM036).
 
 # Smaller local models (Ollama-backed) hallucinate tool calls less often at
 # lower temperatures. Politica vive como flag `low_temperature` em
@@ -87,11 +88,116 @@ RETRYABLE_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
 # sem editar este arquivo (#DM011).
 _LOW_TEMPERATURE = 0.2
 
+# Rolling cap for raw_content_for_recovery — see streaming loop for rationale.
+_RAW_RECOVERY_CAP = 8192
 
-# Shared httpx client pool lives in _http_clients.py (#D026 consolidation).
-# Both llm.py (OpenAI) and llm_anthropic.py (Anthropic) use the same helper
-# to avoid TLS-handshake-per-call overhead.
-from ._http_clients import get_llm_client, get_llm_rate_limiter
+
+# #026/#076: cliente httpx compartilhado por loop. Antes, cada call ao LLM
+# criava `AsyncClient(...)` e fechava no fim, gastando 1 TLS handshake +
+# nova conexao TCP por iteracao do agent loop (40+ por sessao tipica). O
+# cliente persistido reusa keep-alive ate o servidor fechar a conexao.
+# Loop-aware (mesma logica do _shared_client em web_search.py): single-shot
+# CLI (`asyncio.run`) cria loop novo a cada invocacao mas o modulo pode
+# permanecer em cache de imports — entao detectamos loop trocado e
+# substituimos.
+_shared_llm_client: httpx.AsyncClient | None = None
+_llm_client_loop: object | None = None
+_llm_client_lock = asyncio.Lock()
+
+
+async def _get_shared_llm_client() -> httpx.AsyncClient:
+    global _shared_llm_client, _llm_client_loop
+    loop = asyncio.get_running_loop()
+    # Fast path: no lock needed when client is healthy and loop matches.
+    if (
+        _shared_llm_client is not None
+        and not _shared_llm_client.is_closed
+        and _llm_client_loop is loop
+    ):
+        return _shared_llm_client
+    # AUDIT_V1.2 #006: lock protects the aclose() + reassign window against
+    # concurrent coroutines creating duplicate clients.
+    async with _llm_client_lock:
+        # Double-check after acquiring lock — another coroutine may have
+        # already rebuilt while we waited.
+        if (
+            _shared_llm_client is not None
+            and not _shared_llm_client.is_closed
+            and _llm_client_loop is loop
+        ):
+            return _shared_llm_client
+        if _shared_llm_client is not None and not _shared_llm_client.is_closed:
+            try:
+                await _shared_llm_client.aclose()
+            except Exception:
+                pass
+        _shared_llm_client = httpx.AsyncClient(
+            timeout=httpx.Timeout(LLM_TIMEOUT, connect=10.0)
+        )
+        _llm_client_loop = loop
+    return _shared_llm_client
+
+
+_DSML_INVOKE_RE = re.compile(
+    r"<[^>]*?\binvoke\b[^>]*?\bname\s*=\s*\"([^\"]+)\"[^>]*>",
+    re.IGNORECASE,
+)
+_DSML_PARAM_RE = re.compile(
+    r"<[^>]*?\bparameter\b([^>]*)>(.*?)</[^>]*?\bparameter\b[^>]*>",
+    re.IGNORECASE | re.DOTALL,
+)
+_DSML_ATTR_NAME_RE = re.compile(r'name="([^"]+)"', re.IGNORECASE)
+_DSML_ATTR_STRING_RE = re.compile(r'string="(true|false)"', re.IGNORECASE)
+
+
+def _finalize_recovered_call(name: str, args_str: str, id_prefix: str) -> dict | None:
+    """Common tail for the two recovery paths: registry check + deterministic
+    id (hash-of-input so repeated parses of the same payload yield the same
+    id; `usedforsecurity=False` is the standard bandit/ruff B324 escape hatch
+    — this is a tool-call id, not a cryptographic hash)."""
+    from .tools import get_tool
+    if get_tool(name) is None:
+        logger.debug("Recovered tool call '%s' not in registry — discarding", name)
+        return None
+    digest = hashlib.sha1(
+        (name + args_str).encode("utf-8"), usedforsecurity=False
+    ).hexdigest()[:8]
+    return {"id": f"call_{id_prefix}_{digest}", "name": name, "arguments": args_str}
+
+
+def _recover_tool_call_from_dsml(content: str) -> dict | None:
+    """Recover a tool call from <|DSML|invoke>/<|DSML|parameter> blocks.
+
+    DeepSeek-V4-pro occasionally emits its tool calls as XML-like text
+    blocks in the content stream instead of the structured tool_calls
+    field. The user only sees the markup leak through; the tool never
+    runs and the agent stalls waiting for an approval that never comes.
+    This parser converts the markup back into a proper tool_call dict.
+    """
+    invoke_match = _DSML_INVOKE_RE.search(content)
+    if not invoke_match:
+        return None
+    name = invoke_match.group(1)
+
+    params: dict = {}
+    for m in _DSML_PARAM_RE.finditer(content):
+        attrs, value = m.group(1), m.group(2).strip()
+        name_m = _DSML_ATTR_NAME_RE.search(attrs)
+        if not name_m:
+            continue
+        key = name_m.group(1)
+        str_m = _DSML_ATTR_STRING_RE.search(attrs)
+        # string="false" means the value is JSON-encoded (e.g. an array).
+        # Default to treating as string when the flag is missing.
+        if str_m and str_m.group(1).lower() == "false":
+            try:
+                value = json.loads(value)
+            except json.JSONDecodeError:
+                pass
+        params[key] = value
+    if not params:
+        return None
+    return _finalize_recovered_call(name, json.dumps(params, ensure_ascii=False), "dsml")
 
 
 def _recover_tool_call_from_content(content: str) -> dict | None:
@@ -141,51 +247,33 @@ def _recover_tool_call_from_content(content: str) -> dict | None:
     if not isinstance(name, str) or not name or args is None:
         return None
 
-    # #DL028: validate against tool registry — models (especially small
-    # Ollama-served ones) often hallucinate non-existent tool names.
-    # Recovery of a phantom tool wastes 1 LLM turn + tokens.
-    from .tools import get_tool as _get_registered_tool
-    if _get_registered_tool(name) is None:
-        logger.debug("Recovery skipped — tool '%s' not registered", name)
-        return None
-
     if isinstance(args, dict):
         args_str = json.dumps(args, ensure_ascii=False)
     elif isinstance(args, str):
         args_str = args
     else:
         return None
-
-    # Determinismo por input vence hash() (seed-randomizado entre processos).
-    # `usedforsecurity=False` silencia bandit/ruff B324 — uso e id de tool call,
-    # nao hash criptografico.
-    digest = hashlib.sha1(
-        (name + args_str).encode("utf-8"), usedforsecurity=False
-    ).hexdigest()[:8]
-    return {
-        "id": f"call_recovered_{digest}",
-        "name": name,
-        "arguments": args_str,
-    }
+    # DL028: discard names not in the registry — Ollama hallucinates these.
+    return _finalize_recovered_call(name, args_str, "recovered")
 
 
 def _calc_backoff(attempt: int, retry_after: float | None = None) -> float:
-    """Calculate backoff delay with exponential growth, jitter, capped at MAX_BACKOFF.
+    """Calculate backoff delay with exponential growth, jitter, capped at RETRY["llm"]["max_backoff"].
 
     Jitter prevents thundering herd: all clients back off at slightly different
     intervals instead of retrying in lockstep.
     """
     if retry_after is not None:
         # Add small jitter even to server-specified delays. Jitter pode
-        # ate 1.2x o base, entao precisamos do `min(..., MAX_BACKOFF)`
+        # ate 1.2x o base, entao precisamos do `min(..., RETRY["llm"]["max_backoff"])`
         # explicito (#D023): sem ele, o resultado podia exceder o cap em
         # ate 20% (ex: 30s -> 36s) violando o invariante anunciado.
-        base = min(retry_after, MAX_BACKOFF)
-        return min(base * (0.8 + random.random() * 0.4), MAX_BACKOFF)
-    delay = INITIAL_BACKOFF * (BACKOFF_MULTIPLIER ** attempt)
+        base = min(retry_after, RETRY["llm"]["max_backoff"])
+        return min(base * (0.8 + random.random() * 0.4), RETRY["llm"]["max_backoff"])
+    delay = RETRY["llm"]["initial_backoff"] * (RETRY["llm"]["backoff_multiplier"] ** attempt)
     # Full jitter: uniform random between 0 and calculated delay
     jittered = delay * (0.5 + random.random() * 0.5)
-    return min(jittered, MAX_BACKOFF)
+    return min(jittered, RETRY["llm"]["max_backoff"])
 
 
 async def stream_chat_with_tools(
@@ -214,282 +302,301 @@ async def stream_chat_with_tools(
     if cfg.get("low_temperature") and temperature > _LOW_TEMPERATURE:
         temperature = _LOW_TEMPERATURE
 
-    # #D008: global rate limiter prevents parallel sub-agents from
-    # exhausting provider rate limits.  Held for the entire call
-    # (including retries) so another agent can't sneak in between.
-    rate_limiter = await get_llm_rate_limiter(provider)
-    await rate_limiter.acquire()
-    try:
-        if api_format == "anthropic":
-            from .llm_anthropic import stream_anthropic
+    if api_format == "anthropic":
+        from .llm_anthropic import stream_anthropic
 
-            tools_to_send = tools if tools and supports_tools else []
-            async for event in stream_anthropic(
-                messages=messages,
-                tools=tools_to_send,
-                temperature=temperature,
-                base_url=base_url,
-                api_key=api_key,
-                model=model,
-                timeout=LLM_TIMEOUT,
-            ):
-                yield event
-            return
+        tools_to_send = tools if tools and supports_tools else []
+        async for event in stream_anthropic(
+            messages=messages,
+            tools=tools_to_send,
+            temperature=temperature,
+            base_url=base_url,
+            api_key=api_key,
+            model=model,
+            timeout=LLM_TIMEOUT,
+        ):
+            yield event
+        return
 
-        headers = {
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        }
-        payload = {
-            "model": model,
-            "messages": messages,
-            "stream": True,
-            "temperature": temperature,
-        }
-        if tools and supports_tools:
-            payload["tools"] = tools
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": model,
+        "messages": messages,
+        "stream": True,
+        "temperature": temperature,
+    }
+    if tools and supports_tools:
+        payload["tools"] = tools
 
-        last_error = None
+    last_error = None
 
-        for attempt in range(MAX_RETRIES + 1):
-            accumulated_content = ""
-            dsml_stripper = DsmlStripper()
-            # `reasoning_content` e o canal de "thinking" do DeepSeek-reasoner
-            # (e tambem dos `gpt-oss` no Ollama). A API exige que o campo
-            # acumulado da resposta seja devolvido na turn seguinte, ou
-            # responde HTTP 400 "The `reasoning_content` in the thinking mode
-            # must be passed back to the API." Sem isso, qualquer iteracao
-            # com tool_call quebra. Provedores que nao usam thinking simplesmente
-            # nunca emitem o campo, entao guardamos None e nao adicionamos
-            # ao message dict.
-            accumulated_reasoning = ""
-            tool_calls_acc: dict[int, dict] = {}
+    for attempt in range(RETRY["llm"]["max_retries"] + 1):
+        accumulated_content = ""
+        raw_content_for_recovery = ""
+        dsml_stripper = DsmlStripper()
+        # `reasoning_content` e o canal de "thinking" do DeepSeek-reasoner
+        # (e tambem dos `gpt-oss` no Ollama). A API exige que o campo
+        # acumulado da resposta seja devolvido na turn seguinte, ou
+        # responde HTTP 400 "The `reasoning_content` in the thinking mode
+        # must be passed back to the API." Sem isso, qualquer iteracao
+        # com tool_call quebra. Provedores que nao usam thinking simplesmente
+        # nunca emitem o campo, entao guardamos None e nao adicionamos
+        # ao message dict.
+        accumulated_reasoning = ""
+        tool_calls_acc: dict[int, dict] = {}
 
-            try:
-                client = await get_llm_client()
-                async with client.stream(
-                    "POST",
-                    f"{base_url}/chat/completions",
-                    json=payload,
-                    headers=headers,
-                ) as response:
-                    # Handle retryable HTTP errors
-                    if response.status_code in RETRYABLE_STATUS_CODES:
-                        error_body = await response.aread()
-                        last_error = f"HTTP {response.status_code}"
+        try:
+            client = await _get_shared_llm_client()
+            await _rate_limit_acquire(provider)
+            async with client.stream(
+                "POST",
+                f"{base_url}/chat/completions",
+                json=payload,
+                headers=headers,
+            ) as response:
+                # Handle retryable HTTP errors
+                if response.status_code in RETRY["llm"]["retryable_status_codes"]:
+                    error_body = await response.aread()
+                    last_error = f"HTTP {response.status_code}"
 
-                        if attempt < MAX_RETRIES:
-                            # Parse Retry-After header for rate limits
-                            retry_after = None
-                            ra_header = response.headers.get("retry-after")
-                            if ra_header:
-                                try:
-                                    retry_after = float(ra_header)
-                                except ValueError:
-                                    pass
+                    if attempt < RETRY["llm"]["max_retries"]:
+                        # Parse Retry-After header for rate limits
+                        retry_after = None
+                        ra_header = response.headers.get("retry-after")
+                        if ra_header:
+                            try:
+                                retry_after = float(ra_header)
+                            except ValueError:
+                                pass
 
-                            delay = _calc_backoff(attempt, retry_after)
-                            logger.warning(
-                                f"LLM {last_error} (attempt {attempt + 1}/{MAX_RETRIES + 1}), "
-                                f"retrying in {delay:.1f}s"
-                            )
-                            if accumulated_content:
-                                yield {"type": "stream_reset", "reason": last_error}
-                            await asyncio.sleep(delay)
-                            continue
-
-                        # Max retries exhausted
-                        logger.error(f"LLM {last_error} after {MAX_RETRIES + 1} attempts")
-                        yield {
-                            "type": "final",
-                            "content": "",
-                            "tool_calls": [],
-                            "error": f"{last_error} after {MAX_RETRIES + 1} attempts",
-                        }
-                        return
-
-                    # Non-retryable HTTP error
-                    if response.status_code >= 400:
-                        error_body = await response.aread()
-                        # Some providers echo back the request (incl. Authorization
-                        # header) in error responses — sanitize before logging.
-                        body_str = error_body.decode("utf-8", errors="replace")
-                        logger.error(
-                            f"LLM HTTP {response.status_code}: "
-                            f"{sanitize_for_log(body_str, max_chars=500)}"
+                        delay = _calc_backoff(attempt, retry_after)
+                        logger.warning(
+                            f"LLM {last_error} (attempt {attempt + 1}/{RETRY["llm"]["max_retries"] + 1}), "
+                            f"retrying in {delay:.1f}s"
                         )
-                        yield {
-                            "type": "final",
-                            "content": "",
-                            "tool_calls": [],
-                            "error": f"HTTP error {response.status_code}",
-                        }
-                        return
+                        if accumulated_content:
+                            yield {"type": "stream_reset", "reason": last_error}
+                        await asyncio.sleep(delay)
+                        continue
 
-                    # Stream response
-                    async for line in response.aiter_lines():
-                        if not line.startswith("data: "):
-                            continue
-                        data_str = line[6:]
-                        if data_str.strip() == "[DONE]":
-                            break
-
-                        try:
-                            data = json.loads(data_str)
-                            delta = data["choices"][0].get("delta", {})
-
-                            # Content tokens — strip DSML noise before yielding.
-                            # `dsml_stripper` buffers any unclosed `<…` tail so a
-                            # tag split across SSE chunks is still removed cleanly.
-                            content = delta.get("content", "")
-                            if content:
-                                safe = dsml_stripper.feed(content)
-                                if safe:
-                                    accumulated_content += safe
-                                    yield {"type": "content_token", "token": safe}
-
-                            # Thinking tokens (DeepSeek-reasoner). Acumulados
-                            # silenciosamente — nao streamamos para o usuario
-                            # porque o formato e ruidoso e nao reflete a
-                            # resposta final, mas precisam voltar pro provider.
-                            # AUDIT_V1.2 #022: cap at 50KB per turn — reasoning
-                            # can reach 100KB+ and bloats context invisibly.
-                            reasoning = delta.get("reasoning_content", "")
-                            if reasoning:
-                                accumulated_reasoning += reasoning
-                                if len(accumulated_reasoning) > 50_000:
-                                    accumulated_reasoning = accumulated_reasoning[-50_000:]
-
-                            # Tool calls (streamed incrementally)
-                            if delta.get("tool_calls"):
-                                for tc_delta in delta["tool_calls"]:
-                                    idx = tc_delta["index"]
-                                    if idx not in tool_calls_acc:
-                                        tool_calls_acc[idx] = {
-                                            "id": tc_delta.get("id", ""),
-                                            "name": tc_delta.get("function", {}).get(
-                                                "name", ""
-                                            ),
-                                            "arguments": "",
-                                        }
-                                    entry = tool_calls_acc[idx]
-                                    if tc_delta.get("id"):
-                                        entry["id"] = tc_delta["id"]
-                                    fn = tc_delta.get("function", {})
-                                    if fn.get("name"):
-                                        entry["name"] = fn["name"]
-                                    if fn.get("arguments"):
-                                        entry["arguments"] += fn["arguments"]
-
-                        except json.JSONDecodeError:
-                            continue  # Expected for non-JSON SSE lines
-                        except (KeyError, IndexError) as e:
-                            logger.debug(f"Unexpected SSE chunk format: {e} | data: {data_str[:200]}")
-                            continue
-
-                # Drain any unclosed `<…` tail held back during streaming.
-                tail = dsml_stripper.flush()
-                if tail:
-                    accumulated_content += tail
-                    yield {"type": "content_token", "token": tail}
-
-                # Success — build final event and return
-                reasoning_out = accumulated_reasoning or None
-                if tool_calls_acc:
-                    tool_calls = [
-                        {"id": tc["id"], "name": tc["name"], "arguments": tc["arguments"]}
-                        for _, tc in sorted(tool_calls_acc.items())
-                    ]
+                    # Max retries exhausted
+                    logger.error(f"LLM {last_error} after {RETRY["llm"]["max_retries"] + 1} attempts")
                     yield {
                         "type": "final",
-                        "content": accumulated_content,
-                        "tool_calls": tool_calls,
+                        "content": "",
+                        "tool_calls": [],
+                        "error": f"{last_error} after {RETRY["llm"]["max_retries"] + 1} attempts",
+                    }
+                    return
+
+                # Non-retryable HTTP error
+                if response.status_code >= 400:
+                    error_body = await response.aread()
+                    # Some providers echo back the request (incl. Authorization
+                    # header) in error responses — sanitize before logging.
+                    body_str = error_body.decode("utf-8", errors="replace")
+                    logger.error(
+                        f"LLM HTTP {response.status_code}: "
+                        f"{sanitize_for_log(body_str, max_chars=500)}"
+                    )
+                    yield {
+                        "type": "final",
+                        "content": "",
+                        "tool_calls": [],
+                        "error": f"HTTP error {response.status_code}",
+                    }
+                    return
+
+                # Stream response
+                async for line in response.aiter_lines():
+                    if not line.startswith("data: "):
+                        continue
+                    data_str = line[6:]
+                    if data_str.strip() == "[DONE]":
+                        break
+
+                    try:
+                        data = json.loads(data_str)
+                        delta = data["choices"][0].get("delta", {})
+
+                        # `dsml_stripper` buffers any unclosed `<…` tail so a
+                        # tag split across SSE chunks is still removed cleanly.
+                        # raw_content_for_recovery is a rolling 8KB tail kept
+                        # only so end-of-stream DSML recovery has something
+                        # to parse — DSML blocks always land at the end and
+                        # accumulating the full stream would double memory
+                        # on long responses for a path that fires <1% of turns.
+                        content = delta.get("content", "")
+                        if content:
+                            if not tool_calls_acc:
+                                raw_content_for_recovery += content
+                                if len(raw_content_for_recovery) > _RAW_RECOVERY_CAP:
+                                    raw_content_for_recovery = raw_content_for_recovery[-_RAW_RECOVERY_CAP:]
+                            safe = dsml_stripper.feed(content)
+                            if safe:
+                                accumulated_content += safe
+                                yield {"type": "content_token", "token": safe}
+
+                        # Thinking tokens (DeepSeek-reasoner). Acumulados
+                        # silenciosamente — nao streamamos para o usuario
+                        # porque o formato e ruidoso e nao reflete a
+                        # resposta final, mas precisam voltar pro provider.
+                        # AUDIT_V1.2 #022: cap at 50KB per turn — reasoning
+                        # can reach 100KB+ and bloats context invisibly.
+                        reasoning = delta.get("reasoning_content", "")
+                        if reasoning:
+                            accumulated_reasoning += reasoning
+                            if len(accumulated_reasoning) > 50_000:
+                                accumulated_reasoning = accumulated_reasoning[-50_000:]
+
+                        # Tool calls (streamed incrementally)
+                        if delta.get("tool_calls"):
+                            for tc_delta in delta["tool_calls"]:
+                                idx = tc_delta["index"]
+                                if idx not in tool_calls_acc:
+                                    tool_calls_acc[idx] = {
+                                        "id": tc_delta.get("id", ""),
+                                        "name": tc_delta.get("function", {}).get(
+                                            "name", ""
+                                        ),
+                                        "arguments": "",
+                                    }
+                                entry = tool_calls_acc[idx]
+                                if tc_delta.get("id"):
+                                    entry["id"] = tc_delta["id"]
+                                fn = tc_delta.get("function", {})
+                                if fn.get("name"):
+                                    entry["name"] = fn["name"]
+                                if fn.get("arguments"):
+                                    entry["arguments"] += fn["arguments"]
+
+                    except json.JSONDecodeError:
+                        continue  # Expected for non-JSON SSE lines
+                    except (KeyError, IndexError) as e:
+                        logger.debug(f"Unexpected SSE chunk format: {e} | data: {data_str[:200]}")
+                        continue
+
+            # Drain any unclosed `<…` tail held back during streaming.
+            tail = dsml_stripper.flush()
+            if tail:
+                accumulated_content += tail
+                yield {"type": "content_token", "token": tail}
+
+            # Success — build final event and return
+            reasoning_out = accumulated_reasoning or None
+            if tool_calls_acc:
+                tool_calls = [
+                    {"id": tc["id"], "name": tc["name"], "arguments": tc["arguments"]}
+                    for _, tc in sorted(tool_calls_acc.items())
+                ]
+                yield {
+                    "type": "final",
+                    "content": accumulated_content,
+                    "tool_calls": tool_calls,
+                    "reasoning_content": reasoning_out,
+                    "error": None,
+                }
+            else:
+                # Fallback chain when the structured tool_calls field stayed
+                # empty: first try DSML/XML invoke blocks (DeepSeek-V4-pro),
+                # then fenced JSON (Ollama qwen-coder). DSML uses the raw
+                # un-stripped buffer because the live sanitizer already
+                # erased the markup from accumulated_content.
+                recovered = (
+                    _recover_tool_call_from_dsml(raw_content_for_recovery)
+                    or _recover_tool_call_from_content(accumulated_content)
+                )
+                if recovered is not None:
+                    logger.info(
+                        f"Recovered tool call '{recovered['name']}' from content "
+                        f"(provider={provider})"
+                    )
+                    yield {
+                        "type": "final",
+                        "content": "",
+                        "tool_calls": [recovered],
                         "reasoning_content": reasoning_out,
                         "error": None,
                     }
                 else:
-                    # Fallback: some models (Ollama qwen-coder etc.) emit tool calls
-                    # as fenced JSON in content instead of via the tool_calls field.
-                    recovered = _recover_tool_call_from_content(accumulated_content)
-                    if recovered is not None:
-                        logger.info(
-                            f"Recovered tool call '{recovered['name']}' from content "
-                            f"(provider={provider})"
+                    # If the raw buffer carried DSML markup but neither
+                    # recoverer could turn it into a real tool_call, log a
+                    # warning. Otherwise the turn ends silently and the user
+                    # sees a blank prompt without knowing the model emitted
+                    # un-parseable markup.
+                    if raw_content_for_recovery and "invoke" in raw_content_for_recovery.lower():
+                        logger.warning(
+                            "DSML/invoke markup detected in content but recovery "
+                            "failed (provider=%s, len=%d) — turn will end silent",
+                            provider, len(raw_content_for_recovery),
                         )
-                        yield {
-                            "type": "final",
-                            "content": "",
-                            "tool_calls": [recovered],
-                            "reasoning_content": reasoning_out,
-                            "error": None,
-                        }
-                    else:
-                        yield {
-                            "type": "final",
-                            "content": accumulated_content,
-                            "tool_calls": [],
-                            "reasoning_content": reasoning_out,
-                            "error": None,
-                        }
-                return  # success, no retry
+                    yield {
+                        "type": "final",
+                        "content": accumulated_content,
+                        "tool_calls": [],
+                        "reasoning_content": reasoning_out,
+                        "error": None,
+                    }
+            return  # success, no retry
 
-            except httpx.TimeoutException:
-                last_error = f"LLM timeout ({LLM_TIMEOUT}s)"
-                if attempt < MAX_RETRIES:
-                    delay = _calc_backoff(attempt)
-                    logger.warning(
-                        f"{last_error} (attempt {attempt + 1}/{MAX_RETRIES + 1}), "
-                        f"retrying in {delay:.1f}s"
-                    )
-                    if accumulated_content:
-                        yield {"type": "stream_reset", "reason": last_error}
-                    await asyncio.sleep(delay)
-                    continue
+        except httpx.TimeoutException:
+            last_error = f"LLM timeout ({LLM_TIMEOUT}s)"
+            if attempt < RETRY["llm"]["max_retries"]:
+                delay = _calc_backoff(attempt)
+                logger.warning(
+                    f"{last_error} (attempt {attempt + 1}/{RETRY["llm"]["max_retries"] + 1}), "
+                    f"retrying in {delay:.1f}s"
+                )
+                if accumulated_content:
+                    yield {"type": "stream_reset", "reason": last_error}
+                await asyncio.sleep(delay)
+                continue
 
-                logger.error(f"{last_error} after {MAX_RETRIES + 1} attempts")
-                yield {
-                    "type": "final",
-                    "content": accumulated_content,
-                    "tool_calls": [],
-                    "error": f"{last_error} after {MAX_RETRIES + 1} attempts",
-                }
-                return
+            logger.error(f"{last_error} after {RETRY["llm"]["max_retries"] + 1} attempts")
+            yield {
+                "type": "final",
+                "content": accumulated_content,
+                "tool_calls": [],
+                "error": f"{last_error} after {RETRY["llm"]["max_retries"] + 1} attempts",
+            }
+            return
 
-            # Nota: httpx.HTTPStatusError nao e capturado porque `client.stream`
-            # NAO chama `raise_for_status()` automaticamente — o status_code
-            # >= 400 e tratado inline no caminho principal (linhas ~190 e
-            # ~226). Manter um handler aqui era codigo morto (#052).
+        # Nota: httpx.HTTPStatusError nao e capturado porque `client.stream`
+        # NAO chama `raise_for_status()` automaticamente — o status_code
+        # >= 400 e tratado inline no caminho principal (linhas ~190 e
+        # ~226). Manter um handler aqui era codigo morto (#052).
 
-            except (ConnectionError, OSError) as e:
-                last_error = f"Connection error: {e}"
-                if attempt < MAX_RETRIES:
-                    delay = _calc_backoff(attempt)
-                    logger.warning(
-                        f"{last_error} (attempt {attempt + 1}/{MAX_RETRIES + 1}), "
-                        f"retrying in {delay:.1f}s"
-                    )
-                    if accumulated_content:
-                        yield {"type": "stream_reset", "reason": last_error}
-                    await asyncio.sleep(delay)
-                    continue
+        except (ConnectionError, OSError) as e:
+            last_error = f"Connection error: {e}"
+            if attempt < RETRY["llm"]["max_retries"]:
+                delay = _calc_backoff(attempt)
+                logger.warning(
+                    f"{last_error} (attempt {attempt + 1}/{RETRY["llm"]["max_retries"] + 1}), "
+                    f"retrying in {delay:.1f}s"
+                )
+                if accumulated_content:
+                    yield {"type": "stream_reset", "reason": last_error}
+                await asyncio.sleep(delay)
+                continue
 
-                logger.error(f"{last_error} after {MAX_RETRIES + 1} attempts")
-                yield {
-                    "type": "final",
-                    "content": accumulated_content,
-                    "tool_calls": [],
-                    "error": last_error,
-                }
-                return
+            logger.error(f"{last_error} after {RETRY["llm"]["max_retries"] + 1} attempts")
+            yield {
+                "type": "final",
+                "content": accumulated_content,
+                "tool_calls": [],
+                "error": last_error,
+            }
+            return
 
-            except (json.JSONDecodeError, KeyError, ValueError, RuntimeError) as e:
-                logger.error(f"LLM error: {e}")
-                yield {
-                    "type": "final",
-                    "content": accumulated_content,
-                    "tool_calls": [],
-                    "error": str(e),
-                }
-                return
-    finally:
-        rate_limiter.release()
+        except (json.JSONDecodeError, KeyError, ValueError, RuntimeError) as e:
+            logger.error(f"LLM error: {e}")
+            yield {
+                "type": "final",
+                "content": accumulated_content,
+                "tool_calls": [],
+                "error": str(e),
+            }
+            return

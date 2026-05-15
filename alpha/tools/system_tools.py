@@ -11,7 +11,6 @@ import logging
 import shutil
 import subprocess
 
-from .._subprocess import run_subprocess
 from . import ToolCategory, ToolDefinition, ToolSafety, register_tool
 
 logger = logging.getLogger(__name__)
@@ -47,18 +46,31 @@ async def _clipboard_read() -> dict:
         return {"error": f"Comando '{cmd[0]}' não encontrado. Instale: {cmd[0]}"}
 
     try:
-        result = await run_subprocess(cmd, timeout=5)
-        if result.timed_out:
-            return {"error": "Timeout ao ler clipboard"}
-        if result.returncode != 0:
-            return {"error": f"Falha ao ler clipboard: {result.stderr.decode(errors='replace')}"}
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=5)
 
-        content = result.stdout.decode(errors="replace")
+        if proc.returncode != 0:
+            return {"error": f"Falha ao ler clipboard: {stderr.decode(errors='replace')}"}
+
+        content = stdout.decode(errors="replace")
         return {
             "content": content[:10000],
             "length": len(content),
             "truncated": len(content) > 10000,
         }
+    except asyncio.TimeoutError:
+        return {"error": "Timeout ao ler clipboard"}
+    except asyncio.CancelledError:
+        proc.kill()
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=3)
+        except Exception:
+            pass
+        raise
     except Exception as e:
         return {"error": str(e)}
 
@@ -78,13 +90,26 @@ async def _clipboard_write(content: str) -> dict:
         return {"error": f"Comando '{cmd[0]}' não encontrado. Instale: {cmd[0]}"}
 
     try:
-        result = await run_subprocess(cmd, timeout=5, stdin_input=content.encode())
-        if result.timed_out:
-            return {"error": "Timeout ao escrever no clipboard"}
-        if result.returncode != 0:
-            return {"error": f"Falha ao escrever no clipboard: {result.stderr.decode(errors='replace')}"}
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdin=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await asyncio.wait_for(proc.communicate(input=content.encode()), timeout=5)
+
+        if proc.returncode != 0:
+            return {"error": f"Falha ao escrever no clipboard: {stderr.decode(errors='replace')}"}
 
         return {"success": True, "length": len(content)}
+    except asyncio.TimeoutError:
+        return {"error": "Timeout ao escrever no clipboard"}
+    except asyncio.CancelledError:
+        proc.kill()
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=3)
+        except Exception:
+            pass
+        raise
     except Exception as e:
         return {"error": str(e)}
 

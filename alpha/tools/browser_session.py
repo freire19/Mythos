@@ -1,5 +1,5 @@
 """
-Persistent browser session for Alpha Code.
+Persistent browser session for Mythos.
 
 Holds a single Playwright browser instance shared across all browser_* tools
 so cookies, login state, and tab history survive between tool calls.

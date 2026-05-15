@@ -1,4 +1,4 @@
-"""Alpha Code — Standalone terminal agent."""
+"""Mythos — Autonomous vulnerability hunter. Red-team cybersecurity agent."""
 
 from __future__ import annotations
 

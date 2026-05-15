@@ -4,37 +4,24 @@ import asyncio
 import shlex
 from pathlib import Path
 
+from .._platform import IS_WINDOWS
+from ..security import (
+    HARD_BLOCKED,
+    HARD_BLOCKED_RE,
+    _HARD_BLOCKED_PATTERNS,
+    validate_command,
+    validate_pipeline,
+)
 from . import ToolCategory, ToolDefinition, ToolSafety, register_tool
-from ..config import TOOL_TIMEOUTS, TOOL_TIMEOUT_CAPS
-from ..security import HARD_BLOCKED_RE, validate_command
+from ._subprocess_helpers import SubprocessTimeoutError, run_subprocess_safe
+from ..config import TOOL_TIMEOUTS
 from .safe_env import get_safe_env
 from .workspace import AGENT_WORKSPACE, assert_within_workspace
 
-
-def _validate_command(command: str) -> str | None:
-    """Return error message if command is destructive, None otherwise.
-
-    Delegates to the central security hub for hard-blocked pattern checks,
-    then adds syntactic sanity checks per pipe segment.
-    """
-    error = validate_command(command)
-    if error:
-        return error
-
-    # Syntactic sanity check per pipe segment
-    segments = command.split("|") if "|" in command else [command]
-    for segment in segments:
-        segment = segment.strip()
-        if not segment:
-            continue
-        try:
-            parts = shlex.split(segment)
-            if not parts:
-                continue
-        except ValueError:
-            return "Comando malformado"
-
-    return None
+# Backward compat (#D002): _validate_command was refactored to
+# alpha.security.validate_command. Alias kept so internal callers
+# and tests don't break.
+_validate_command = validate_command
 
 
 # Comandos GUI que devem ser "fire-and-forget" (lançar e não esperar)
@@ -42,6 +29,27 @@ _GUI_COMMANDS = frozenset({"xdg-open", "xdg-mime", "notify-send"})
 
 
 # ─── Tool ───
+
+
+async def _execute_shell_windows(command: str, cwd: str, timeout: int) -> dict:
+    """Execute via cmd.exe /c — necessario pra builtins (`dir`, `type`,
+    `echo`), pipes e redirects, que `subprocess_exec` direto nao parseia.
+    Injection vem so da string do comando, ja validada via HARD_BLOCKED_RE.
+    """
+    try:
+        r = await run_subprocess_safe(
+            "cmd.exe", "/c", command, timeout=timeout, cwd=cwd,
+        )
+    except SubprocessTimeoutError:
+        return {
+            "error": f"Comando excedeu o timeout de {timeout}s",
+            "timeout": True,
+        }
+    return {
+        "exit_code": r.returncode,
+        "stdout": r.stdout.decode(errors="replace")[:15000],
+        "stderr": r.stderr.decode(errors="replace")[:5000],
+    }
 
 
 async def _execute_shell(command: str, cwd: str = None, timeout: int | None = None) -> dict:
@@ -64,9 +72,13 @@ async def _execute_shell(command: str, cwd: str = None, timeout: int | None = No
         cwd = str(AGENT_WORKSPACE)
 
     # Cap timeout (#D003: fonte unica em config.TOOL_TIMEOUT_CAPS)
+    from ..config import TOOL_TIMEOUT_CAPS
     timeout = min(timeout, TOOL_TIMEOUT_CAPS.get("shell", 300))
 
     try:
+        if IS_WINDOWS:
+            return await _execute_shell_windows(command, cwd, timeout)
+
         try:
             cmd_parts = shlex.split(command)
         except ValueError as e:
@@ -93,9 +105,23 @@ async def _execute_shell(command: str, cwd: str = None, timeout: int | None = No
             }
 
         # Execute pipes safely via chained subprocess_exec (NEVER use subprocess_shell)
-        has_pipe = "|" in command
+        # #DL037: detecta pipe via shlex.parse (cmd_parts) — "|" como token
+        # standalone = pipe real; "|" dentro de aspas = literal, preservado.
+        has_pipe = "|" in cmd_parts
         if has_pipe:
-            pipe_segments = [s.strip() for s in command.split("|") if s.strip()]
+            # Reconstroi segmentos do pipe a partir dos tokens parseados,
+            # respeitando quoting (shlex.join preserva aspas necessarias).
+            pipe_segments: list[str] = []
+            current: list[str] = []
+            for part in cmd_parts:
+                if part == "|":
+                    if current:
+                        pipe_segments.append(shlex.join(current))
+                        current = []
+                else:
+                    current.append(part)
+            if current:
+                pipe_segments.append(shlex.join(current))
             prev_output = None
             all_stderr = b""
             last_returncode = 0
@@ -108,32 +134,19 @@ async def _execute_shell(command: str, cwd: str = None, timeout: int | None = No
                 if not seg_parts:
                     continue
 
-                proc = await asyncio.create_subprocess_exec(
-                    *seg_parts,
-                    stdin=asyncio.subprocess.PIPE if prev_output is not None else None,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                    cwd=cwd,
-                    env=get_safe_env(),
-                )
                 try:
-                    stdout, stderr = await asyncio.wait_for(
-                        proc.communicate(input=prev_output), timeout=timeout
+                    r = await run_subprocess_safe(
+                        *seg_parts, timeout=timeout, cwd=cwd,
+                        stdin=prev_output,
                     )
-                except TimeoutError:
-                    proc.kill()
-                    await proc.wait()
+                except SubprocessTimeoutError:
                     return {
                         "error": f"Comando excedeu o timeout de {timeout}s",
                         "timeout": True,
                     }
-                except (asyncio.CancelledError, KeyboardInterrupt):
-                    proc.kill()
-                    await proc.wait()
-                    raise
-                prev_output = stdout
-                all_stderr += stderr
-                last_returncode = proc.returncode
+                prev_output = r.stdout
+                all_stderr += r.stderr
+                last_returncode = r.returncode
 
             return {
                 "exit_code": last_returncode,
@@ -141,34 +154,20 @@ async def _execute_shell(command: str, cwd: str = None, timeout: int | None = No
                 "stderr": all_stderr.decode(errors="replace")[:5000],
             }
         else:
-            proc = await asyncio.create_subprocess_exec(
-                *cmd_parts,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=cwd,
-                env=get_safe_env(),
-            )
             try:
-                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-            except TimeoutError:
-                proc.kill()
-                await proc.wait()
+                r = await run_subprocess_safe(
+                    *cmd_parts, timeout=timeout, cwd=cwd,
+                )
+            except SubprocessTimeoutError:
                 return {
                     "error": f"Comando excedeu o timeout de {timeout}s",
                     "timeout": True,
                 }
-            except (asyncio.CancelledError, KeyboardInterrupt):
-                # Sem este bloco, Ctrl+C deixa o subprocess rodando ate o
-                # fim (ex: `git push` ou `npm install` continua exfiltrando
-                # apesar do REPL ter "cancelado").
-                proc.kill()
-                await proc.wait()
-                raise
 
             return {
-                "exit_code": proc.returncode,
-                "stdout": stdout.decode(errors="replace")[:15000],
-                "stderr": stderr.decode(errors="replace")[:5000],
+                "exit_code": r.returncode,
+                "stdout": r.stdout.decode(errors="replace")[:15000],
+                "stderr": r.stderr.decode(errors="replace")[:5000],
             }
     except Exception as e:
         return {"error": str(e)}

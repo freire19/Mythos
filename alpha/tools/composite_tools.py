@@ -1,23 +1,23 @@
-"""Composite tools (macros) — DEPRECATED (#109).
+"""Composite tools (macros) for ALPHA agent.
 
-This module is a backward-compatibility shim. Import directly from:
-  .project_overview, .run_tests, .search_and_replace, .deploy_check
+Higher-level operations that combine multiple atomic tools into workflows.
+These are meta-tools that orchestrate sequences of tool calls.
+
+SECURITY: Each step in a composite tool uses the existing tool security model.
+
+Apos #030 split: este arquivo agora apenas re-exporta os 4 modulos
+especializados. Cada sub-modulo registra sua propria tool no import.
 """
 
-import warnings
-warnings.warn(
-    "composite_tools.py is deprecated — import from sub-modules directly.",
-    DeprecationWarning, stacklevel=2,
-)
+# Re-import sub-modules — each registers itself via register_tool() at import time.
+from . import _composite_project  # noqa: F401 — side-effect: register_tool
+from . import _composite_tests    # noqa: F401
+from . import _composite_snr      # noqa: F401
+from . import _composite_deploy   # noqa: F401
 
-from .deploy_check import _deploy_check
-from .project_overview import _project_overview
-from .run_tests import _run_tests
-from .search_and_replace import _search_and_replace
-
-__all__ = [
-    "_project_overview",
-    "_run_tests",
-    "_search_and_replace",
-    "_deploy_check",
-]
+# Re-export helpers for backward compat (used by other modules)
+from ._composite_helpers import _run_tool, _violation  # noqa: F401
+from ._composite_project import _project_overview  # noqa: F401
+from ._composite_tests import _run_tests  # noqa: F401
+from ._composite_snr import _search_and_replace  # noqa: F401
+from ._composite_deploy import _deploy_check  # noqa: F401

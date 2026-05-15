@@ -1,5 +1,5 @@
 """
-Conversation history persistence for Alpha Code.
+Conversation history persistence for Mythos.
 
 Saves and loads conversation sessions to/from disk as JSON files.
 Sessions are stored in ~/.alpha_code/history/ with timestamps.
@@ -304,7 +304,7 @@ def load_session(session_id: str) -> list[dict] | None:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
         return data.get("messages", [])
-    except (json.JSONDecodeError, KeyError, OSError, UnicodeDecodeError) as e:
+    except (json.JSONDecodeError, KeyError, UnicodeDecodeError, OSError) as e:
         logger.warning(f"Failed to load session {session_id}: {e}")
         return None
 
@@ -326,7 +326,7 @@ def load_session_summary(session_id: str) -> str | None:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
         return data.get("summary")
-    except (json.JSONDecodeError, KeyError, OSError, UnicodeDecodeError) as e:
+    except (json.JSONDecodeError, KeyError) as e:
         logger.warning(f"Failed to load session summary {session_id}: {e}")
         return None
 

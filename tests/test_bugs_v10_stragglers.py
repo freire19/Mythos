@@ -23,7 +23,9 @@ import pytest
 
 class TestCalcBackoffJitterCap:
     def test_retry_after_never_exceeds_max(self):
-        from alpha.llm import MAX_BACKOFF, _calc_backoff
+        from alpha.config import RETRY
+        from alpha.llm import _calc_backoff
+        MAX_BACKOFF = RETRY["llm"]["max_backoff"]
 
         # Forcar varias amostras do path retry_after — sem o min externo
         # podia chegar a 1.2 * MAX_BACKOFF.
@@ -32,7 +34,9 @@ class TestCalcBackoffJitterCap:
             assert delay <= MAX_BACKOFF, f"Jitter exceeded cap: {delay}"
 
     def test_path_without_retry_after_also_capped(self):
-        from alpha.llm import MAX_BACKOFF, _calc_backoff
+        from alpha.config import RETRY
+        from alpha.llm import _calc_backoff
+        MAX_BACKOFF = RETRY["llm"]["max_backoff"]
 
         for attempt in range(0, 20):
             for _ in range(10):
@@ -133,8 +137,7 @@ class TestGlobWorkspaceFilter:
         from alpha.tools import file_tools
 
         src = inspect.getsource(file_tools._glob_files)
-        assert "relative_to" in src
-        assert "AGENT_WORKSPACE" in src
+        assert "assert_within_workspace" in src
 
     @pytest.mark.asyncio
     async def test_normal_glob_still_works(self, tmp_path, monkeypatch):
@@ -207,9 +210,9 @@ class TestCategoryIconsInUse:
     def test_icons_referenced_in_print_tools_list(self):
         import inspect
 
-        from alpha import display
+        from alpha.display import core
 
-        src = inspect.getsource(display)
+        src = inspect.getsource(core)
         # _CATEGORY_ICONS aparece em print_tools_list (uso real, nao orfo)
         assert "_CATEGORY_ICONS" in src
         # Tambem ha uma referencia de uso (.get / lookup)

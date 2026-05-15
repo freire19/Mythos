@@ -1,5 +1,5 @@
 """
-Tool executor for Alpha Code.
+Tool executor for Mythos.
 
 Executes tool calls with parallel support, handles approval flow, formats results.
 When multiple tools are called in the same turn, independent tools run in parallel.
@@ -53,6 +53,7 @@ def build_assistant_tool_message(
     """
     msg: dict = {
         "role": "assistant",
+        "content": content,
         "tool_calls": [
             {
                 "id": tc["id"],
@@ -65,8 +66,6 @@ def build_assistant_tool_message(
             for tc in tool_calls
         ],
     }
-    if content is not None or tool_calls:
-        msg["content"] = content
     if reasoning_content:
         msg["reasoning_content"] = reasoning_content
     return msg
@@ -75,20 +74,43 @@ def build_assistant_tool_message(
 _PREVIEW_FIELD_MAX = 1000
 
 
+def _cheap_len(v) -> int:
+    """Estimativa rápida do tamanho serializado sem alocar string gigante.
+
+    DEEP_PERFORMANCE #D030: `len(str(v))` em dicts/listas aninhados
+    materializa a representação inteira só para medir. Para coleções,
+    amostramos os primeiros 50 itens e extrapolamos.
+    """
+    if isinstance(v, str):
+        return len(v)
+    if isinstance(v, (list, tuple)):
+        if len(v) <= 50:
+            return sum(_cheap_len(x) for x in v)
+        sample = sum(_cheap_len(x) for x in v[:50])
+        return sample * (len(v) // 50) + 100  # margem de segurança
+    if isinstance(v, dict):
+        items = list(v.items())
+        if len(items) <= 50:
+            return sum(_cheap_len(k) + _cheap_len(val) + 4 for k, val in items)
+        sample = sum(_cheap_len(k) + _cheap_len(val) + 4 for k, val in items[:50])
+        return sample * (len(items) // 50) + 100
+    return len(str(v))
+
+
 def _format_result(result: dict, tool_name: str) -> str:
     """Truncate and format a tool result for inclusion in messages.
 
-    Hot path: a estimativa cheap (sum de len(str(v))) evita o `json.dumps`
-    completo da resposta inteira so para descobrir o tamanho. Se passar do
-    limite, cada campo de string e cortado por chars (limite por campo) — a
-    versao antiga fatiava no meio do JSON ja serializado, podendo cortar em
-    `\\uXXXX` ou em multi-byte UTF-8 e produzir saida com texto corrompido.
+    Hot path: _cheap_len estima o tamanho serializado sem json.dumps
+    completo. Se passar do limite, strings sao cortadas por campo em vez
+    de fatiar JSON serializado bruto — a versao antiga fatiava no meio
+    do JSON e podia cortar em `\\uXXXX` ou em multi-byte UTF-8, produzindo
+    saida com texto corrompido.
     """
     # Drop underscore-prefixed keys: convention for UI-only fields (e.g.
     # `_previous_content` used to render the edit diff in the terminal,
     # but pointless and bloating to send back to the LLM).
     result = {k: v for k, v in result.items() if not (isinstance(k, str) and k.startswith("_"))}
-    estimated = sum(len(json.dumps(v, default=str)) for v in result.values()) + 100
+    estimated = sum(_cheap_len(v) for v in result.values()) + 100
     if estimated <= TOOL_RESULT_MAX_CHARS:
         return json.dumps(result, ensure_ascii=False)
 
@@ -148,10 +170,11 @@ def _append_tool_msg(messages: list[dict], tc_id: str, result: dict, tool_name: 
     campo). Sem este helper, error messages com paths absolutos longos
     podiam passar de TOOL_RESULT_MAX_CHARS (#D022).
     """
+    content = _format_result(result, tool_name)
     messages.append({
         "role": "tool",
         "tool_call_id": tc_id,
-        "content": _format_result(result, tool_name),
+        "content": f"<tool_result>{content}</tool_result>",
     })
 
 
@@ -159,38 +182,35 @@ def _record_skip(tc: dict, tool_name: str, result: dict, messages: list[dict]) -
     """Append a denied/skipped result to messages and return the event dict."""
     annotated = _annotate_error(result, "denied")
     _append_tool_msg(messages, tc["id"], annotated, tool_name)
-    return {"type": "tool_result", "name": tool_name, "result": annotated, "denied": True, "id": tc["id"]}
+    return {"type": "tool_result", "name": tool_name, "result": annotated, "denied": True}
 
 
 def _record_result(tc: dict, tool_name: str, result: dict, messages: list[dict]) -> None:
+    # DL033: tools that return {"error": "..."} on their own (git, db, file
+    # tools) don't get the {ok: false, category: ...} invariant added by the
+    # executor. Annotate here so the model always sees a consistent error shape.
+    if isinstance(result, dict) and "error" in result and "ok" not in result:
+        result = _annotate_error(result, "tool_error")
     _append_tool_msg(messages, tc["id"], result, tool_name)
 
 
-async def _execute_single_tool(tool_def, tool_name: str, args: dict, *, workspace: str | None = None) -> dict:
-    """Execute a single tool with timeout. Returns result dict.
-
-    workspace is injected for tools that need it (delegate_task,
-    delegate_parallel — they must know the parent's workspace to
-    confine sub-agents to the same boundary, #DL026).
-    """
+async def _execute_single_tool(tool_def, tool_name: str, args: dict) -> dict:
+    """Execute a single tool with timeout. Returns result dict."""
     tool_timeout = (
         _SLOW_TOOL_TIMEOUT if tool_name in _SLOW_TOOLS else TOOL_EXECUTION_TIMEOUT
     )
-    # Inject workspace for delegate tools (#DL026)
-    if workspace and tool_name in ("delegate_task", "delegate_parallel"):
-        args = {**args, "parent_workspace": workspace}
     try:
         result = await asyncio.wait_for(
             tool_def.executor(**args),
             timeout=tool_timeout,
         )
     except TimeoutError:
-        logger.error(f"Tool timeout ({tool_name}): {tool_timeout}s")
+        logger.exception(f"Tool timeout ({tool_name}): {tool_timeout}s")
         result = _annotate_error(
             {"error": f"Execution timed out ({tool_timeout}s)"}, "timeout"
         )
     except Exception as e:
-        logger.error(f"Tool error ({tool_name}): {type(e).__name__}: {e}")
+        logger.exception(f"Tool error ({tool_name}): {type(e).__name__}: {e}")
         result = _annotate_error(
             {"error": f"{type(e).__name__}: {e}"}, "runtime"
         )
@@ -236,42 +256,6 @@ def _enforce_workspace(
     from .agents import validate_workspace_args
 
     return validate_workspace_args(workspace, tool_name, args)
-
-
-def _prepare_tool_call(
-    tc: dict, get_tool_fn: Callable | None, workspace: str | None
-) -> tuple:
-    """Validate and prepare a single tool call for execution.
-
-    Returns ((tc, tool_name, args, tool_def, safety_str), None) on success,
-    or (None, error_result) on failure.  The error_result is already annotated
-    with the appropriate category (unknown_tool, parse_error, violation).
-
-    Extracted from the duplicated ~25-line preamble in execute_tool_calls and
-    _execute_sequential (#D004).
-    """
-    tool_name = tc["name"]
-    tool_def = get_tool_fn(tool_name) if get_tool_fn else None
-
-    if tool_def is None:
-        return None, _annotate_error(
-            {"error": f"Unknown tool: {tool_name}"}, "unknown_tool"
-        )
-
-    args, parse_error = _parse_and_validate_args(tc, tool_def)
-    if parse_error is not None:
-        return None, _annotate_error(parse_error, "parse_error")
-
-    ok, args, err = _enforce_workspace(workspace, tool_name, args)
-    if not ok:
-        return None, _annotate_error(
-            {"error": err, "workspace_violation": True}, "violation"
-        )
-
-    safety = getattr(tool_def, "safety", None)
-    safety_str = safety.value if hasattr(safety, "value") else "safe"
-
-    return (tc, tool_name, args, tool_def, safety_str), None
 
 
 def _parse_and_validate_args(
@@ -327,6 +311,46 @@ def _parse_and_validate_args(
     return args, None
 
 
+# ── Shared tool-call validation (parallel + sequential) ──
+# #D004: extrai o loop de validacao per-tc (~30 linhas) duplicado entre
+# `execute_tool_calls` e `_execute_sequential`. Ambas fazem: lookup →
+# parse args → enforce workspace → extract safety. Centralizado aqui.
+
+def _validate_tool_call(
+    tc: dict,
+    get_tool_fn: Callable | None,
+    workspace: str | None,
+) -> tuple[dict | None, str, dict, str, str, object]:
+    """Validate one tool call. Returns (error_result, tool_name, args, safety_str, error_category, tool_def).
+
+    If error_result is not None: validation failed — caller yields error events.
+    Otherwise: (None, tool_name, args_with_workspace, safety_str, "", tool_def) — proceed to execute.
+    """
+    tool_name = tc["name"]
+    tool_def = get_tool_fn(tool_name) if get_tool_fn else None
+
+    if tool_def is None:
+        return (
+            {"error": f"Ferramenta desconhecida: {tool_name}"},
+            tool_name, {}, "unknown", "unknown_tool", None,
+        )
+
+    args, parse_error = _parse_and_validate_args(tc, tool_def)
+    if parse_error is not None:
+        return (parse_error, tool_name, {}, "denied", "parse_error", tool_def)
+
+    ok, new_args, err = _enforce_workspace(workspace, tool_name, args)
+    if not ok:
+        return (
+            {"error": err, "workspace_violation": True},
+            tool_name, {}, "denied", "violation", tool_def,
+        )
+
+    safety = getattr(tool_def, "safety", None)
+    safety_str = safety.value if hasattr(safety, "value") else "safe"
+    return (None, tool_name, new_args, safety_str, "", tool_def)
+
+
 async def execute_tool_calls(
     tool_calls: list[dict],
     messages: list[dict],
@@ -360,52 +384,23 @@ async def execute_tool_calls(
     prepared = []  # (tc, tool_name, args, tool_def, safety_str)
 
     for tc in tool_calls:
-        prep_tuple, error = _prepare_tool_call(tc, get_tool_fn, workspace)
+        error, tool_name, args, safety_str, category, tool_def = _validate_tool_call(
+            tc, get_tool_fn, workspace
+        )
         if error is not None:
-            yield {"type": "tool_call", "name": tc["name"], "args": {}, "safety": "denied"}
-            yield {"type": "tool_result", "name": tc["name"], "result": error, "id": tc["id"]}
-            _append_tool_msg(messages, tc["id"], error, tc["name"])
+            error = _annotate_error(error, category)
+            yield {"type": "tool_call", "name": tool_name, "args": {}, "safety": safety_str}
+            yield {"type": "tool_result", "name": tool_name, "result": error}
+            _append_tool_msg(messages, tc["id"], error, tool_name)
             continue
 
-        prepared.append(prep_tuple)
+        prepared.append((tc, tool_name, args, tool_def, safety_str))
 
     for tc, tool_name, args, tool_def, safety_str in prepared:
-        yield {"type": "tool_call", "name": tool_name, "args": args, "safety": safety_str, "id": tc["id"]}
+        yield {"type": "tool_call", "name": tool_name, "args": args, "safety": safety_str}
 
     approved = []
-    # If present_plan is in the batch, process it first so the user
-    # approves/rejects the plan before other tools execute (#D043)
-    plan_items = [(tc, n, a, td) for tc, n, a, td, _ in prepared if n == "present_plan"]
-    other_items = [(tc, n, a, td, s) for tc, n, a, td, s in prepared if n != "present_plan"]
-
-    for tc, tool_name, args, tool_def in plan_items:
-        denied, reason = is_denied_fn(tool_name, args)
-        if denied:
-            result = {"skipped": True, "reason": reason, "denied_by_rule": True}
-            yield _record_skip(tc, tool_name, result, messages)
-            continue
-        if needs_approval_fn(tool_name, args):
-            yield {"type": "approval_needed", "name": tool_name, "args": args}
-            try:
-                user_approved = (
-                    await asyncio.to_thread(approval_callback, tool_name, args)
-                    if approval_callback else False
-                )
-            except (asyncio.CancelledError, KeyboardInterrupt):
-                result = {"skipped": True, "reason": "Cancelled by user"}
-                yield _record_skip(tc, tool_name, result, messages)
-                raise
-            if not user_approved:
-                result = {"skipped": True, "reason": "User denied plan — cancelling batch"}
-                yield _record_skip(tc, tool_name, result, messages)
-                # Skip all remaining tools in the batch
-                for tc2, tool_name2, _, _ in other_items:
-                    result2 = {"skipped": True, "reason": "Plan rejected"}
-                    yield _record_skip(tc2, tool_name2, result2, messages)
-                return
-        approved.append((tc, tool_name, args, tool_def))
-
-    for tc, tool_name, args, tool_def, _ in other_items:
+    for tc, tool_name, args, tool_def, _ in prepared:
         denied, reason = is_denied_fn(tool_name, args)
         if denied:
             result = {"skipped": True, "reason": reason, "denied_by_rule": True}
@@ -414,15 +409,10 @@ async def execute_tool_calls(
 
         if needs_approval_fn(tool_name, args):
             yield {"type": "approval_needed", "name": tool_name, "args": args}
-            try:
-                user_approved = (
-                    await asyncio.to_thread(approval_callback, tool_name, args)
-                    if approval_callback else False
-                )
-            except (asyncio.CancelledError, KeyboardInterrupt):
-                result = {"skipped": True, "reason": "Cancelled by user"}
-                yield _record_skip(tc, tool_name, result, messages)
-                raise
+            user_approved = (
+                await asyncio.to_thread(approval_callback, tool_name, args)
+                if approval_callback else False
+            )
             if not user_approved:
                 result = {"skipped": True, "reason": "User denied this action"}
                 yield _record_skip(tc, tool_name, result, messages)
@@ -435,10 +425,18 @@ async def execute_tool_calls(
 
     # pre_tool hooks fire in parallel — they're independent shell processes.
     outcomes = await asyncio.gather(
-        *[_fire_pre_tool(name, args, workspace) for _, name, args, _ in approved]
+        *[_fire_pre_tool(name, args, workspace) for _, name, args, _ in approved],
+        return_exceptions=True
     )
     runnable = []
     for (tc, tool_name, args, tool_def), outcome in zip(approved, outcomes):
+        if isinstance(outcome, Exception):
+            logger.exception(
+                f"Pre-tool hook failed ({tool_name}): {type(outcome).__name__}: {outcome}"
+            )
+            # Treat as not-blocked — let the tool run, hooks are advisory.
+            runnable.append((tc, tool_name, args, tool_def))
+            continue
         if outcome.blocked:
             result = {
                 "skipped": True,
@@ -454,7 +452,7 @@ async def execute_tool_calls(
 
     async def _run(item):
         tc, tool_name, args, tool_def = item
-        result = await _execute_single_tool(tool_def, tool_name, args, workspace=workspace)
+        result = await _execute_single_tool(tool_def, tool_name, args)
         return tc, tool_name, args, result
 
     results = await asyncio.gather(*[_run(item) for item in runnable], return_exceptions=True)
@@ -463,15 +461,17 @@ async def execute_tool_calls(
     for i, r in enumerate(results):
         if isinstance(r, Exception):
             tc, tool_name, args, _ = runnable[i]
-            logger.error(f"Parallel tool execution error ({tool_name}): {type(r).__name__}: {r}")
-            result = {"error": f"{type(r).__name__}: {r}"}
-            yield {"type": "tool_result", "name": tool_name, "result": result, "id": tc["id"]}
+            logger.exception(f"Parallel tool execution error ({tool_name}): {type(r).__name__}: {r}")
+            result = _annotate_error(
+                {"error": f"{type(r).__name__}: {r}"}, "runtime"
+            )
+            yield {"type": "tool_result", "name": tool_name, "result": result}
             _append_tool_msg(messages, tc["id"], result, tool_name)
             continue
 
         tc, tool_name, args, result = r
         post_tasks.append(_fire_post_tool(tool_name, args, result, workspace))
-        yield {"type": "tool_result", "name": tool_name, "result": result, "id": tc["id"]}
+        yield {"type": "tool_result", "name": tool_name, "result": result}
         _record_result(tc, tool_name, result, messages)
 
     if post_tasks:
@@ -488,15 +488,17 @@ async def _execute_sequential(
     is_denied_fn: Callable[[str, dict], tuple[bool, str]] = _no_deny,
 ) -> AsyncGenerator[dict, None]:
     for tc in tool_calls:
-        prepared, error = _prepare_tool_call(tc, get_tool_fn, workspace)
+        error, tool_name, args, safety_str, category, tool_def = _validate_tool_call(
+            tc, get_tool_fn, workspace
+        )
         if error is not None:
-            yield {"type": "tool_call", "name": tc["name"], "args": {}, "safety": "denied", "id": tc["id"]}
-            yield {"type": "tool_result", "name": tc["name"], "result": error, "id": tc["id"]}
-            _append_tool_msg(messages, tc["id"], error, tc["name"])
+            error = _annotate_error(error, category)
+            yield {"type": "tool_call", "name": tool_name, "args": {}, "safety": safety_str}
+            yield {"type": "tool_result", "name": tool_name, "result": error}
+            _append_tool_msg(messages, tc["id"], error, tool_name)
             continue
 
-        tc, tool_name, args, tool_def, safety_str = prepared
-        yield {"type": "tool_call", "name": tool_name, "args": args, "safety": safety_str, "id": tc["id"]}
+        yield {"type": "tool_call", "name": tool_name, "args": args, "safety": safety_str}
 
         denied, reason = is_denied_fn(tool_name, args)
         if denied:
@@ -525,7 +527,7 @@ async def _execute_sequential(
             yield _record_skip(tc, tool_name, result, messages)
             continue
 
-        result = await _execute_single_tool(tool_def, tool_name, args, workspace=workspace)
+        result = await _execute_single_tool(tool_def, tool_name, args)
         await _fire_post_tool(tool_name, args, result, workspace)
-        yield {"type": "tool_result", "name": tool_name, "result": result, "id": tc["id"]}
+        yield {"type": "tool_result", "name": tool_name, "result": result}
         _record_result(tc, tool_name, result, messages)
