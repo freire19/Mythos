@@ -66,6 +66,9 @@ docs/SKILLS_AUDIT.md
 # Backup of .git/ (local snapshot before risky operations)
 .git.backup/
 
+# Sub-agent scratch directories (per-run, transient)
+.alpha/runs/
+
 # Local-only skills (not distributed with Alpha)
 skills/git-save/
 skills/audit-1-front-scan/

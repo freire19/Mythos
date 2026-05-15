@@ -12,7 +12,8 @@ import logging
 
 from . import ToolCategory, ToolDefinition, ToolSafety, register_tool
 from ..config import FEATURES
-from ..display.core import _tool_args_preview
+from ..display import print_subagent_event
+from ..display.core import flush_subagent_dup, _tool_args_preview
 from .workspace import AGENT_WORKSPACE
 
 from ._delegate_core import (
@@ -167,6 +168,8 @@ async def _run_subagent(
                     "name": event["name"],
                     "args_preview": _tool_args_preview(event.get("args", {})),
                 })
+                # Surface sub-agent tool calls live so the REPL doesn't look frozen.
+                print_subagent_event(event, label)
             elif event["type"] == "done":
                 collected_text = event.get("reply", collected_text)
             elif event["type"] == "error":
@@ -184,9 +187,9 @@ async def _run_subagent(
             "agent_id": agent_id,
         }
     finally:
-        # Cleanup runs on every exit path (Exception, CancelledError,
-        # KeyboardInterrupt). Empty-dir guard: never remove a scratch dir
-        # the sub-agent may have written artifacts into.
+        # Emit trailing `(×N)` so the last dedup count isn't lost.
+        flush_subagent_dup(label or "_")
+        # Cleanup on every exit path; keep scratch dir if sub-agent wrote artifacts.
         try:
             if scratch_dir.exists() and not any(scratch_dir.iterdir()):
                 scratch_dir.rmdir()

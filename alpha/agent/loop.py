@@ -164,7 +164,7 @@ def _quick_similar(a: str, b: str) -> bool:
     idênticos (mesmo prefixo) ou obviamente diferentes (tamanhos
     dispares).
     """
-    if abs(len(a) - len(b)) > 100:
+    if abs(len(a) - len(b)) > max(100, int(max(len(a), len(b)) * 0.005)):
         return False
     if a[:100] == b[:100]:
         return True

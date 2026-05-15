@@ -160,7 +160,7 @@ async def run_agent(
                         "after": tokens_after,
                     }
                 except Exception as ce:
-                    logger.error(f"Aggressive compression failed: {ce}")
+                    logger.exception(f"Aggressive compression failed: {ce}")
                     from ..context import _find_compressible_range, _hard_truncate
                     start, end = _find_compressible_range(messages)
                     if start < end:
@@ -305,7 +305,7 @@ async def run_agent(
                     if len(_recent_results) > _CYCLE_WINDOW * 3:
                         _recent_results[:] = _recent_results[-_CYCLE_WINDOW * 3:]
         except Exception as e:
-            logger.error(f"Tool execution failed: {e}")
+            logger.exception(f"Tool execution failed: {e}")
             yield {"type": "error", "message": f"Tool execution failed: {e}"}
             return
         finally:

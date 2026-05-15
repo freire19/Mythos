@@ -304,7 +304,10 @@ async def _http_request_urllib(
             timeout=timeout + 5,
         )
 
-        resp_body = resp.read(_MAX_RESPONSE_SIZE).decode(errors="replace")
+        try:
+            resp_body = resp.read(_MAX_RESPONSE_SIZE).decode(errors="replace")
+        finally:
+            resp.close()
         return {
             "status_code": resp.status,
             "headers": dict(resp.headers),

@@ -36,6 +36,7 @@ from alpha.display import (
     ThinkingIndicator,
     c,
     format_context_indicator,
+    is_auto_accept,
     print_banner,
     print_context_compressed,
     print_context_warning,
@@ -126,10 +127,14 @@ async def _run_once(messages, user_message, provider, temperature, get_tool_fn, 
                 any_visible = True
 
             elif event_type == "approval_needed":
-                # Hide the spinner so input() echoes cleanly. Scroll region
-                # stays active; the next tool_call/tool_result event calls
-                # start() which clears the pause and redraws.
-                indicator.pause()
+                # Pause only when the callback will actually block on input().
+                # With auto-accept on, print_approval_request short-circuits
+                # (one-line "auto-approved" print, no input) — pausing here
+                # would freeze the spinner through the entire tool execution.
+                # The visible silence during a slow tool (delegate_parallel
+                # can run 30s+) was the user-reported symptom.
+                if not is_auto_accept():
+                    indicator.pause()
 
             elif event_type == "context_compressed":
                 print_context_compressed(event.get("before", 0), event.get("after", 0))

@@ -25,13 +25,12 @@ logger = logging.getLogger(__name__)
 # DSML/XML invoke blocks that DeepSeek (and similar reasoning models) emit as
 # raw text when they "think" about tool calls before the structured tool_calls
 # field arrives. Leaking these to the terminal is noisy; strip them from content.
-# `</?` covers both opening (<|DSML|name>) and closing (</|DSML|name>) tags.
-# `[|\s]*` (not `\|`) — DeepSeek-V4-pro occasionally emits doubled pipes,
-# extra spaces, or both: `< | | DSML | | tool_calls>`. The strict
-# single-pipe version missed those and they leaked verbatim to the screen.
-_DSML_RE = re.compile(r"</?\s*[|\s]*DSML[|\s]*[^>]*>", re.IGNORECASE)
+# `</?` covers both opening and closing tags. `[^>]*` is fully permissive —
+# earlier tighter forms missed exotic separators (fullwidth pipes, etc.).
+# Keywords (DSML, invoke, parameter, tool_calls) are unlikely in real prose.
+_DSML_RE = re.compile(r"</?[^>]*DSML[^>]*>", re.IGNORECASE)
 _XML_INVOKE_RE = re.compile(
-    r"</?\s*(invoke|parameter|tool_calls)\b[^>]*>",
+    r"</?[^>]*\b(invoke|parameter|tool_calls)\b[^>]*>",
     re.IGNORECASE,
 )
 
@@ -140,11 +139,11 @@ async def _get_shared_llm_client() -> httpx.AsyncClient:
 
 
 _DSML_INVOKE_RE = re.compile(
-    r"<[^>]*\binvoke\s+name=\"([^\"]+)\"[^>]*>",
+    r"<[^>]*?\binvoke\b[^>]*?\bname\s*=\s*\"([^\"]+)\"[^>]*>",
     re.IGNORECASE,
 )
 _DSML_PARAM_RE = re.compile(
-    r"<[^>]*\bparameter\b([^>]*)>(.*?)</[^>]*\bparameter\b[^>]*>",
+    r"<[^>]*?\bparameter\b([^>]*)>(.*?)</[^>]*?\bparameter\b[^>]*>",
     re.IGNORECASE | re.DOTALL,
 )
 _DSML_ATTR_NAME_RE = re.compile(r'name="([^"]+)"', re.IGNORECASE)

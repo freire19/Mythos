@@ -205,12 +205,12 @@ async def _execute_single_tool(tool_def, tool_name: str, args: dict) -> dict:
             timeout=tool_timeout,
         )
     except TimeoutError:
-        logger.error(f"Tool timeout ({tool_name}): {tool_timeout}s")
+        logger.exception(f"Tool timeout ({tool_name}): {tool_timeout}s")
         result = _annotate_error(
             {"error": f"Execution timed out ({tool_timeout}s)"}, "timeout"
         )
     except Exception as e:
-        logger.error(f"Tool error ({tool_name}): {type(e).__name__}: {e}")
+        logger.exception(f"Tool error ({tool_name}): {type(e).__name__}: {e}")
         result = _annotate_error(
             {"error": f"{type(e).__name__}: {e}"}, "runtime"
         )
@@ -425,10 +425,18 @@ async def execute_tool_calls(
 
     # pre_tool hooks fire in parallel — they're independent shell processes.
     outcomes = await asyncio.gather(
-        *[_fire_pre_tool(name, args, workspace) for _, name, args, _ in approved]
+        *[_fire_pre_tool(name, args, workspace) for _, name, args, _ in approved],
+        return_exceptions=True
     )
     runnable = []
     for (tc, tool_name, args, tool_def), outcome in zip(approved, outcomes):
+        if isinstance(outcome, Exception):
+            logger.exception(
+                f"Pre-tool hook failed ({tool_name}): {type(outcome).__name__}: {outcome}"
+            )
+            # Treat as not-blocked — let the tool run, hooks are advisory.
+            runnable.append((tc, tool_name, args, tool_def))
+            continue
         if outcome.blocked:
             result = {
                 "skipped": True,
@@ -453,7 +461,7 @@ async def execute_tool_calls(
     for i, r in enumerate(results):
         if isinstance(r, Exception):
             tc, tool_name, args, _ = runnable[i]
-            logger.error(f"Parallel tool execution error ({tool_name}): {type(r).__name__}: {r}")
+            logger.exception(f"Parallel tool execution error ({tool_name}): {type(r).__name__}: {r}")
             result = _annotate_error(
                 {"error": f"{type(r).__name__}: {r}"}, "runtime"
             )

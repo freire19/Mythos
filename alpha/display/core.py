@@ -299,6 +299,32 @@ def _tool_args_preview(
     return _truncate(val, limit or DISPLAY_PREVIEW_TRUNCATE).replace("\n", " ")
 
 
+def _read_file_preview(args: dict) -> str:
+    """`read_file` often gets called multiple times against the same path
+    with different offset/limit ranges. Showing only `path` makes the
+    consecutive calls look identical and triggers the (×N) dedup falsely.
+    Append the line range when present: `path:offset-(offset+limit)`."""
+    path = str(args.get("path", ""))
+    offset = args.get("offset")
+    limit = args.get("limit")
+    pages = args.get("pages")
+    if offset is not None or limit is not None:
+        try:
+            start = int(offset) if offset is not None else 1
+            if limit is not None:
+                end = start + int(limit) - 1
+                suffix = f":{start}-{end}"
+            else:
+                suffix = f":{start}-"
+        except (TypeError, ValueError):
+            suffix = ""
+    elif pages:
+        suffix = f" pages={pages}"
+    else:
+        suffix = ""
+    return _truncate(path + suffix, DISPLAY_PREVIEW_TRUNCATE)
+
+
 def _format_tool_call_header(name: str, args: dict, safety: str) -> str:
     """Build `{icon} {ToolName}({preview})` — shared by top-level and sub-agent
     rendering so the two visual variants never drift."""
@@ -306,7 +332,10 @@ def _format_tool_call_header(name: str, args: dict, safety: str) -> str:
     icon = c(safety_color, _SAFETY_ICONS.get(safety, "⚡"))
     name_color = C.VIOLET if safety == "safe" else safety_color
     tool_name = c(name_color + C.BOLD, _display_tool_name(name))
-    preview = _tool_args_preview(args)
+    if name == "read_file" and isinstance(args, dict):
+        preview = _read_file_preview(args)
+    else:
+        preview = _tool_args_preview(args)
     paren = (
         f"{c(C.GRAY_DARK, '(')}{c(C.GRAY, preview)}{c(C.GRAY_DARK, ')')}"
         if preview else ""
@@ -539,14 +568,17 @@ def print_tool_result(name: str, result: dict, args: dict | None = None) -> None
         from .thinking import get_active_indicator, set_pinned_todos
         ind = get_active_indicator()
         if ind is not None and ind._scroll_active:
-            # Pin to the panel for at-a-glance progress, but ALSO emit an
-            # inline summary so the scroll history shows the turn produced
-            # a visible result. Without this line the tool_call header sat
-            # alone with no `└ …` follow-up, looking like the agent froze.
-            set_pinned_todos(todos)
+            # Print the inline summary BEFORE pinning the panel: if the
+            # panel size changes, `set_pinned_todos` triggers
+            # teardown_scroll+setup_scroll, which leaves the cursor in the
+            # reserved area at the bottom — a subsequent print() then
+            # lands inside the panel rows and gets overwritten by the next
+            # spinner redraw. Printing first keeps the line in normal
+            # scroll-region territory.
             done = sum(1 for t in todos if t.get("status") == "completed")
             total = len(todos)
             print(f"  {c(C.GRAY_DARK, '└')} {c(C.GRAY, f'{total} todos pinned ({done} completed)')}")
+            set_pinned_todos(todos)
         else:
             _print_todo_list(todos)
         warning = result.get("warning")
@@ -833,15 +865,33 @@ def print_context_warning(pct: int, used: int, limit: int) -> None:
     )
 
 
+# Per-agent state for collapsing consecutive identical tool-call lines into
+# `(×N)`. A sub-agent that emits read_file(executor.py) five times in a row
+# (loop or retry) otherwise floods the terminal with copies and hides the
+# rest of the activity.
+_subagent_last_call: dict[str, dict] = {}
+
+
+def flush_subagent_dup(label_key: str) -> None:
+    """If the last call for this agent repeated, append a `(×N)` summary line
+    so the user can see the run length without flooding."""
+    state = _subagent_last_call.get(label_key)
+    if state and state["count"] > 1:
+        print(f"     {c(C.GRAY_DARK, '└ ×' + str(state['count']))}")
+    _subagent_last_call.pop(label_key, None)
+
+
 def print_subagent_event(event: dict, agent_label: str = "") -> None:
     """Display a sub-agent event indented one level under the parent.
 
     Uses the same `● Name(args)` / `└ result` look as the top-level tools,
     just shifted right with `  ⚤` as the agent gutter so the hierarchy
-    reads at a glance.
+    reads at a glance. Consecutive identical tool-call lines are folded
+    into `(×N)` to keep the stream readable when an agent loops.
     """
     gutter = c(C.MAGENTA, "⚤")
     label_str = c(C.MAGENTA + C.DIM, agent_label) if agent_label else ""
+    label_key = agent_label or "_"
 
     event_type = event.get("type", "")
     if event_type == "tool_call":
@@ -850,11 +900,20 @@ def print_subagent_event(event: dict, agent_label: str = "") -> None:
             event.get("args", {}),
             event.get("safety", "safe"),
         )
-        if label_str:
-            print(f"  {gutter} {label_str}  {header}")
-        else:
-            print(f"  {gutter} {header}")
+        line = (
+            f"  {gutter} {label_str}  {header}"
+            if label_str
+            else f"  {gutter} {header}"
+        )
+        state = _subagent_last_call.get(label_key)
+        if state and state["line"] == line:
+            state["count"] += 1
+            return  # suppress the duplicate; counter prints on flush
+        flush_subagent_dup(label_key)
+        print(line)
+        _subagent_last_call[label_key] = {"line": line, "count": 1}
     elif event_type == "done":
+        flush_subagent_dup(label_key)
         reply = str(event.get("reply", ""))
         if not reply:
             return
