@@ -60,7 +60,7 @@ including ones whose SKILL.md still shows the old table format.
 - After UI/CLI changes (`main.py`, `alpha/repl_input.py`,
   `alpha/display.py`), do a smoke run: `python main.py "oi"` should
   reply in plain text without errors.
-- Don't edit `prompts/system.md` casually — it shapes every prompt.
+- Don't edit `alpha/prompts/system.md` casually — it shapes every prompt.
   Discuss first.
 
 ## Status & audits

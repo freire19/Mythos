@@ -198,14 +198,15 @@ def get_available_providers() -> list[dict]:
 
 
 def load_system_prompt() -> str:
-    """Load the system prompt from prompts/system.md."""
-    prompt_path = Path(__file__).parent.parent / "prompts" / "system.md"
-    if prompt_path.exists():
-        return prompt_path.read_text(encoding="utf-8")
-    return (
-        "You are ALPHA, an autonomous terminal agent. "
-        "Execute tasks directly using your tools. Be concise and effective."
-    )
+    """Load the system prompt from alpha/prompts/system.md (bundled)."""
+    from ._resources import package_data
+    try:
+        return package_data("prompts", "system.md").read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return (
+            "You are ALPHA, an autonomous terminal agent. "
+            "Execute tasks directly using your tools. Be concise and effective."
+        )
 
 
 # ─── Agent Workspace ───

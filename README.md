@@ -137,7 +137,7 @@ python main.py --list-providers
 | `.alpha/settings.json` | Permission rules (`allow`/`deny`), hooks |
 | `.alpha/mcp.json` | MCP server definitions |
 | `agents/<name>/agent.yaml` | Named agent profiles (model, tools, workspace) |
-| `prompts/system.md` | Top-level agent system prompt |
+| `alpha/prompts/system.md` | Top-level agent system prompt (bundled with the package) |
 
 `.example` templates ship in `.alpha/` and `.env.example`.
 

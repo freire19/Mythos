@@ -58,9 +58,16 @@ alpha = "main:main"
 
 [tool.setuptools]
 py-modules = ["main"]
+include-package-data = true
 
 [tool.setuptools.packages.find]
 include = ["alpha*"]
+
+# Ship the bundled prompts inside the alpha/prompts/ subpackage so a
+# pipx-installed Alpha still has system.md / subagent.md available.
+# Without this, only .py files land in the wheel (H3 #13).
+[tool.setuptools.package-data]
+"alpha.prompts" = ["*.md"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

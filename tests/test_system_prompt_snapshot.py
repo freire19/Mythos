@@ -1,4 +1,4 @@
-"""Regression guard for `prompts/system.md` (Plano-Upgrade-v3 H2 #11).
+"""Regression guard for `alpha/prompts/system.md` (Plano-Upgrade-v3 H2 #11).
 
 The system prompt is the most critical asset in the repo — it shapes
 every agent turn. Without a snapshot test, edits land silently. With
@@ -6,7 +6,7 @@ this, any change shows up as a failing test whose diff is the whole
 change set, making intent explicit in PR review.
 
 Workflow when intentionally changing the prompt:
-    cp prompts/system.md tests/snapshots/system_prompt.md
+    cp alpha/prompts/system.md tests/snapshots/system_prompt.md
     git add tests/snapshots/system_prompt.md
     # commit both files together; PR shows the diff cleanly.
 """
@@ -17,7 +17,7 @@ import hashlib
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-LIVE_PROMPT = REPO_ROOT / "prompts" / "system.md"
+LIVE_PROMPT = REPO_ROOT / "alpha" / "prompts" / "system.md"
 SNAPSHOT = Path(__file__).parent / "snapshots" / "system_prompt.md"
 
 
