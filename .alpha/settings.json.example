@@ -12,6 +12,13 @@
     ]
   },
 
+  "sandbox": {
+    "enabled": false,
+    "tool": "auto",
+    "deny_network": true,
+    "extra_args": []
+  },
+
   "hooks": {
     "pre_tool": [
       {

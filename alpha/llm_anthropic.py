@@ -398,3 +398,38 @@ async def stream_anthropic(
         "error": None,
         "usage": last_usage or None,
     }
+
+
+# ── Provider registry adapter (H2 #7) ──────────────────────────
+#
+# The dispatcher in llm.py uses the ProviderProtocol signature
+# `(messages, tools, temperature, *, provider)`. stream_anthropic takes
+# explicit base_url/api_key/model/timeout for testability, so this
+# thin wrapper resolves them from the active provider config and
+# matches the protocol.
+
+
+async def _stream_anthropic_provider(
+    messages: list[dict],
+    tools: list[dict],
+    temperature: float,
+    *,
+    provider: str = "",
+) -> AsyncGenerator[dict, None]:
+    from .config import LLM_TIMEOUT, get_provider_config
+
+    cfg = get_provider_config(provider)
+    async for event in stream_anthropic(
+        messages=messages,
+        tools=tools,
+        temperature=temperature,
+        base_url=cfg["base_url"],
+        api_key=cfg["api_key"],
+        model=cfg["model"],
+        timeout=LLM_TIMEOUT,
+    ):
+        yield event
+
+
+from .providers import register as _register
+_register("anthropic", _stream_anthropic_provider)

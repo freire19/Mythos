@@ -170,6 +170,60 @@ async def test_record_captures_events(tmp_path):
     assert data["turns"][0][-1]["type"] == "final"
 
 
+# ─── append_turn (session recording) ──────────────────────────────
+
+
+def test_append_turn_creates_file(tmp_path):
+    from alpha.llm_fixtures import append_turn, load_fixture
+    p = tmp_path / "sess.json"
+    append_turn(
+        p,
+        [
+            {"type": "content_token", "token": "hi"},
+            {"type": "final", "content": "hi", "tool_calls": [], "error": None},
+        ],
+        scenario="t", provider="p", model="m",
+    )
+    data = load_fixture(p)
+    assert data["scenario"] == "t"
+    assert data["provider"] == "p"
+    assert len(data["turns"]) == 1
+    assert data["turns"][0][-1]["type"] == "final"
+
+
+def test_append_turn_appends_to_existing(tmp_path):
+    from alpha.llm_fixtures import append_turn, load_fixture
+    p = tmp_path / "sess.json"
+    append_turn(p, [
+        {"type": "final", "content": "a", "tool_calls": [], "error": None},
+    ], scenario="s", provider="p", model="m")
+    append_turn(p, [
+        {"type": "final", "content": "b", "tool_calls": [], "error": None},
+    ], scenario="ignored-on-append", provider="p", model="m")
+    data = load_fixture(p)
+    assert len(data["turns"]) == 2
+    assert data["scenario"] == "s"  # initial scenario preserved across appends
+
+
+def test_append_turn_skips_empty_events(tmp_path):
+    from alpha.llm_fixtures import append_turn
+    p = tmp_path / "sess.json"
+    append_turn(p, [], scenario="t", provider="p", model="m")
+    assert not p.exists()
+
+
+def test_append_turn_recovers_from_corrupt_file(tmp_path):
+    from alpha.llm_fixtures import append_turn, load_fixture
+    p = tmp_path / "sess.json"
+    p.write_text("{not valid json")
+    append_turn(p, [
+        {"type": "final", "content": "x", "tool_calls": [], "error": None},
+    ], scenario="recovered", provider="p", model="m")
+    data = load_fixture(p)
+    assert data["scenario"] == "recovered"
+    assert len(data["turns"]) == 1
+
+
 @pytest.mark.asyncio
 async def test_record_drops_non_serializable_fields(tmp_path):
     class _Weird:

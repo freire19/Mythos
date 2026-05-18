@@ -20,7 +20,12 @@ from .workspace import AGENT_WORKSPACE
 
 logger = logging.getLogger(__name__)
 
-_SUBAGENT_PROMPT_PATH = Path(__file__).parent.parent.parent / "prompts" / "subagent.md"
+# Resolved via importlib.resources so the path works in both editable
+# installs and wheel installs (H3 #13). Lazy resolution at call sites
+# only matters when the sub-agent runner fires.
+def _subagent_prompt_path():
+    from .._resources import package_data
+    return package_data("prompts", "subagent.md")
 _SCRATCH_SUBDIR = Path(".alpha") / "runs"
 
 # ─── Sub-agent safety policy (referenciado pelos testes em test_subagent_blocked.py) ───
@@ -79,10 +84,11 @@ def _auto_approve_no_callback(name: str, args: dict) -> bool:
 
 
 def _load_subagent_prompt() -> str:
-    if _SUBAGENT_PROMPT_PATH.exists():
-        raw = _SUBAGENT_PROMPT_PATH.read_text(encoding="utf-8")
+    try:
+        raw = _subagent_prompt_path().read_text(encoding="utf-8")
         return _strip_control_chars(raw)
-    return "You are a focused sub-agent. Complete the delegated task using your tools."
+    except FileNotFoundError:
+        return "You are a focused sub-agent. Complete the delegated task using your tools."
 
 
 def _strip_control_chars(text: str) -> str:

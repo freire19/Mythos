@@ -1,5 +1,68 @@
 # Changelog
 
+## [1.15.0](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.14.0...alpha-code-v1.15.0) (2026-05-18)
+
+
+### Features
+
+* /pdf and /audio attachments via text extraction — H3 [#18](https://github.com/freire19/Alpha_Code/issues/18) ([e2a1697](https://github.com/freire19/Alpha_Code/commit/e2a1697c8ce8c396986be31bfbdc0030add6ba8d))
+
+## [1.14.0](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.13.0...alpha-code-v1.14.0) (2026-05-18)
+
+
+### Features
+
+* optional firejail/bubblewrap sandbox for destructive shell tools — H3 [#14](https://github.com/freire19/Alpha_Code/issues/14) ([6920d42](https://github.com/freire19/Alpha_Code/commit/6920d42b6781496f03636580ad8f301a59627442))
+
+## [1.13.0](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.12.0...alpha-code-v1.13.0) (2026-05-18)
+
+
+### Features
+
+* skill registry + alpha skills install/list/remove/update — H3 [#16](https://github.com/freire19/Alpha_Code/issues/16) ([0d179af](https://github.com/freire19/Alpha_Code/commit/0d179af90c6dbf58382dd4ac76230e69fefc835c))
+
+## [1.12.0](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.11.2...alpha-code-v1.12.0) (2026-05-18)
+
+
+### Features
+
+* Docker image with two-stage build — H3 [#15](https://github.com/freire19/Alpha_Code/issues/15) ([937a3df](https://github.com/freire19/Alpha_Code/commit/937a3dfa9b27310d5073bd873f99f0a3647018cd))
+
+## [1.11.2](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.11.1...alpha-code-v1.11.2) (2026-05-18)
+
+
+### Refactoring
+
+* bundle prompts inside alpha package — H3 [#13](https://github.com/freire19/Alpha_Code/issues/13) phase 1 ([28a924b](https://github.com/freire19/Alpha_Code/commit/28a924bf148fd6e2503686270756ee629b3ba287))
+
+## [1.11.1](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.11.0...alpha-code-v1.11.1) (2026-05-18)
+
+
+### Refactoring
+
+* /simplify pass on H2 — cleanup before H3 ([502ac7c](https://github.com/freire19/Alpha_Code/commit/502ac7ca0840f241786c6a29c3da7f91448eb2af))
+
+## [1.11.0](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.10.0...alpha-code-v1.11.0) (2026-05-18)
+
+
+### Features
+
+* cross-session memory — H2 [#10](https://github.com/freire19/Alpha_Code/issues/10) phase 1 ([34c5bbd](https://github.com/freire19/Alpha_Code/commit/34c5bbd93777ab0c2ee116aead65eba49843fce6))
+* session replay CLI (replay phase 2) — H2 [#9](https://github.com/freire19/Alpha_Code/issues/9) ([423f8b8](https://github.com/freire19/Alpha_Code/commit/423f8b852b890e91117e3e9b0575b16281a079de))
+
+## [1.10.0](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.9.0...alpha-code-v1.10.0) (2026-05-18)
+
+
+### Features
+
+* delegate_consensus + observability features in README — H2 [#8](https://github.com/freire19/Alpha_Code/issues/8) ([d7b97a2](https://github.com/freire19/Alpha_Code/commit/d7b97a2d43bf5430a51d3e73104e4fe2dbe8bc93))
+* session recording (replay phase 1) — H2 [#9](https://github.com/freire19/Alpha_Code/issues/9) ([08e0d55](https://github.com/freire19/Alpha_Code/commit/08e0d5536a66813d8e2c222f240fad57b78d7f7f))
+
+
+### Refactoring
+
+* ProviderProtocol + registry — H2 [#7](https://github.com/freire19/Alpha_Code/issues/7) ([00376fc](https://github.com/freire19/Alpha_Code/commit/00376fc5eb40466f8df1d96acf3f1462185ff33e))
+
 ## [1.9.0](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.8.7...alpha-code-v1.9.0) (2026-05-18)
 
 

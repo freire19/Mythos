@@ -13,6 +13,14 @@ from ..approval import is_denied, needs_approval
 from ..config import LOOP_DETECTION, MAX_ITERATIONS, get_provider_config  # noqa: F401 — LOOP_DETECTION re-exported for back-compat
 from ..cost import record_usage
 from ..stats import record_iteration
+
+import os as _os
+
+
+def _record_session_path() -> str | None:
+    """Read ALPHA_RECORD_SESSION_PATH at call time so tests using the
+    standard `monkeypatch.setenv` idiom actually take effect."""
+    return _os.environ.get("ALPHA_RECORD_SESSION_PATH")
 from ..context import (
     compress_until_under_budget,
     estimate_messages_tokens,
@@ -134,9 +142,16 @@ async def run_agent(
 
         while True:
             final_event = None
+            # Buffer the turn's events when ALPHA_RECORD_SESSION_PATH is set
+            # so we can append a complete turn (tokens + final) to the
+            # session fixture on `final`. No-op otherwise.
+            record_path = _record_session_path()
+            turn_buffer: list[dict] = [] if record_path else None
             async for event in stream_chat_with_tools(
                 messages, tools, temperature, provider=provider
             ):
+                if turn_buffer is not None:
+                    turn_buffer.append(event)
                 if event["type"] == "content_token":
                     yield {"type": "token", "text": event["token"]}
                 elif event["type"] == "stream_reset":
@@ -145,6 +160,19 @@ async def run_agent(
                     yield event
                 elif event["type"] == "final":
                     final_event = event
+
+            if turn_buffer is not None and record_path:
+                try:
+                    from ..llm_fixtures import append_turn
+                    append_turn(
+                        record_path,
+                        turn_buffer,
+                        scenario="session-record",
+                        provider=provider,
+                        model=_provider_model,
+                    )
+                except Exception as e:
+                    logger.debug("session recording failed (non-fatal): %s", e)
 
             if final_event is None:
                 yield {"type": "error", "message": "No response from LLM"}

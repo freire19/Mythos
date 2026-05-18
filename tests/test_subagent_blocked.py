@@ -59,7 +59,7 @@ class TestBlocklistCoversAllDestructiveExceptPolicyExceptions:
     # - present_plan: ferramenta de planning, sem efeito real
     # - git_operation: gating dinamico via _auto_approve_no_callback
     POLICY_EXCEPTIONS = frozenset({
-        "delegate_task", "delegate_parallel",
+        "delegate_task", "delegate_parallel", "delegate_consensus",
         "present_plan", "git_operation",
     })
 

@@ -10,9 +10,18 @@
 # o upstream e so ~1 linha de branding cada. Quando conflitar, vale revisar manual.
 
 prompts/system.md               merge=ours
+alpha/prompts/system.md         merge=ours
+alpha/prompts/subagent.md       merge=ours
 ALPHA.md                        merge=ours
 README.md                       merge=ours
 docs/USER_GUIDE.md              merge=ours
 CHANGELOG.md                    merge=ours
 .release-please-manifest.json   merge=ours
 release-please-config.json      merge=ours
+
+# Mythos owns alpha/sandbox.py — it's the exploit-execution sandbox
+# (Docker/podman + crash detection), part of the red-team identity. The
+# upstream Alpha_Code reused the filename in H3 #14 for a firejail/bwrap
+# wrapper around destructive shell tools — that lives in
+# alpha/shell_sandbox.py here, with the imports patched at sync time.
+alpha/sandbox.py                merge=ours

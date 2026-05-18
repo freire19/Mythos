@@ -58,14 +58,23 @@ c_analysis = [
     # AST-level C static analysis for vulnerability detection.
     "pycparser>=2.21,<3.0",
 ]
+multimodal = [
+    # /pdf REPL command (H3 #18, from Alpha_Code upstream) — text extraction via pypdf.
+    # Audio (/audio) uses Whisper via httpx (already a core dep) so it
+    # has no extra package here.
+    "pypdf>=4.0,<7.0",
+]
 all = [
-    "mythos[browser,network,database,web,dev,exploit,embeddings,graph,c_analysis]",
+    "mythos[browser,network,database,web,dev,exploit,embeddings,graph,c_analysis,multimodal]",
 ]
 dev = [
     # AUDIT_V1.2 #010: pytest 9.0.2 vulneravel a CVE-2025-71176 (fix em 9.0.3).
     # Pinned `>=9.0.3` para forcar upgrade no proximo `pip install -e .[dev]`.
     "pytest>=9.0.3,<10.0",
     "pytest-asyncio>=0.24,<2.0",
+    # pytest-cov gates coverage regression in CI (H2 #12). Threshold in
+    # [tool.coverage.report] fail_under; bump as suite grows.
+    "pytest-cov>=5.0,<8.0",
     # pip-audit pra detectar CVEs em CI / pre-release (#036).
     "pip-audit>=2.7,<3.0",
 ]
@@ -76,10 +85,40 @@ mythos = "main:main"
 [tool.setuptools]
 py-modules = ["main"]
 package-dir = {"" = "."}
+include-package-data = true
 
 [tool.setuptools.packages.find]
 include = ["alpha*"]
 
+# Ship the bundled prompts inside the alpha/prompts/ subpackage so a
+# pipx-installed Alpha still has system.md / subagent.md available.
+# Without this, only .py files land in the wheel (H3 #13).
+[tool.setuptools.package-data]
+"alpha.prompts" = ["*.md"]
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+# Coverage is opt-in (--cov flag) rather than always-on so day-to-day
+# pytest stays fast. CI runs with --cov=alpha --cov-fail-under to gate
+# regressions. Local devs use `pytest --cov=alpha` when investigating.
+
+[tool.coverage.run]
+source = ["alpha"]
+omit = [
+    "alpha/_platform.py",        # OS-detection shim, branches by IS_WINDOWS
+    "alpha/wizard/*",            # one-shot env setup, runs interactively
+    "tests/*",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+]
+# Plano-Upgrade-v3 H2 target: 60%. Current: 49%. The interim threshold
+# locks the current baseline against regression while coverage climbs
+# in follow-up commits. Bump this when the test suite catches up.
+fail_under = 45

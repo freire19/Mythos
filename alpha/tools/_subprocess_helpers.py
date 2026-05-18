@@ -35,6 +35,7 @@ async def run_subprocess_safe(
     cwd: str | None = None,
     stdin: bytes | None = None,
     env: dict[str, str] | None = None,
+    sandbox: bool = False,
 ) -> SubprocessResult:
     """Run a subprocess with mandatory CancelledError/TimeoutError safety.
 
@@ -44,10 +45,23 @@ async def run_subprocess_safe(
     - CancelledError/KeyboardInterrupt: proc.kill() + wait() → re-raised
     - O subprocess nunca fica orfao rodando apos o caller cancelar.
 
+    When `sandbox=True`, the command is wrapped through firejail/bubblewrap
+    if the user has sandbox enabled in `.alpha/settings.json` (H3 #14).
+    Disabled config is a passthrough; enabled config with no backend
+    raises `SandboxUnavailableError` so the caller fails closed rather
+    than silently running unsandboxed.
+
     Returns SubprocessResult with returncode, stdout, stderr on success.
     """
     if env is None:
         env = get_safe_env()
+
+    if sandbox:
+        # Imported lazily to avoid a circular import at module load:
+        # sandbox.py → settings.py → config.py, and _subprocess_helpers
+        # is imported very early by the tool registry.
+        from ..shell_sandbox import wrap_command
+        cmd = tuple(wrap_command(list(cmd), cwd=cwd))
 
     proc = await asyncio.create_subprocess_exec(
         *cmd,
