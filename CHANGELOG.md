@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.13.0](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.12.0...alpha-code-v1.13.0) (2026-05-18)
+
+
+### Features
+
+* skill registry + alpha skills install/list/remove/update — H3 [#16](https://github.com/freire19/Alpha_Code/issues/16) ([0d179af](https://github.com/freire19/Alpha_Code/commit/0d179af90c6dbf58382dd4ac76230e69fefc835c))
+
 ## [1.12.0](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.11.2...alpha-code-v1.12.0) (2026-05-18)
 
 
