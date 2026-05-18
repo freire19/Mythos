@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.11.2](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.11.1...alpha-code-v1.11.2) (2026-05-18)
+
+
+### Refactoring
+
+* bundle prompts inside alpha package — H3 [#13](https://github.com/freire19/Alpha_Code/issues/13) phase 1 ([28a924b](https://github.com/freire19/Alpha_Code/commit/28a924bf148fd6e2503686270756ee629b3ba287))
+
 ## [1.11.1](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.11.0...alpha-code-v1.11.1) (2026-05-18)
 
 
