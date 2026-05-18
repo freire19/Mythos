@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.10.0](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.9.0...alpha-code-v1.10.0) (2026-05-18)
+
+
+### Features
+
+* delegate_consensus + observability features in README — H2 [#8](https://github.com/freire19/Alpha_Code/issues/8) ([d7b97a2](https://github.com/freire19/Alpha_Code/commit/d7b97a2d43bf5430a51d3e73104e4fe2dbe8bc93))
+* session recording (replay phase 1) — H2 [#9](https://github.com/freire19/Alpha_Code/issues/9) ([08e0d55](https://github.com/freire19/Alpha_Code/commit/08e0d5536a66813d8e2c222f240fad57b78d7f7f))
+
+
+### Refactoring
+
+* ProviderProtocol + registry — H2 [#7](https://github.com/freire19/Alpha_Code/issues/7) ([00376fc](https://github.com/freire19/Alpha_Code/commit/00376fc5eb40466f8df1d96acf3f1462185ff33e))
+
 ## [1.9.0](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.8.7...alpha-code-v1.9.0) (2026-05-18)
 
 
