@@ -302,21 +302,28 @@ async def stream_chat_with_tools(
     if cfg.get("low_temperature") and temperature > _LOW_TEMPERATURE:
         temperature = _LOW_TEMPERATURE
 
-    if api_format == "anthropic":
-        from .llm_anthropic import stream_anthropic
-
-        tools_to_send = tools if tools and supports_tools else []
-        async for event in stream_anthropic(
-            messages=messages,
-            tools=tools_to_send,
-            temperature=temperature,
-            base_url=base_url,
-            api_key=api_key,
-            model=model,
-            timeout=LLM_TIMEOUT,
-        ):
-            yield event
-        return
+    # Non-OpenAI formats: dispatch through the provider registry.
+    # Importing the provider module is what triggers self-registration —
+    # we only import the ones we might actually need (lazy by format key)
+    # to keep startup time on the default OpenAI path untouched.
+    # Adding Gemini-native or Bedrock-Converse is one new file in
+    # alpha/providers/ plus one `register(name, impl)` call there.
+    if api_format != "openai":
+        if api_format == "anthropic":
+            from . import llm_anthropic  # noqa: F401 — triggers registration
+        from .providers import get as _get_provider_impl
+        impl = _get_provider_impl(api_format)
+        if impl is not None:
+            tools_to_send = tools if tools and supports_tools else []
+            async for event in impl(
+                messages, tools_to_send, temperature, provider=provider
+            ):
+                yield event
+            return
+        # Unregistered format: fall through to OpenAI compat. Most third-
+        # party providers use OpenAI dialect under the hood (DeepSeek,
+        # Grok, Ollama, Gemini's compat layer), so this is the right
+        # default rather than a hard error.
 
     headers = {
         "Authorization": f"Bearer {api_key}",
