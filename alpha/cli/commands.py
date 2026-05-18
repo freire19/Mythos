@@ -150,24 +150,31 @@ def _handle_cost(ctx: ReplContext, parts: list[str]) -> DispatchResult:
     if s["calls"] == 0:
         print(f"  {c(C.GRAY, 'No LLM calls yet this session.')}")
         return DispatchResult.CONTINUE
+    calls_str = f"{s['calls']} call(s)"
+    in_str = f"{s['tokens_in']:,}"
+    out_str = f"{s['tokens_out']:,}"
+    cost_str = f"${s['cost_usd']:.4f}"
     print()
     print(f"  {c(C.VIOLET + C.BOLD, '┌─ COST — current session ─────────────────')}")
     print(
         f"  {c(C.VIOLET, '│')} "
-        f"{c(C.WHITE + C.BOLD, f'{s[\"calls\"]} call(s)')} — "
-        f"{c(C.WHITE, f'{s[\"tokens_in\"]:,}')} {c(C.GRAY, 'in')} / "
-        f"{c(C.WHITE, f'{s[\"tokens_out\"]:,}')} {c(C.GRAY, 'out')} — "
-        f"{c(C.GREEN + C.BOLD, f'${s[\"cost_usd\"]:.4f}')}"
+        f"{c(C.WHITE + C.BOLD, calls_str)} — "
+        f"{c(C.WHITE, in_str)} {c(C.GRAY, 'in')} / "
+        f"{c(C.WHITE, out_str)} {c(C.GRAY, 'out')} — "
+        f"{c(C.GREEN + C.BOLD, cost_str)}"
     )
     if s["by_model"] and len(s["by_model"]) > 1:
         print(f"  {c(C.VIOLET, '│')}")
         for row in s["by_model"]:
             label = f"{row['provider']}/{row['model']}"
+            row_in = f"{row['tokens_in']:,}"
+            row_out = f"{row['tokens_out']:,}"
+            row_cost = f"${row['cost_usd']:.4f}"
             print(
                 f"  {c(C.VIOLET, '│')} {c(C.GRAY, '·')} "
                 f"{c(C.CYAN, label)}: "
-                f"{row['tokens_in']:,} in / {row['tokens_out']:,} out — "
-                f"{c(C.GREEN, f'${row['cost_usd']:.4f}')}"
+                f"{row_in} in / {row_out} out — "
+                f"{c(C.GREEN, row_cost)}"
             )
     print(f"  {c(C.VIOLET + C.BOLD, '└──────────────────────────────────────────')}")
     return DispatchResult.CONTINUE
@@ -216,11 +223,13 @@ def _handle_stats(ctx: ReplContext, parts: list[str]) -> DispatchResult:
         print(f"  {c(C.VIOLET, '│')}")
         print(f"  {c(C.VIOLET, '│')} {c(C.GRAY + C.BOLD, 'Top tools:')}")
         for t in s["tools"][:5]:
+            calls_col = f"{t['calls']:>3}"
+            avg_col = f"{t['avg_ms']:>6.1f}ms"
             print(
                 f"  {c(C.VIOLET, '│')}   "
                 f"{c(C.CYAN, t['name']):<28} "
-                f"{c(C.WHITE, f'{t[\"calls\"]:>3}')} {c(C.GRAY, 'calls')} "
-                f"{c(C.GRAY, 'avg')} {c(C.WHITE, f'{t[\"avg_ms\"]:>6.1f}ms')}"
+                f"{c(C.WHITE, calls_col)} {c(C.GRAY, 'calls')} "
+                f"{c(C.GRAY, 'avg')} {c(C.WHITE, avg_col)}"
             )
     print(f"  {c(C.VIOLET + C.BOLD, '└──────────────────────────────────────────')}")
     return DispatchResult.CONTINUE
