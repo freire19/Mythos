@@ -7,6 +7,7 @@ Apos #082 split: helpers extraidos para _delegate_core.py.
 """
 
 import asyncio
+import difflib
 import json
 import logging
 
@@ -105,7 +106,7 @@ async def _run_subagent(
     # - "relaxed": confia no sub-agent, so anti-recursao
     # - extra_block: usuario pode fortalecer
     # - allow: usuario pode aliviar (sobrepoe blocklist)
-    _blocked = {"delegate_task", "delegate_parallel"}
+    _blocked = {"delegate_task", "delegate_parallel", "delegate_consensus"}
     all_tools = get_openai_tools()
     policy = get_subagent_policy()
     if parent_approval_callback is None and policy != "relaxed":
@@ -114,7 +115,7 @@ async def _run_subagent(
     _blocked = _blocked - get_subagent_allow()
     # `delegate_*` continua bloqueado mesmo se usuario incluir em
     # subagent_allow — anti-recursao e invariante, nao policy.
-    _blocked = _blocked | {"delegate_task", "delegate_parallel"}
+    _blocked = _blocked | {"delegate_task", "delegate_parallel", "delegate_consensus"}
     tools = [t for t in all_tools if t["function"]["name"] not in _blocked]
 
     if tools_filter:
@@ -307,6 +308,168 @@ async def _delegate_parallel(
     }
 
 
+# ── Consensus delegation (Plano-Upgrade-v3 H2 #8) ─────────────
+#
+# N sub-agents answer the SAME question; we aggregate by text similarity
+# and report majority/dissent. The aggregation is mechanical — the
+# caller still decides what to do with the result (a contested code-review
+# verdict is itself useful information).
+#
+# Why a separate tool instead of a `consensus=True` flag on
+# delegate_parallel: the two have different shapes. delegate_parallel
+# distributes N tasks; delegate_consensus distributes 1 task N times.
+# Merging the signatures would force every caller to learn both modes.
+
+_CONSENSUS_SIMILARITY_THRESHOLD = 0.7
+_CONSENSUS_ANSWER_PREVIEW_CHARS = 4000
+
+
+def _cluster_answers(answers: list[str]) -> list[list[int]]:
+    """Greedy single-link clustering by SequenceMatcher ratio.
+
+    Each cluster is a list of indices into `answers`. Empty / whitespace-only
+    answers form their own degenerate cluster so a failed sub-agent doesn't
+    get absorbed into someone else's group by string accident."""
+    clusters: list[list[int]] = []
+    representatives: list[str] = []
+    for idx, ans in enumerate(answers):
+        normalized = (ans or "").strip()[:_CONSENSUS_ANSWER_PREVIEW_CHARS]
+        placed = False
+        for ci, rep in enumerate(representatives):
+            if not normalized or not rep:
+                continue  # both must be non-empty to compare
+            ratio = difflib.SequenceMatcher(None, normalized, rep).ratio()
+            if ratio >= _CONSENSUS_SIMILARITY_THRESHOLD:
+                clusters[ci].append(idx)
+                placed = True
+                break
+        if not placed:
+            clusters.append([idx])
+            representatives.append(normalized)
+    return clusters
+
+
+async def _delegate_consensus(
+    question: str,
+    n: int = 3,
+    context: str = "",
+    tools_filter: str = "",
+    provider: str = "",
+) -> dict:
+    """N sub-agents answer the SAME question; return majority + dissent.
+
+    Use for contested questions where one agent might miss something but
+    most won't: "is this a bug?", "does this PR meet the spec?", code
+    review, security audit reads."""
+    if not FEATURES.get("multi_agent_enabled"):
+        return {"ok": False, "category": "feature_disabled", "error": "Multi-agent system is disabled. Set FEATURES['multi_agent_enabled']=True."}
+    if not FEATURES.get("delegate_tool_enabled"):
+        return {"ok": False, "category": "feature_disabled", "error": "Delegate tool is disabled. Enable 'delegate_tool_enabled' in config."}
+
+    max_parallel = FEATURES.get("max_parallel_agents", 3)
+    if not isinstance(n, int) or n < 2:
+        return {"ok": False, "category": "invalid_args", "error": "n must be an integer >= 2 (consensus is meaningless below 2)"}
+    if n > max_parallel:
+        return {
+            "ok": False, "category": "invalid_args",
+            "error": f"n={n} exceeds max_parallel_agents={max_parallel}. Lower n or raise the cap.",
+        }
+
+    semaphore = asyncio.Semaphore(max_parallel)
+
+    async def _run_with_limit(idx: int) -> dict:
+        async with semaphore:
+            logger.info(f"Consensus agent #{idx + 1}/{n} starting")
+            result = await _run_subagent(
+                question, context, tools_filter, provider,
+                label=f"#{idx + 1}",
+            )
+            result["agent_index"] = idx
+            return result
+
+    raw_results = await asyncio.gather(
+        *(_run_with_limit(i) for i in range(n)),
+        return_exceptions=True,
+    )
+
+    # Normalize shapes (Exception -> dict with status=failed)
+    normalized: list[dict] = []
+    for i, r in enumerate(raw_results):
+        if isinstance(r, Exception):
+            normalized.append({
+                "agent_index": i,
+                "status": "failed",
+                "result": "",
+                "error": str(r),
+            })
+        else:
+            normalized.append(r)
+
+    # Cluster only successful agents — failures get reported separately
+    # and never influence majority detection.
+    successful = [r for r in normalized if r.get("status") == "completed"]
+    answer_texts = [r.get("result", "") for r in successful]
+
+    if not successful:
+        return {
+            "ok": False,
+            "category": "all_failed",
+            "question": question,
+            "n_agents": n,
+            "failed": len(normalized),
+            "errors": [r.get("error", "unknown") for r in normalized],
+        }
+
+    clusters = _cluster_answers(answer_texts)
+    # Sort clusters by size (desc) then by first agent index for stable order
+    clusters.sort(key=lambda c: (-len(c), c[0]))
+    majority_cluster = clusters[0]
+    majority_size = len(majority_cluster)
+
+    # Map cluster-local indices back to original agent indices via `successful`
+    def _agents_in(cluster: list[int]) -> list[int]:
+        return [successful[i]["agent_index"] + 1 for i in cluster]
+
+    majority_agents = _agents_in(majority_cluster)
+    majority_answer = successful[majority_cluster[0]].get("result", "")
+
+    dissent = []
+    for c in clusters[1:]:
+        rep_idx = c[0]
+        dissent.append({
+            "agents": _agents_in(c),
+            "answer": successful[rep_idx].get("result", ""),
+        })
+
+    consensus_reached = majority_size > n // 2  # strict majority
+
+    return {
+        "ok": True,
+        "question": question,
+        "n_agents": n,
+        "n_successful": len(successful),
+        "n_failed": n - len(successful),
+        "answers": [
+            {
+                "agent": r["agent_index"] + 1,
+                "status": r.get("status", "unknown"),
+                "answer": r.get("result", ""),
+                "error": r.get("error"),
+            }
+            for r in normalized
+        ],
+        "consensus": {
+            "reached": consensus_reached,
+            "majority": {
+                "size": majority_size,
+                "agents": majority_agents,
+                "answer": majority_answer,
+            },
+            "dissent": dissent,
+        },
+    }
+
+
 # ── Registration ──────────────────────────────────────────────
 
 register_tool(
@@ -394,6 +557,61 @@ register_tool(
         },
         safety=ToolSafety.DESTRUCTIVE,
         executor=_delegate_parallel,
+        category=ToolCategory.AGENT,
+    )
+)
+
+register_tool(
+    ToolDefinition(
+        name="delegate_consensus",
+        description=(
+            "Run N sub-agents on the SAME question in parallel and return "
+            "majority + dissent. Use for contested verdicts where a single "
+            "agent might miss something: 'is this a bug?', code review, "
+            "security audit reads, scope checks. Aggregates answers by "
+            "text similarity (>=0.7 same cluster). Output includes per-agent "
+            "answers plus a majority cluster + dissenting clusters with the "
+            "specific agents on each side. Requires user approval."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "question": {
+                    "type": "string",
+                    "description": (
+                        "The single question/task all sub-agents answer. "
+                        "Make it specific and answerable in one short reply — "
+                        "ambiguous questions produce scattered clusters."
+                    ),
+                },
+                "n": {
+                    "type": "integer",
+                    "description": (
+                        "Number of sub-agents to run (default 3). Must be "
+                        ">=2 and <=max_parallel_agents."
+                    ),
+                    "default": 3,
+                },
+                "context": {
+                    "type": "string",
+                    "description": "Shared context passed to ALL sub-agents.",
+                    "default": "",
+                },
+                "tools_filter": {
+                    "type": "string",
+                    "description": "Comma-separated tool names available to ALL sub-agents.",
+                    "default": "",
+                },
+                "provider": {
+                    "type": "string",
+                    "description": "LLM provider override for all sub-agents.",
+                    "default": "",
+                },
+            },
+            "required": ["question"],
+        },
+        safety=ToolSafety.DESTRUCTIVE,
+        executor=_delegate_consensus,
         category=ToolCategory.AGENT,
     )
 )

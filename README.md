@@ -11,7 +11,8 @@ Pure async Python, minimal dependencies (`httpx`, `python-dotenv`, `ddgs`, `pyya
 - **Image attachments** — paste screenshots directly in the REPL (`Ctrl+V`/`Alt+V`) or attach via `/image <path>`.
 - **MCP support** — connect external Model Context Protocol servers via `.alpha/mcp.json`.
 - **Hooks & permissions** — declarative `pre_tool` / `post_tool` / `on_user_prompt` / `on_stop` hooks plus per-tool `allow`/`deny` rules in `.alpha/settings.json`.
-- **Multi-agent delegation** — `delegate_task` and `delegate_parallel` for fanning out focused sub-agents with isolated workspaces.
+- **Multi-agent delegation** — `delegate_task`, `delegate_parallel`, and `delegate_consensus` (N agents answer the same question, returns majority + dissent) for fanning out focused sub-agents with isolated workspaces.
+- **Session observability** — `/cost` shows running token spend and estimated USD by provider/model; `/stats` reports iterations, tool latency, and approval rate. Opt-in JSON-lines logs via `ALPHA_JSON_LOGS=1` write to `~/.alpha/logs/`.
 - **Plan & todos** — built-in `present_plan` (gates execution behind approval) and `todo_write` tools.
 
 ## Install
