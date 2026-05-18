@@ -1,6 +1,6 @@
 """Tests for the approval system."""
 
-from alpha.approval import is_safe_shell_command, needs_approval
+from alpha.approval import _is_sensitive_path, is_safe_shell_command, needs_approval
 
 
 class TestNeedsApproval:
@@ -14,6 +14,47 @@ class TestNeedsApproval:
 
     def test_require_approval_write_file_empty(self):
         assert needs_approval("write_file", {"path": "f.py", "content": ""}) is True
+
+    # Issue #002 — sensitive paths drop auto-approve (plant+execute vector).
+    def test_sensitive_path_bashrc(self):
+        assert needs_approval("write_file", {"path": "~/.bashrc", "content": "evil"}) is True
+        assert needs_approval("write_file", {"path": "/home/x/.bashrc", "content": "evil"}) is True
+
+    def test_sensitive_path_git_hooks(self):
+        assert needs_approval("write_file", {"path": ".git/hooks/post-commit", "content": "x"}) is True
+        assert needs_approval("write_file", {"path": "/a/.git/hooks/pre-push", "content": "x"}) is True
+
+    def test_sensitive_path_alpha_settings(self):
+        assert needs_approval("write_file", {"path": ".alpha/settings.json", "content": "{}"}) is True
+        assert needs_approval("edit_file", {"path": "~/.alpha/settings.json"}) is True
+
+    def test_sensitive_path_ssh(self):
+        assert needs_approval("write_file", {"path": "~/.ssh/authorized_keys", "content": "x"}) is True
+
+    def test_sensitive_path_system_dirs(self):
+        assert needs_approval("write_file", {"path": "/etc/cron.d/x", "content": "x"}) is True
+        assert needs_approval("write_file", {"path": "/usr/local/bin/x", "content": "x"}) is True
+
+    def test_sensitive_path_edit_file_too(self):
+        assert needs_approval("edit_file", {"path": "~/.zshrc"}) is True
+
+    def test_non_sensitive_paths_still_auto_approve(self):
+        # Regular project file — auto-approved.
+        assert needs_approval("write_file", {"path": "src/main.py", "content": "x"}) is False
+        # Scratch under /tmp is fine (legit tool usage).
+        assert needs_approval("write_file", {"path": "/tmp/scratch.txt", "content": "x"}) is False
+        # A path containing ".git" but not under hooks/ is fine.
+        assert needs_approval("write_file", {"path": "myapp/.git_helper.py", "content": "x"}) is False
+
+    def test_is_sensitive_path_pure(self):
+        # Direct unit check of the helper.
+        assert _is_sensitive_path("~/.bashrc") is True
+        assert _is_sensitive_path(".git/hooks/post-commit") is True
+        assert _is_sensitive_path("/etc/passwd") is True
+        assert _is_sensitive_path("src/app.py") is False
+        assert _is_sensitive_path("/tmp/x") is False
+        assert _is_sensitive_path("") is False
+        assert _is_sensitive_path(None) is False  # type: ignore[arg-type]
 
     def test_delegate_task_requires_approval(self):
         assert needs_approval("delegate_task", {"task": "do stuff"}) is True
