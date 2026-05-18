@@ -172,6 +172,25 @@ python main.py --list-providers
 /sessions    List saved sessions
 ```
 
+## Managing skills
+
+Install, list, update, and remove skills from git repos or local paths:
+
+```bash
+alpha skills install github:user/repo          # GitHub shorthand
+alpha skills install https://example.com/r.git # any git URL
+alpha skills install /path/to/local/skill      # local directory
+alpha skills install ./my-skills --force       # overwrite existing
+alpha skills list                              # show installed + sources
+alpha skills update                            # re-fetch every tracked skill
+alpha skills update myskill                    # update just one
+alpha skills remove myskill
+```
+
+Multi-skill repos (each subdir under `skills/` with a `SKILL.md`) install
+every entry. Skills land in `~/.alpha/skills/` and the agent auto-discovers
+them on next launch.
+
 ## Architecture & internals
 
 See [`CLAUDE.md`](./CLAUDE.md) for the agent loop, tool registration, MCP integration, hook payloads, and module layout.

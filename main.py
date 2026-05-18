@@ -435,6 +435,13 @@ def run_single(provider: str, temperature: float, message: str):
 
 
 def main():
+    # `alpha skills ...` has its own subparser (alpha/cli/skills_cli.py)
+    # so the main flat CLI stays uncluttered. Peek at argv before argparse
+    # touches it; --help/--version still flow through the main parser.
+    if len(sys.argv) > 1 and sys.argv[1] == "skills":
+        from alpha.cli.skills_cli import main as skills_main
+        sys.exit(skills_main(sys.argv[2:]))
+
     parser = argparse.ArgumentParser(
         description="Alpha Code — Standalone terminal agent",
         formatter_class=argparse.RawDescriptionHelpFormatter,
