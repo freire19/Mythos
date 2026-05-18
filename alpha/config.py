@@ -94,11 +94,11 @@ _PROVIDERS = {
     "google": {
         "base_url": os.getenv(
             "GEMINI_API_BASE_URL",
-            "https://generativelanguage.googleapis.com/v1beta/openai/",
+            "https://generativelanguage.googleapis.com/v1beta/openai",
         ),
         "api_key_env": "GEMINI_API_KEY",
         "model_env": "GEMINI_MODEL",
-        "default_model": "gemini-2.5-flash",  # melhor custo-beneficio com visao
+        "default_model": "gemini-3.1-pro-preview-customtools",  # base 3.1-pro filtra as proprias tool calls como MALFORMED; a variante -customtools e a oficial pra function calling.
         "supports_vision": True,
         "vision_format": "openai",
     },

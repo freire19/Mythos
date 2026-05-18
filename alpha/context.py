@@ -51,6 +51,7 @@ PROVIDER_CONTEXT_LIMITS: dict[str, int] = {
     "openai": 120_000,    # 128K context, reserve 8K for response
     "anthropic": 180_000, # 200K context, reserve 20K for response
     "grok": 120_000,      # 128K context, reserve 8K
+    "google": 900_000,    # Gemini 2.5/3.x 1M context, reserve 100K
     "ollama": 28_000,     # varies, conservative default
 }
 
