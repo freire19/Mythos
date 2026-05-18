@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.14.0](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.13.0...alpha-code-v1.14.0) (2026-05-18)
+
+
+### Features
+
+* optional firejail/bubblewrap sandbox for destructive shell tools — H3 [#14](https://github.com/freire19/Alpha_Code/issues/14) ([6920d42](https://github.com/freire19/Alpha_Code/commit/6920d42b6781496f03636580ad8f301a59627442))
+
 ## [1.13.0](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.12.0...alpha-code-v1.13.0) (2026-05-18)
 
 
