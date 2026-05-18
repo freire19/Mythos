@@ -1,5 +1,32 @@
 # Changelog
 
+## [1.9.0](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.8.7...alpha-code-v1.9.0) (2026-05-18)
+
+
+### Features
+
+* /stats command + opt-in JSON logs — H1 [#4](https://github.com/freire19/Alpha_Code/issues/4) phases 2 & 3 ([3054065](https://github.com/freire19/Alpha_Code/commit/3054065d8c2fec587b6f18edb64ca14c7f3e9b30))
+* Gemini provider config + 1M context + OCR model env ([c9d1b91](https://github.com/freire19/Alpha_Code/commit/c9d1b9185689e290af4e3d4125f5634b9bdb5ad6))
+* LLM fixture record/replay — H1 [#6](https://github.com/freire19/Alpha_Code/issues/6) ([51e7bd8](https://github.com/freire19/Alpha_Code/commit/51e7bd8079d74a954e5380780953827bef5421fa))
+* session cost/token tracking + /cost — H1 [#4](https://github.com/freire19/Alpha_Code/issues/4) phase 1 ([2e23af7](https://github.com/freire19/Alpha_Code/commit/2e23af73b655d4af42f1ae75031e9dfe4a562022))
+
+
+### Bug Fixes
+
+* f-string backslash escapes break /cost and /stats import ([b84539d](https://github.com/freire19/Alpha_Code/commit/b84539d01671bdbf24f2a980ab1a87eff67dc38d))
+* H1 quick wins — urllib3 CVE bump + path gating ([#001](https://github.com/freire19/Alpha_Code/issues/001), [#002](https://github.com/freire19/Alpha_Code/issues/002)) ([745fabe](https://github.com/freire19/Alpha_Code/commit/745fabeaf9b63320222966d1e2c8a938b9797a6f))
+
+
+### Refactoring
+
+* /simplify pass on H1 — perf + testability cleanups ([ac0df3f](https://github.com/freire19/Alpha_Code/commit/ac0df3f133a51c255162ba2bab5de84a17bf0a50))
+* split display/core.py (1162 → 387 lines) — H1 [#3](https://github.com/freire19/Alpha_Code/issues/3) ([3465d6e](https://github.com/freire19/Alpha_Code/commit/3465d6e4fc37bb83da846c2d79672e4a55bf75bf))
+
+
+### Documentation
+
+* add Plano-Upgrade v1 + v3 (strategic roadmap) ([0bb3b9e](https://github.com/freire19/Alpha_Code/commit/0bb3b9e8b5483e0c5f5dd50729394570b29e920b))
+
 ## [1.8.7](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.8.6...alpha-code-v1.8.7) (2026-05-15)
 
 
