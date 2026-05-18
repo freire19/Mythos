@@ -12,9 +12,12 @@ from alpha import memory
 
 @pytest.fixture(autouse=True)
 def _isolate_memory(tmp_path, monkeypatch):
-    """Redirect memory storage to tmp_path so tests never touch real ~/.alpha."""
-    fake_home = tmp_path
-    monkeypatch.setattr("alpha.memory.Path.home", staticmethod(lambda: fake_home))
+    """Redirect memory storage to tmp_path so tests never touch real ~/.alpha.
+
+    Monkeypatches the module's `_memory_root` accessor so the test doesn't
+    need to mirror the internal path-construction (which uses
+    `alpha.settings.alpha_user_dir`)."""
+    monkeypatch.setattr("alpha.memory._memory_root", lambda: tmp_path / "memory")
     yield
 
 
@@ -146,12 +149,21 @@ class TestSummaryForPrompt:
 
 
 class TestWorkspaceToken:
-    def test_basename_from_path(self):
-        assert memory._workspace_token("/home/u/MyProject") == "MyProject"
+    def test_basename_from_cwd(self, monkeypatch, tmp_path):
+        proj = tmp_path / "MyProject"
+        proj.mkdir()
+        monkeypatch.chdir(proj)
+        assert memory._workspace_token() == "MyProject"
 
-    def test_sanitizes_special_chars(self):
-        token = memory._workspace_token("/path/with spaces & symbols!")
+    def test_sanitizes_special_chars(self, monkeypatch, tmp_path):
+        weird = tmp_path / "with spaces & symbols!"
+        weird.mkdir()
+        monkeypatch.chdir(weird)
+        token = memory._workspace_token()
         assert all(c.isalnum() or c in "_.-" for c in token)
 
-    def test_fallback_when_empty(self):
-        assert memory._workspace_token("/") == "default" or memory._workspace_token("/").startswith("default")
+    def test_fallback_when_root(self, monkeypatch):
+        monkeypatch.chdir("/")
+        token = memory._workspace_token()
+        # basename("/") == "" — falls back to "default"
+        assert token == "default"

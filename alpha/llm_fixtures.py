@@ -200,15 +200,9 @@ def append_turn(
     if not serialized:
         return
 
-    if p.exists():
-        try:
-            data = json.loads(p.read_text(encoding="utf-8"))
-            if not isinstance(data, dict) or "turns" not in data:
-                data = None
-        except (OSError, json.JSONDecodeError):
-            data = None
-    else:
-        data = None
+    from .settings import read_json
+    existing = read_json(p, default=None) if p.exists() else None
+    data = existing if isinstance(existing, dict) and "turns" in existing else None
 
     if data is None:
         data = {

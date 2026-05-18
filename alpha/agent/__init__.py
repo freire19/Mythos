@@ -15,7 +15,12 @@ from ..cost import record_usage
 from ..stats import record_iteration
 
 import os as _os
-_RECORD_PATH = _os.environ.get("ALPHA_RECORD_SESSION_PATH")
+
+
+def _record_session_path() -> str | None:
+    """Read ALPHA_RECORD_SESSION_PATH at call time so tests using the
+    standard `monkeypatch.setenv` idiom actually take effect."""
+    return _os.environ.get("ALPHA_RECORD_SESSION_PATH")
 from ..context import (
     compress_until_under_budget,
     estimate_messages_tokens,
@@ -140,7 +145,8 @@ async def run_agent(
             # Buffer the turn's events when ALPHA_RECORD_SESSION_PATH is set
             # so we can append a complete turn (tokens + final) to the
             # session fixture on `final`. No-op otherwise.
-            turn_buffer: list[dict] = [] if _RECORD_PATH else None
+            record_path = _record_session_path()
+            turn_buffer: list[dict] = [] if record_path else None
             async for event in stream_chat_with_tools(
                 messages, tools, temperature, provider=provider
             ):
@@ -155,11 +161,11 @@ async def run_agent(
                 elif event["type"] == "final":
                     final_event = event
 
-            if turn_buffer is not None and _RECORD_PATH:
+            if turn_buffer is not None and record_path:
                 try:
                     from ..llm_fixtures import append_turn
                     append_turn(
-                        _RECORD_PATH,
+                        record_path,
                         turn_buffer,
                         scenario="session-record",
                         provider=provider,

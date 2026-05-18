@@ -29,13 +29,18 @@ import os
 import re
 from datetime import datetime
 from pathlib import Path
+from typing import Literal
+
+from .settings import alpha_user_dir
 
 logger = logging.getLogger(__name__)
 
 
 MEMORY_DIR_NAME = "memory"
 MAX_MEMORY_BYTES = 8192
-VALID_SCOPES = ("global", "workspace")
+
+Scope = Literal["global", "workspace"]
+VALID_SCOPES: tuple[Scope, ...] = ("global", "workspace")
 
 # Header format: `## YYYY-MM-DD HH:MM (kind)` — kind is freeform but
 # typically one of: preference, pattern, fix, note. The kind helps the
@@ -44,33 +49,34 @@ _HEADER_RE = re.compile(r"^## (\d{4}-\d{2}-\d{2} \d{2}:\d{2}) \((\w+)\)$", re.MU
 
 
 def _memory_root() -> Path:
-    return Path.home() / ".alpha" / MEMORY_DIR_NAME
+    return alpha_user_dir(MEMORY_DIR_NAME)
 
 
-def _workspace_token(workspace: str | None = None) -> str:
-    """Derive a stable short token from the workspace path.
+def _workspace_token() -> str:
+    """Stable short token derived from cwd basename for filename use.
 
-    Uses the basename so a developer who moves the project around still
-    gets the same memory file (paths drift but project names usually
-    don't). Falls back to "default" if cwd is opaque (e.g., /)."""
-    ws = workspace or os.getcwd()
-    base = os.path.basename(os.path.normpath(ws))
-    # Sanitize for filename: alphanumeric/dash/underscore only.
+    Sanitizes to `[a-zA-Z0-9_.-]`, caps at 64 chars, falls back to
+    'default' when cwd has no usable basename (e.g. '/').
+
+    Test isolation: tests monkeypatch `alpha.memory.Path.home` to redirect
+    the storage tree. Tests that need a different *workspace identity*
+    can `monkeypatch.chdir(tmp_path)` — same primitive the real REPL uses."""
+    base = os.path.basename(os.path.normpath(os.getcwd()))
     safe = re.sub(r"[^a-zA-Z0-9_.-]", "_", base) or "default"
     return safe[:64]
 
 
-def _path_for(scope: str, workspace: str | None = None) -> Path:
+def _path_for(scope: Scope) -> Path:
     root = _memory_root()
     if scope == "global":
         return root / "global.md"
     if scope == "workspace":
-        return root / f"workspace-{_workspace_token(workspace)}.md"
+        return root / f"workspace-{_workspace_token()}.md"
     raise ValueError(f"unknown memory scope: {scope!r}. Use one of {VALID_SCOPES}")
 
 
-def _read(scope: str, workspace: str | None = None) -> str:
-    p = _path_for(scope, workspace)
+def _read(scope: Scope) -> str:
+    p = _path_for(scope)
     if not p.exists():
         return ""
     try:
@@ -80,8 +86,8 @@ def _read(scope: str, workspace: str | None = None) -> str:
         return ""
 
 
-def _write(scope: str, content: str, workspace: str | None = None) -> Path:
-    p = _path_for(scope, workspace)
+def _write(scope: Scope, content: str) -> Path:
+    p = _path_for(scope)
     try:
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(content, encoding="utf-8")
@@ -124,9 +130,8 @@ def _trim_to_cap(content: str, cap_bytes: int | None = None) -> str:
 def record(
     content: str,
     *,
-    scope: str = "workspace",
+    scope: Scope = "workspace",
     kind: str = "note",
-    workspace: str | None = None,
     now: datetime | None = None,
 ) -> dict:
     """Append a new memory entry. Trims oldest if over cap.
@@ -138,7 +143,7 @@ def record(
         return {"ok": False, "error": f"scope must be one of {VALID_SCOPES}"}
     kind = re.sub(r"[^a-zA-Z]", "", kind)[:32] or "note"
 
-    existing = _read(scope, workspace)
+    existing = _read(scope)
     ts = (now or datetime.now()).strftime("%Y-%m-%d %H:%M")
     entry = f"## {ts} ({kind})\n{content.strip()}\n\n"
     new_content = existing + entry
@@ -147,13 +152,13 @@ def record(
     new_content = _trim_to_cap(new_content)
     trimmed = len(new_content.encode("utf-8")) < pre_trim_len
 
-    path = _write(scope, new_content, workspace)
+    path = _write(scope, new_content)
     return {"ok": True, "path": str(path), "trimmed": trimmed, "kind": kind}
 
 
-def list_entries(scope: str = "workspace", workspace: str | None = None) -> list[dict]:
+def list_entries(scope: Scope = "workspace") -> list[dict]:
     """Parse the memory file into structured entries (newest first)."""
-    content = _read(scope, workspace)
+    content = _read(scope)
     if not content:
         return []
     matches = list(_HEADER_RE.finditer(content))
@@ -170,16 +175,11 @@ def list_entries(scope: str = "workspace", workspace: str | None = None) -> list
     return out
 
 
-def forget(
-    index: int,
-    *,
-    scope: str = "workspace",
-    workspace: str | None = None,
-) -> dict:
+def forget(index: int, *, scope: Scope = "workspace") -> dict:
     """Drop the entry at 1-based `index` (newest=1).
 
     Returns {"ok": True, "removed": {...}} or {"ok": False, "error": ...}."""
-    entries = list_entries(scope, workspace)
+    entries = list_entries(scope)
     if not entries:
         return {"ok": False, "error": "no memory entries to forget"}
     if not isinstance(index, int) or index < 1 or index > len(entries):
@@ -191,23 +191,23 @@ def forget(
     rebuilt = "".join(
         f"## {e['ts']} ({e['kind']})\n{e['body']}\n\n" for e in entries
     )
-    _write(scope, rebuilt, workspace)
+    _write(scope, rebuilt)
     return {"ok": True, "removed": removed}
 
 
-def clear(scope: str = "workspace", workspace: str | None = None) -> dict:
+def clear(scope: Scope = "workspace") -> dict:
     """Wipe the memory file for a scope. Returns count of removed entries."""
-    entries = list_entries(scope, workspace)
-    _write(scope, "", workspace)
+    entries = list_entries(scope)
+    _write(scope, "")
     return {"ok": True, "removed_count": len(entries)}
 
 
-def memory_path(scope: str = "workspace", workspace: str | None = None) -> Path:
+def memory_path(scope: Scope = "workspace") -> Path:
     """Public accessor — used by /memory edit to know where to open $EDITOR."""
-    return _path_for(scope, workspace)
+    return _path_for(scope)
 
 
-def summary_for_prompt(workspace: str | None = None, max_chars: int = 4000) -> str:
+def summary_for_prompt(max_chars: int = 4000) -> str:
     """Build a concise block to inject into the system prompt.
 
     Concatenates global + workspace memories, newest first, capped at
@@ -215,7 +215,7 @@ def summary_for_prompt(workspace: str | None = None, max_chars: int = 4000) -> s
     can skip the prompt section entirely in that case."""
     pieces: list[str] = []
     for scope_name in ("global", "workspace"):
-        entries = list_entries(scope_name, workspace)
+        entries = list_entries(scope_name)
         if not entries:
             continue
         header = "Global memory:" if scope_name == "global" else "This workspace:"

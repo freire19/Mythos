@@ -22,12 +22,23 @@ from .config import _PROJECT_ROOT
 logger = logging.getLogger(__name__)
 
 
+def alpha_user_dir(subdir: str = "") -> Path:
+    """Resolve a per-user `~/.alpha/<subdir>/` path.
+
+    Single source of truth for the user-global Alpha directory layout so
+    `jsonlogs`, `memory`, `agents`, `skills`, etc. don't each spell out
+    the literal `Path.home() / ".alpha" / ...`. Pass `""` to get the
+    root."""
+    base = Path.home() / ".alpha"
+    return base / subdir if subdir else base
+
+
 def alpha_config_paths(filename: str) -> list[Path]:
     """Candidate locations for an `.alpha/<filename>` config file."""
     return [
         Path.cwd() / ".alpha" / filename,
         _PROJECT_ROOT / ".alpha" / filename,
-        Path.home() / ".alpha" / filename,
+        alpha_user_dir(filename),
     ]
 
 

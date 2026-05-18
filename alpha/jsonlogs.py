@@ -65,7 +65,8 @@ def maybe_install() -> Path | None:
         return None
     if os.environ.get("ALPHA_JSON_LOGS", "").lower() not in ("1", "true", "yes"):
         return None
-    log_dir = Path.home() / ".alpha" / "logs"
+    from .settings import alpha_user_dir
+    log_dir = alpha_user_dir("logs")
     try:
         log_dir.mkdir(parents=True, exist_ok=True)
     except OSError:
