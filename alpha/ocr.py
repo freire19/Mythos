@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import logging
+import os
 from pathlib import Path
 
 import httpx
@@ -16,7 +17,11 @@ import httpx
 logger = logging.getLogger(__name__)
 
 GEMINI_OCR_BASE = "https://generativelanguage.googleapis.com/v1beta/openai"
-GEMINI_OCR_MODEL = "gemini-2.5-flash"  # barato, rapido, multimodal
+# Override via env to trade cost vs quality:
+#   gemini-3.1-pro-preview         — best vision, slow/expensive (default)
+#   gemini-3.1-flash-lite-preview  — mid quality, faster
+#   gemini-2.5-flash               — cheapest, OK for simple OCR
+GEMINI_OCR_MODEL = os.getenv("GEMINI_OCR_MODEL", "gemini-3.1-pro-preview")
 MAX_IMAGE_BYTES = 5 * 1024 * 1024
 
 _EXT_TO_MEDIA = {

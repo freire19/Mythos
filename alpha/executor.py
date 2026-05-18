@@ -8,9 +8,11 @@ When multiple tools are called in the same turn, independent tools run in parall
 import asyncio
 import json
 import logging
+import time
 from collections.abc import AsyncGenerator, Callable
 
 from . import hooks
+from .stats import record_approval, record_tool
 from .config import (
     SLOW_TOOL_TIMEOUT as _CFG_SLOW_TOOL_TIMEOUT,
     TOOL_EXECUTION_TIMEOUT as _CFG_TOOL_EXECUTION_TIMEOUT,
@@ -62,6 +64,13 @@ def build_assistant_tool_message(
                     "name": tc["name"],
                     "arguments": tc["arguments"],
                 },
+                # Gemini's OpenAI-compat layer puts a `thought_signature`
+                # under `extra_content.google` on each tool_call and
+                # requires it to be echoed back, or replies HTTP 400
+                # INVALID_ARGUMENT on the next turn. Other providers
+                # ignore the extra field, so it's safe to forward when
+                # present.
+                **({"extra_content": tc["extra_content"]} if tc.get("extra_content") else {}),
             }
             for tc in tool_calls
         ],
@@ -199,6 +208,7 @@ async def _execute_single_tool(tool_def, tool_name: str, args: dict) -> dict:
     tool_timeout = (
         _SLOW_TOOL_TIMEOUT if tool_name in _SLOW_TOOLS else TOOL_EXECUTION_TIMEOUT
     )
+    started = time.monotonic()
     try:
         result = await asyncio.wait_for(
             tool_def.executor(**args),
@@ -214,6 +224,8 @@ async def _execute_single_tool(tool_def, tool_name: str, args: dict) -> dict:
         result = _annotate_error(
             {"error": f"{type(e).__name__}: {e}"}, "runtime"
         )
+    finally:
+        record_tool(tool_name, (time.monotonic() - started) * 1000.0)
     return result
 
 
@@ -413,6 +425,7 @@ async def execute_tool_calls(
                 await asyncio.to_thread(approval_callback, tool_name, args)
                 if approval_callback else False
             )
+            record_approval(user_approved)
             if not user_approved:
                 result = {"skipped": True, "reason": "User denied this action"}
                 yield _record_skip(tc, tool_name, result, messages)

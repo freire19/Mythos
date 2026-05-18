@@ -327,6 +327,10 @@ async def stream_chat_with_tools(
         "messages": messages,
         "stream": True,
         "temperature": temperature,
+        # Ask the provider to emit a final SSE chunk with token usage.
+        # OpenAI-compatible providers honor this; Anthropic uses its own
+        # adapter (`llm_anthropic.py`) and has its own usage path.
+        "stream_options": {"include_usage": True},
     }
     if tools and supports_tools:
         payload["tools"] = tools
@@ -347,6 +351,16 @@ async def stream_chat_with_tools(
         # ao message dict.
         accumulated_reasoning = ""
         tool_calls_acc: dict[int, dict] = {}
+        # Capture the last non-empty finish_reason. Gemini and similar
+        # providers sometimes return an empty stream with a diagnostic
+        # finish_reason (e.g. "function_call_filter: MALFORMED_FUNCTION_CALL")
+        # — without this, the agent loop sees an empty turn and prints
+        # "(turno encerrado)" with no hint of what went wrong.
+        last_finish_reason = ""
+        # Captured from the trailing usage chunk when stream_options.include_usage
+        # is set. Forwarded in the final event so the agent loop can pass it
+        # to alpha.cost.record_usage.
+        last_usage: dict | None = None
 
         try:
             client = await _get_shared_llm_client()
@@ -420,7 +434,24 @@ async def stream_chat_with_tools(
 
                     try:
                         data = json.loads(data_str)
-                        delta = data["choices"][0].get("delta", {})
+                        # OpenAI's `include_usage` mode emits a trailing chunk
+                        # where `choices` is empty and `usage` carries the
+                        # token totals. Capture it and skip the choice path.
+                        if data.get("usage") and not data.get("choices"):
+                            last_usage = data["usage"]
+                            continue
+                        choices = data.get("choices") or []
+                        if not choices:
+                            continue
+                        choice = choices[0]
+                        # Some providers attach usage to the same chunk as
+                        # the final choice instead of a separate trailer.
+                        if data.get("usage"):
+                            last_usage = data["usage"]
+                        fr = choice.get("finish_reason")
+                        if fr:
+                            last_finish_reason = str(fr)
+                        delta = choice.get("delta", {})
 
                         # `dsml_stripper` buffers any unclosed `<…` tail so a
                         # tag split across SSE chunks is still removed cleanly.
@@ -452,10 +483,18 @@ async def stream_chat_with_tools(
                             if len(accumulated_reasoning) > 50_000:
                                 accumulated_reasoning = accumulated_reasoning[-50_000:]
 
-                        # Tool calls (streamed incrementally)
+                        # Tool calls (streamed incrementally). Google's
+                        # OpenAI-compat layer omits the per-delta `index`
+                        # field that OpenAI's own spec requires, so default
+                        # to the next available slot when missing. Without
+                        # this, every Gemini tool call raised KeyError and
+                        # got dropped silently — the user saw a "(turno
+                        # encerrado)" with no hint of why.
                         if delta.get("tool_calls"):
                             for tc_delta in delta["tool_calls"]:
-                                idx = tc_delta["index"]
+                                idx = tc_delta.get("index")
+                                if idx is None:
+                                    idx = len(tool_calls_acc)
                                 if idx not in tool_calls_acc:
                                     tool_calls_acc[idx] = {
                                         "id": tc_delta.get("id", ""),
@@ -463,6 +502,7 @@ async def stream_chat_with_tools(
                                             "name", ""
                                         ),
                                         "arguments": "",
+                                        "extra_content": None,
                                     }
                                 entry = tool_calls_acc[idx]
                                 if tc_delta.get("id"):
@@ -472,6 +512,13 @@ async def stream_chat_with_tools(
                                     entry["name"] = fn["name"]
                                 if fn.get("arguments"):
                                     entry["arguments"] += fn["arguments"]
+                                # Gemini's OpenAI-compat returns a
+                                # `thought_signature` under extra_content
+                                # that MUST be echoed back on the next turn
+                                # or the API replies HTTP 400 INVALID_ARGUMENT.
+                                ec = tc_delta.get("extra_content")
+                                if ec:
+                                    entry["extra_content"] = ec
 
                     except json.JSONDecodeError:
                         continue  # Expected for non-JSON SSE lines
@@ -489,7 +536,12 @@ async def stream_chat_with_tools(
             reasoning_out = accumulated_reasoning or None
             if tool_calls_acc:
                 tool_calls = [
-                    {"id": tc["id"], "name": tc["name"], "arguments": tc["arguments"]}
+                    {
+                        "id": tc["id"],
+                        "name": tc["name"],
+                        "arguments": tc["arguments"],
+                        **({"extra_content": tc["extra_content"]} if tc.get("extra_content") else {}),
+                    }
                     for _, tc in sorted(tool_calls_acc.items())
                 ]
                 yield {
@@ -498,6 +550,7 @@ async def stream_chat_with_tools(
                     "tool_calls": tool_calls,
                     "reasoning_content": reasoning_out,
                     "error": None,
+                    "usage": last_usage,
                 }
             else:
                 # Fallback chain when the structured tool_calls field stayed
@@ -520,6 +573,7 @@ async def stream_chat_with_tools(
                         "tool_calls": [recovered],
                         "reasoning_content": reasoning_out,
                         "error": None,
+                        "usage": last_usage,
                     }
                 else:
                     # If the raw buffer carried DSML markup but neither
@@ -533,13 +587,36 @@ async def stream_chat_with_tools(
                             "failed (provider=%s, len=%d) — turn will end silent",
                             provider, len(raw_content_for_recovery),
                         )
-                    yield {
-                        "type": "final",
-                        "content": accumulated_content,
-                        "tool_calls": [],
-                        "reasoning_content": reasoning_out,
-                        "error": None,
-                    }
+                    # If the stream produced nothing visible AND the
+                    # provider gave us a diagnostic finish_reason (anything
+                    # other than the normal "stop"/"length"), surface it as
+                    # an error so the user sees why the turn went silent.
+                    # Gemini's "function_call_filter: MALFORMED_FUNCTION_CALL"
+                    # is the canonical example.
+                    fr_lower = last_finish_reason.lower()
+                    benign = fr_lower in ("", "stop", "length", "end_turn")
+                    if (not accumulated_content and not benign):
+                        logger.warning(
+                            "Empty stream with diagnostic finish_reason "
+                            "(provider=%s, model=%s): %s",
+                            provider, cfg.get("model", ""), last_finish_reason,
+                        )
+                        yield {
+                            "type": "final",
+                            "content": "",
+                            "tool_calls": [],
+                            "reasoning_content": reasoning_out,
+                            "error": f"empty response (finish_reason: {last_finish_reason})",
+                        }
+                    else:
+                        yield {
+                            "type": "final",
+                            "content": accumulated_content,
+                            "tool_calls": [],
+                            "reasoning_content": reasoning_out,
+                            "error": None,
+                            "usage": last_usage,
+                        }
             return  # success, no retry
 
         except httpx.TimeoutException:

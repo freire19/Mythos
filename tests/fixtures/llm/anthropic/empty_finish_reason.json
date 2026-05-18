@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "scenario": "empty_finish_reason",
+  "description": "Empty stream with a diagnostic error — covers the path where a provider returns no content but a non-benign finish_reason (e.g. Gemini's MALFORMED_FUNCTION_CALL). The agent should surface the error rather than silently end the turn.",
+  "provider": "anthropic",
+  "model": "claude-haiku-4-5",
+  "turns": [
+    [
+      {
+        "type": "final",
+        "content": "",
+        "tool_calls": [],
+        "reasoning_content": null,
+        "error": "empty response (finish_reason: malformed_tool_call)"
+      }
+    ]
+  ]
+}

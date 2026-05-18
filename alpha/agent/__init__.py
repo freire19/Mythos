@@ -10,7 +10,9 @@ import logging
 from collections.abc import AsyncGenerator
 
 from ..approval import is_denied, needs_approval
-from ..config import LOOP_DETECTION, MAX_ITERATIONS  # noqa: F401 — LOOP_DETECTION re-exported for back-compat
+from ..config import LOOP_DETECTION, MAX_ITERATIONS, get_provider_config  # noqa: F401 — LOOP_DETECTION re-exported for back-compat
+from ..cost import record_usage
+from ..stats import record_iteration
 from ..context import (
     compress_until_under_budget,
     estimate_messages_tokens,
@@ -78,6 +80,15 @@ async def run_agent(
 
     iteration_limit = max_iterations if max_iterations is not None else MAX_ITERATIONS
     full_response = ""
+    # Cache the model once — get_provider_config rebuilds the config dict
+    # and re-reads env vars on every call; agent loop hits this on every
+    # final event. Fall back to "" if config lookup fails (e.g. API key
+    # missing in a test) so cost tracking degrades gracefully rather than
+    # aborting the whole turn.
+    try:
+        _provider_model = get_provider_config(provider).get("model", "")
+    except Exception:
+        _provider_model = ""
 
     # Track tool calls for smart loop detection
     _recent_calls: list[str] = []
@@ -85,6 +96,7 @@ async def run_agent(
 
     for iteration in range(iteration_limit):
         logger.info(f"Agent iteration {iteration + 1}/{iteration_limit}")
+        record_iteration()
 
         # ── Pre-call adaptive compression ──
         if needs_compression(messages, provider):
@@ -137,6 +149,15 @@ async def run_agent(
             if final_event is None:
                 yield {"type": "error", "message": "No response from LLM"}
                 return
+
+            try:
+                record_usage(
+                    provider=provider,
+                    model=_provider_model,
+                    usage=final_event.get("usage"),
+                )
+            except Exception as e:
+                logger.debug("cost tracking failed (non-fatal): %s", e)
 
             err = final_event.get("error")
             if err and is_context_overflow_error(err) and not overflow_retried:
@@ -249,6 +270,16 @@ async def run_agent(
                     forced_final = event
                     if event.get("content"):
                         full_response += event["content"]
+
+            if forced_final is not None:
+                try:
+                    record_usage(
+                        provider=provider,
+                        model=_provider_model,
+                        usage=forced_final.get("usage"),
+                    )
+                except Exception as e:
+                    logger.debug("cost tracking failed (non-fatal): %s", e)
 
             # Force-text path nao pode sumir com erro do LLM em silencio:
             # o usuario veria reply vazio sem motivo. Propagar.

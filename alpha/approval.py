@@ -9,6 +9,7 @@ built-in defaults — see `_load_permission_rules` for the schema.
 """
 
 import logging
+import os
 import re
 import shlex
 from dataclasses import dataclass
@@ -478,6 +479,70 @@ def is_denied(tool_name: str, args: dict) -> tuple[bool, str]:
     return False, ""
 
 
+# ─── Sensitive-path gating for write_file / edit_file (issue #002) ───
+#
+# Closes the plant+execute prompt-injection vector: a malicious model writes
+# a script to ~/.bashrc / .git/hooks/post-commit / .alpha/settings.json via
+# the auto-approved write_file, then waits for execution latently.
+#
+# Hits here drop the auto-approve and prompt the user. The user can still
+# whitelist a specific path with an explicit allow rule in .alpha/settings.json.
+
+# Patterns matched against the (expanded) path string. Loose on purpose:
+# we want to catch both "~/.bashrc", "/home/u/.bashrc", and ".git/hooks/x"
+# regardless of absolute vs relative form.
+_SENSITIVE_PATH_PATTERNS = (
+    # Shell startup / env files (load on next interactive shell).
+    re.compile(
+        r"(^|/)\.(bash_profile|bashrc|bash_logout|bash_aliases|bash_env"
+        r"|zshrc|zshenv|zprofile|zlogin|zlogout|zsh_aliases"
+        r"|profile|envrc|kshrc|cshrc|tcshrc|inputrc)$"
+    ),
+    re.compile(r"(^|/)\.config/fish/(config\.fish|conf\.d/|functions/)"),
+    # Git hooks — execute on every git operation that triggers them.
+    re.compile(r"(^|/)\.git/hooks/[^/]+$"),
+    # SSH config / keys.
+    re.compile(r"(^|/)\.ssh/"),
+    # GPG.
+    re.compile(r"(^|/)\.gnupg/"),
+    # Alpha settings — widening allow/deny is a privilege-escalation path.
+    re.compile(r"(^|/)\.alpha/(settings|mcp)\.json$"),
+    # Cron / scheduled tasks.
+    re.compile(
+        r"(^|/)(\.crontab|cron\.d/|cron\.daily/|cron\.hourly/"
+        r"|cron\.weekly/|cron\.monthly/|spool/cron/)"
+    ),
+    # systemd user units (autorun on login).
+    re.compile(r"(^|/)\.config/systemd/user/"),
+    # XDG autostart.
+    re.compile(r"(^|/)\.config/autostart/"),
+)
+
+# Absolute-path prefixes where writes should always prompt. System dirs
+# only — temp dirs (/tmp, /var/tmp) are intentionally NOT here because legit
+# tool use writes scratch files there constantly.
+_SENSITIVE_ABS_PREFIXES = (
+    "/etc/", "/usr/", "/var/lib/", "/var/log/", "/var/spool/",
+    "/boot/", "/root/", "/lib/", "/lib64/", "/sbin/", "/bin/",
+    "/sys/", "/proc/", "/opt/",
+)
+
+
+def _is_sensitive_path(raw_path: str) -> bool:
+    """True if writing to `raw_path` should drop auto-approve and prompt."""
+    if not raw_path or not isinstance(raw_path, str):
+        return False
+    expanded = os.path.expanduser(raw_path)
+    if any(p.search(expanded) for p in _SENSITIVE_PATH_PATTERNS):
+        return True
+    if expanded.startswith("/"):
+        # Force a trailing "/" so "/etcetera/x" doesn't match the "/etc/" prefix.
+        tail = expanded if expanded.endswith("/") else expanded + "/"
+        if any(tail.startswith(prefix) for prefix in _SENSITIVE_ABS_PREFIXES):
+            return True
+    return False
+
+
 def _matches_allow(tool_name: str, args: dict) -> bool:
     allow, _ = _load_permission_rules()
     return any(rule.matches(tool_name, args) for rule in allow)
@@ -499,6 +564,12 @@ def needs_approval(tool_name: str, args: dict) -> bool:
 
     if tool_name in AUTO_APPROVE_TOOLS:
         if tool_name == "write_file" and not args.get("content", "").strip():
+            return True
+        if tool_name in ("write_file", "edit_file") and _is_sensitive_path(args.get("path", "")):
+            logger.warning(
+                "Sensitive path write: tool=%s path=%r — requesting approval (issue #002)",
+                tool_name, args.get("path", ""),
+            )
             return True
         return False
 

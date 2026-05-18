@@ -62,6 +62,11 @@ from alpha.cli.setup import (
 
 install_lifecycle_hooks()
 
+# Opt-in JSON-lines logs to ~/.alpha/logs/alpha-YYYYMMDD.log when
+# ALPHA_JSON_LOGS=1 is set. No-op otherwise.
+from alpha.jsonlogs import maybe_install as _maybe_install_jsonlogs  # noqa: E402
+_maybe_install_jsonlogs()
+
 
 async def _run_once(messages, user_message, provider, temperature, get_tool_fn, tools, workspace=None):
     """Run a single agent turn and display events.
