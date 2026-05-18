@@ -12,6 +12,7 @@ from collections.abc import AsyncGenerator
 from ..approval import is_denied, needs_approval
 from ..config import LOOP_DETECTION, MAX_ITERATIONS, get_provider_config  # noqa: F401 — LOOP_DETECTION re-exported for back-compat
 from ..cost import record_usage
+from ..stats import record_iteration
 from ..context import (
     compress_until_under_budget,
     estimate_messages_tokens,
@@ -86,6 +87,7 @@ async def run_agent(
 
     for iteration in range(iteration_limit):
         logger.info(f"Agent iteration {iteration + 1}/{iteration_limit}")
+        record_iteration()
 
         # ── Pre-call adaptive compression ──
         if needs_compression(messages, provider):

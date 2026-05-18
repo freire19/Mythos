@@ -49,6 +49,10 @@ from alpha.agents import AgentScope, get_agent
 from alpha.attachments import build_user_content
 from alpha.config import get_available_providers, get_provider_config
 from alpha.cost import reset_session as reset_cost_session, session_summary
+from alpha.stats import (
+    reset_session as reset_stats_session,
+    session_summary as stats_summary,
+)
 from alpha.display import (
     C,
     c,
@@ -134,6 +138,7 @@ def _handle_clear(ctx: ReplContext, parts: list[str]) -> DispatchResult:
     ctx.session_id = generate_session_id()
     reset_approve_all()
     reset_cost_session()
+    reset_stats_session()
     os.system("clear" if os.name != "nt" else "cls")
     print_banner(ctx.provider, ctx.cfg["model"])
     return DispatchResult.CONTINUE
@@ -163,6 +168,59 @@ def _handle_cost(ctx: ReplContext, parts: list[str]) -> DispatchResult:
                 f"{c(C.CYAN, label)}: "
                 f"{row['tokens_in']:,} in / {row['tokens_out']:,} out — "
                 f"{c(C.GREEN, f'${row['cost_usd']:.4f}')}"
+            )
+    print(f"  {c(C.VIOLET + C.BOLD, '└──────────────────────────────────────────')}")
+    return DispatchResult.CONTINUE
+
+
+def _fmt_duration(seconds: float) -> str:
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    m, s = divmod(int(seconds), 60)
+    if m < 60:
+        return f"{m}m{s:02d}s"
+    h, m = divmod(m, 60)
+    return f"{h}h{m:02d}m"
+
+
+def _handle_stats(ctx: ReplContext, parts: list[str]) -> DispatchResult:
+    """Show session telemetry: iterations, tool usage, latency, approvals."""
+    s = stats_summary()
+    cost = session_summary()
+    print()
+    print(f"  {c(C.VIOLET + C.BOLD, '┌─ STATS — current session ────────────────')}")
+    print(
+        f"  {c(C.VIOLET, '│')} "
+        f"{c(C.GRAY, 'uptime:')} {c(C.WHITE, _fmt_duration(s['uptime_s']))}  "
+        f"{c(C.GRAY, 'iterations:')} {c(C.WHITE, str(s['iterations']))}  "
+        f"{c(C.GRAY, 'tool calls:')} {c(C.WHITE, str(s['tool_calls_total']))}"
+    )
+    if cost["calls"]:
+        avg_in = cost["tokens_in"] // cost["calls"]
+        avg_out = cost["tokens_out"] // cost["calls"]
+        print(
+            f"  {c(C.VIOLET, '│')} "
+            f"{c(C.GRAY, 'tokens/turn (avg):')} {c(C.WHITE, f'{avg_in:,}')} {c(C.GRAY, 'in')} / "
+            f"{c(C.WHITE, f'{avg_out:,}')} {c(C.GRAY, 'out')}"
+        )
+    if s["approvals_required"]:
+        rate = 100.0 * s["approvals_granted"] / s["approvals_required"]
+        print(
+            f"  {c(C.VIOLET, '│')} "
+            f"{c(C.GRAY, 'approvals:')} "
+            f"{c(C.WHITE, str(s['approvals_granted']))}/"
+            f"{c(C.WHITE, str(s['approvals_required']))} granted "
+            f"{c(C.GRAY, f'({rate:.0f}%)')}"
+        )
+    if s["tools"]:
+        print(f"  {c(C.VIOLET, '│')}")
+        print(f"  {c(C.VIOLET, '│')} {c(C.GRAY + C.BOLD, 'Top tools:')}")
+        for t in s["tools"][:5]:
+            print(
+                f"  {c(C.VIOLET, '│')}   "
+                f"{c(C.CYAN, t['name']):<28} "
+                f"{c(C.WHITE, f'{t[\"calls\"]:>3}')} {c(C.GRAY, 'calls')} "
+                f"{c(C.GRAY, 'avg')} {c(C.WHITE, f'{t[\"avg_ms\"]:>6.1f}ms')}"
             )
     print(f"  {c(C.VIOLET + C.BOLD, '└──────────────────────────────────────────')}")
     return DispatchResult.CONTINUE
@@ -574,6 +632,7 @@ def _handle_help(ctx: ReplContext, parts: list[str]) -> DispatchResult:
     print(f"  {c(C.CYAN, '/sessions')} — List saved sessions")
     print(f"  {c(C.CYAN, '/context')}  — Show context window usage")
     print(f"  {c(C.CYAN, '/cost')}     — Show token usage and estimated USD cost for this session")
+    print(f"  {c(C.CYAN, '/stats')}    — Show iteration/tool/approval stats for this session")
     print(f"  {c(C.CYAN, '/accept-edits')} — Toggle auto-approve for destructive tools (shift+tab)")
     print(f"  {c(C.CYAN, '/tools')}    — List available tools")
     print(f"  {c(C.CYAN, '/skills')}   — List registered skills (ready vs inactive)")
@@ -612,6 +671,7 @@ _DISPATCH: dict[str, Callable[[ReplContext, list[str]], DispatchResult]] = {
     "/accept_edits": _handle_accept_edits,
     "/help": _handle_help,
     "/cost": _handle_cost,
+    "/stats": _handle_stats,
 }
 
 
