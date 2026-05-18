@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.15.0](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.14.0...alpha-code-v1.15.0) (2026-05-18)
+
+
+### Features
+
+* /pdf and /audio attachments via text extraction — H3 [#18](https://github.com/freire19/Alpha_Code/issues/18) ([e2a1697](https://github.com/freire19/Alpha_Code/commit/e2a1697c8ce8c396986be31bfbdc0030add6ba8d))
+
 ## [1.14.0](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.13.0...alpha-code-v1.14.0) (2026-05-18)
 
 
