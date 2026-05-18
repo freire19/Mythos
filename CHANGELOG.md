@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.12.0](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.11.2...alpha-code-v1.12.0) (2026-05-18)
+
+
+### Features
+
+* Docker image with two-stage build — H3 [#15](https://github.com/freire19/Alpha_Code/issues/15) ([937a3df](https://github.com/freire19/Alpha_Code/commit/937a3dfa9b27310d5073bd873f99f0a3647018cd))
+
 ## [1.11.2](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.11.1...alpha-code-v1.11.2) (2026-05-18)
 
 
