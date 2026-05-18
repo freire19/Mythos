@@ -72,6 +72,23 @@ pip install -e ".[browser]"   # adds Playwright tools
 pip install -e ".[dev]"       # adds pytest
 ```
 
+### Docker (no host install)
+
+A two-stage Dockerfile builds a wheel and installs it into a slim
+runtime image. Useful for CI, throwaway sandboxes, and Windows users
+who'd rather not touch WSL2.
+
+```bash
+docker build -t alpha-code .
+docker run --rm -it \
+  -v "$PWD:/workspace" \
+  -e DEEPSEEK_API_KEY \
+  alpha-code "what does this repo do?"
+```
+
+The mounted workspace is where Alpha reads/writes; anything outside
+the mount is ephemeral. The image runs as a non-root user.
+
 ## Update
 
 Easiest path — the bundled updater handles pull + reinstall + diff of `.env.example`:

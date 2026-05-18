@@ -1,0 +1,60 @@
+# Keep the Docker build context lean — the build stage only needs the
+# files listed in COPY directives. Everything else bloats the build
+# transfer for no benefit.
+
+# Version control
+.git/
+.gitignore
+.gitattributes
+
+# Local dev artifacts
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Coverage artifacts (gitignored too, but skip them here in case a
+# build runs after a local pytest --cov)
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# Build/distribution artifacts (don't ship pre-built wheels into the
+# build context — the builder stage builds fresh)
+dist/
+build/
+*.egg-info/
+*.egg
+
+# Tests and dev tooling — the runtime image doesn't need them
+tests/
+docs/
+.github/
+.claude/
+.alpha/
+
+# Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Secrets must never enter the image, even by accident
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Local-only skills/plugins (per existing .gitignore)
+plugins/
+.git.backup/
+
+# Misc
+*.log
