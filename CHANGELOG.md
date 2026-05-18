@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.11.1](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.11.0...alpha-code-v1.11.1) (2026-05-18)
+
+
+### Refactoring
+
+* /simplify pass on H2 — cleanup before H3 ([502ac7c](https://github.com/freire19/Alpha_Code/commit/502ac7ca0840f241786c6a29c3da7f91448eb2af))
+
 ## [1.11.0](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.10.0...alpha-code-v1.11.0) (2026-05-18)
 
 
