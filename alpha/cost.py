@@ -56,16 +56,22 @@ _PRICING: dict[str, tuple[float, float]] = {
 }
 
 
+# Pre-sorted longest-first so substring lookup prefers `claude-sonnet-4-6`
+# over `claude-sonnet-4`. Precomputed at module load — _price_for hits
+# this on every cost_usd property access (sort-on-call was O(k log k)
+# per lookup, wasted work since _PRICING never mutates at runtime).
+_PRICING_KEYS_BY_LEN = sorted(_PRICING, key=len, reverse=True)
+
+
 def _price_for(model: str) -> tuple[float, float]:
     """Best-effort price lookup. Returns (0.0, 0.0) if model is unknown.
 
     Matches by substring so `gemini-3.1-pro-preview-customtools` resolves to
-    `gemini-3.1-pro`. Longest-key-first to prefer specific over generic
-    (`claude-sonnet-4-6` over `claude-sonnet-4`)."""
+    `gemini-3.1-pro`."""
     if not model:
         return (0.0, 0.0)
     m = model.lower()
-    for key in sorted(_PRICING, key=len, reverse=True):
+    for key in _PRICING_KEYS_BY_LEN:
         if key in m:
             return _PRICING[key]
     return (0.0, 0.0)
@@ -119,25 +125,30 @@ class _SessionTotals:
 _session = _SessionTotals()
 
 
-def record_usage(provider: str, model: str, usage: dict | None) -> None:
-    """Record one LLM call. `usage` is the dict from the provider's response;
-    no-op when None or malformed (some providers/models omit usage)."""
+def _normalize_usage(usage: dict | None) -> tuple[int, int] | None:
+    """Pull (tokens_in, tokens_out) from a provider usage dict.
+
+    OpenAI-style uses `prompt_tokens` / `completion_tokens`; Anthropic
+    uses `input_tokens` / `output_tokens`. Returns None when the dict is
+    missing, malformed, or reports zero on both sides (some providers
+    omit usage entirely or echo zeros on errors)."""
     if not isinstance(usage, dict):
-        return
-    # OpenAI-style: prompt_tokens / completion_tokens
-    # Anthropic-style: input_tokens / output_tokens
-    t_in = (
-        usage.get("prompt_tokens")
-        or usage.get("input_tokens")
-        or 0
-    )
-    t_out = (
-        usage.get("completion_tokens")
-        or usage.get("output_tokens")
-        or 0
-    )
+        return None
+    t_in = usage.get("prompt_tokens") or usage.get("input_tokens") or 0
+    t_out = usage.get("completion_tokens") or usage.get("output_tokens") or 0
     if not (t_in or t_out):
+        return None
+    return int(t_in), int(t_out)
+
+
+def record_usage(provider: str, model: str, usage: dict | None) -> None:
+    """Record one LLM call. No-op when usage is None or zero on both
+    sides — `/cost` reports only billable calls so a turn the provider
+    didn't account for stays out of the total."""
+    normalized = _normalize_usage(usage)
+    if normalized is None:
         return
+    t_in, t_out = normalized
     _session.add(provider, model, t_in, t_out)
     logger.debug(
         "cost.record_usage provider=%s model=%s in=%d out=%d total_usd=%.4f",

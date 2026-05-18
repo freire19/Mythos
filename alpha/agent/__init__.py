@@ -80,6 +80,15 @@ async def run_agent(
 
     iteration_limit = max_iterations if max_iterations is not None else MAX_ITERATIONS
     full_response = ""
+    # Cache the model once — get_provider_config rebuilds the config dict
+    # and re-reads env vars on every call; agent loop hits this on every
+    # final event. Fall back to "" if config lookup fails (e.g. API key
+    # missing in a test) so cost tracking degrades gracefully rather than
+    # aborting the whole turn.
+    try:
+        _provider_model = get_provider_config(provider).get("model", "")
+    except Exception:
+        _provider_model = ""
 
     # Track tool calls for smart loop detection
     _recent_calls: list[str] = []
@@ -144,7 +153,7 @@ async def run_agent(
             try:
                 record_usage(
                     provider=provider,
-                    model=get_provider_config(provider).get("model", ""),
+                    model=_provider_model,
                     usage=final_event.get("usage"),
                 )
             except Exception as e:
@@ -266,7 +275,7 @@ async def run_agent(
                 try:
                     record_usage(
                         provider=provider,
-                        model=get_provider_config(provider).get("model", ""),
+                        model=_provider_model,
                         usage=forced_final.get("usage"),
                     )
                 except Exception as e:

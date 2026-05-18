@@ -145,23 +145,32 @@ def record_wrap(
     provider: str = "",
     model: str = "",
 ) -> AsyncGenerator[dict, None]:
-    """Pass events from `source` through unchanged while accumulating them
-    to `sink_path` as a one-turn fixture. The sink file is written on
-    each `final` event so a partial capture survives a crash."""
+    """Pass events from `source` through unchanged while accumulating
+    them to `sink_path` as a one-turn fixture. The sink is always
+    written on close (success, crash, or generator cancellation), and
+    additionally flushed on the *first* `final` event so a long-running
+    stream that crashes after producing a usable turn isn't lost."""
 
     p = Path(sink_path)
     captured: list[dict] = []
+    flushed = False
 
     async def gen():
+        nonlocal flushed
         try:
             async for event in source:
                 if isinstance(event, dict):
                     captured.append(_serializable(event))
                 yield event
-                if isinstance(event, dict) and event.get("type") == "final":
+                if (
+                    not flushed
+                    and isinstance(event, dict)
+                    and event.get("type") == "final"
+                ):
                     _write_fixture(p, captured, scenario, provider, model)
+                    flushed = True
         finally:
-            if captured and not p.exists():
+            if captured and not flushed:
                 _write_fixture(p, captured, scenario, provider, model)
 
     return gen()
