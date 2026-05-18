@@ -38,8 +38,14 @@ web = [
     # extract_page_content (web_search) usa trafilatura como extrator primario
     "trafilatura>=1.6,<3.0",
 ]
+multimodal = [
+    # /pdf REPL command (H3 #18) — text extraction via pypdf.
+    # Audio (/audio) uses Whisper via httpx (already a core dep) so it
+    # has no extra package here.
+    "pypdf>=4.0,<7.0",
+]
 all = [
-    "alpha-code[browser,network,database,web,dev]",
+    "alpha-code[browser,network,database,web,multimodal,dev]",
 ]
 dev = [
     # AUDIT_V1.2 #010: pytest 9.0.2 vulneravel a CVE-2025-71176 (fix em 9.0.3).

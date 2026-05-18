@@ -739,6 +739,8 @@ def _handle_help(ctx: ReplContext, parts: list[str]) -> DispatchResult:
     print(f"  {c(C.CYAN, '/skills')}   — List registered skills (ready vs inactive)")
     print(f"  {c(C.CYAN, '/mcp')}      — List connected MCP servers")
     print(f"  {c(C.CYAN, '/image')}    — Attach an image (Ctrl+V or Alt+V also works)")
+    print(f"  {c(C.CYAN, '/pdf')}      — Attach a PDF (text extracted via pypdf)")
+    print(f"  {c(C.CYAN, '/audio')}    — Attach audio (transcribed via OpenAI Whisper)")
     print(f"  {c(C.CYAN, '/agents')}   — List named agents")
     print(f"  {c(C.CYAN, '/agent')}    — Show/switch active agent")
     print(f"  {c(C.CYAN, '/model')}    — Show/switch provider & model")
@@ -812,6 +814,115 @@ def handle_image(
     return DispatchResult.FALL_THROUGH
 
 
+# ─── /pdf and /audio — text-extraction multimodal (H3 #18) ──────────
+
+
+def handle_pdf(
+    ctx: ReplContext, user_input: str, parts: list[str]
+) -> DispatchResult:
+    """`/pdf <path> [optional question]` — extract text and FALL_THROUGH.
+
+    The extracted text is prepended to the user message so any provider
+    (vision-capable or not) can process it. Truncation and per-page
+    framing are documented in `alpha/pdf.py`.
+    """
+    if len(parts) < 2:
+        print(f"  {c(C.GRAY, 'Usage: /pdf <path> [optional question]')}")
+        return DispatchResult.CONTINUE
+
+    from alpha import pdf as _pdf
+
+    pdf_path = Path(os.path.expanduser(parts[1]))
+    rest = user_input.split(maxsplit=2)
+    question = rest[2] if len(rest) >= 3 else "Summarize this PDF."
+
+    try:
+        extraction = _pdf.extract_text(pdf_path)
+    except FileNotFoundError as e:
+        print_error(str(e))
+        return DispatchResult.CONTINUE
+    except _pdf.PDFSupportMissingError as e:
+        print_error(str(e))
+        return DispatchResult.CONTINUE
+    except (_pdf.PDFExtractionError, ValueError) as e:
+        print_error(f"PDF: {e}")
+        return DispatchResult.CONTINUE
+
+    suffix = " (truncated)" if extraction.truncated else ""
+    print(
+        c(
+            C.GRAY,
+            f"  ({extraction.page_count} page(s), "
+            f"{len(extraction.text):,} chars{suffix})",
+        )
+    )
+
+    ctx.user_input_override = (
+        f"[Attached PDF: {pdf_path.name}]\n"
+        "--- BEGIN PDF TEXT ---\n"
+        f"{extraction.text}\n"
+        "--- END PDF TEXT ---\n\n"
+        f"{question}"
+    )
+    ctx.history_record_override = f"[pdf: {pdf_path.name}] {question}"
+    return DispatchResult.FALL_THROUGH
+
+
+def handle_audio(
+    ctx: ReplContext, user_input: str, parts: list[str]
+) -> DispatchResult:
+    """`/audio <path> [optional question]` — transcribe via Whisper, FALL_THROUGH.
+
+    Same flow as /pdf: text is injected as context, all providers can
+    consume it without needing audio-capable models.
+    """
+    if len(parts) < 2:
+        print(f"  {c(C.GRAY, 'Usage: /audio <path> [optional question]')}")
+        return DispatchResult.CONTINUE
+
+    from alpha import audio as _audio
+
+    audio_path = Path(os.path.expanduser(parts[1]))
+    rest = user_input.split(maxsplit=2)
+    question = rest[2] if len(rest) >= 3 else "Summarize this audio."
+
+    print(c(C.GRAY, f"  ✾ Transcrevendo {audio_path.name}..."))
+    try:
+        transcription = _audio.transcribe(audio_path)
+    except FileNotFoundError as e:
+        print_error(str(e))
+        return DispatchResult.CONTINUE
+    except _audio.AudioSupportMissingError as e:
+        print_error(str(e))
+        return DispatchResult.CONTINUE
+    except (_audio.AudioTranscriptionError, ValueError) as e:
+        print_error(f"audio: {e}")
+        return DispatchResult.CONTINUE
+
+    dur = (
+        f" ({transcription.duration_sec:.1f}s)"
+        if transcription.duration_sec is not None
+        else ""
+    )
+    print(
+        c(
+            C.GRAY,
+            f"  ({len(transcription.text):,} chars transcribed{dur} "
+            f"via {transcription.model})",
+        )
+    )
+
+    ctx.user_input_override = (
+        f"[Attached audio: {audio_path.name}]\n"
+        "--- BEGIN TRANSCRIPT ---\n"
+        f"{transcription.text}\n"
+        "--- END TRANSCRIPT ---\n\n"
+        f"{question}"
+    )
+    ctx.history_record_override = f"[audio: {audio_path.name}] {question}"
+    return DispatchResult.FALL_THROUGH
+
+
 # ─── Skill name resolution (Claude-Code-style /<name>) ──────────────
 
 
@@ -869,6 +980,10 @@ def dispatch(ctx: ReplContext, user_input: str) -> DispatchResult:
 
     if cmd == "/image":
         return handle_image(ctx, user_input, parts)
+    if cmd == "/pdf":
+        return handle_pdf(ctx, user_input, parts)
+    if cmd == "/audio":
+        return handle_audio(ctx, user_input, parts)
 
     handler = _DISPATCH.get(cmd)
     if handler is not None:

@@ -9,6 +9,7 @@ Pure async Python, minimal dependencies (`httpx`, `python-dotenv`, `ddgs`, `pyya
 - **Multi-provider** — switch between DeepSeek, OpenAI, Anthropic, Grok, Ollama via env or `--provider` flag.
 - **Adaptive context compression** — multi-pass LLM-driven summarization with shrinking protected tail; auto-recovers from context-window overflow.
 - **Image attachments** — paste screenshots directly in the REPL (`Ctrl+V`/`Alt+V`) or attach via `/image <path>`.
+- **PDF & audio attachments** — `/pdf <path>` extracts text via `pypdf`; `/audio <path>` transcribes via OpenAI Whisper. Works with any provider since both inject as text.
 - **MCP support** — connect external Model Context Protocol servers via `.alpha/mcp.json`.
 - **Hooks & permissions** — declarative `pre_tool` / `post_tool` / `on_user_prompt` / `on_stop` hooks plus per-tool `allow`/`deny` rules in `.alpha/settings.json`.
 - **Multi-agent delegation** — `delegate_task`, `delegate_parallel`, and `delegate_consensus` (N agents answer the same question, returns majority + dissent) for fanning out focused sub-agents with isolated workspaces.
@@ -68,8 +69,9 @@ For image clipboard paste, the recommended path is **WSL2 + xclip** — native P
 ### Optional extras (all OSes)
 
 ```bash
-pip install -e ".[browser]"   # adds Playwright tools
-pip install -e ".[dev]"       # adds pytest
+pip install -e ".[browser]"      # adds Playwright tools
+pip install -e ".[multimodal]"   # adds pypdf for /pdf attachments
+pip install -e ".[dev]"          # adds pytest
 ```
 
 ### Docker (no host install)
@@ -168,6 +170,8 @@ python main.py --list-providers
 /agent       Switch active agent
 /model       Switch provider/model
 /image PATH  Attach an image (Ctrl+V also works)
+/pdf PATH    Attach a PDF (text extracted via pypdf)
+/audio PATH  Attach audio (transcribed via OpenAI Whisper)
 /clear       Clear conversation history
 /sessions    List saved sessions
 ```
