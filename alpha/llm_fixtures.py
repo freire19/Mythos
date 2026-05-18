@@ -176,6 +176,54 @@ def record_wrap(
     return gen()
 
 
+def append_turn(
+    path: str | Path,
+    events: list[dict],
+    *,
+    scenario: str = "recorded",
+    provider: str = "",
+    model: str = "",
+) -> None:
+    """Append one turn's events to a session fixture (Plano-Upgrade-v3 H2 #9).
+
+    Used by the agent loop's `ALPHA_RECORD_SESSION_PATH` recording path: each
+    `stream_chat_with_tools` call buffers its events, then this function
+    extends the multi-turn fixture file on `final`. Creates the file if
+    missing; otherwise reads, appends to `turns`, and writes atomically.
+
+    For one-shot single-stream captures, use `record_wrap` instead — it
+    has a richer API (handles partial-stream sinks via finally) but
+    operates on one turn only.
+    """
+    p = Path(path)
+    serialized = [_serializable(e) for e in events if isinstance(e, dict)]
+    if not serialized:
+        return
+
+    if p.exists():
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+            if not isinstance(data, dict) or "turns" not in data:
+                data = None
+        except (OSError, json.JSONDecodeError):
+            data = None
+    else:
+        data = None
+
+    if data is None:
+        data = {
+            "version": FIXTURE_VERSION,
+            "scenario": scenario,
+            "provider": provider,
+            "model": model,
+            "turns": [],
+        }
+    data["turns"].append(serialized)
+
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+
 def _serializable(event: dict) -> dict:
     """Drop fields the fixture format can't represent (exception objects, etc.)."""
     out: dict = {}

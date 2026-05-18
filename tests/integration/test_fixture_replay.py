@@ -119,6 +119,48 @@ async def test_tool_then_finish_replay(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_record_replay_round_trip(monkeypatch, tmp_path):
+    """Run the agent against a fixture with ALPHA_RECORD_SESSION_PATH set,
+    then load the recording and verify it has the same shape as the
+    original fixture. End-to-end smoke for H2 #9 phase 1."""
+    import importlib
+    import alpha.agent as _agent
+
+    record_path = tmp_path / "session.fixture.json"
+    monkeypatch.setenv("ALPHA_RECORD_SESSION_PATH", str(record_path))
+    importlib.reload(_agent)  # re-read env at module load
+
+    fake_stream, _ = build_replay_stream(
+        FIXTURE_ROOT / "deepseek" / "happy_path.json"
+    )
+    monkeypatch.setattr(_agent, "stream_chat_with_tools", fake_stream)
+
+    async for _ in _agent.run_agent(
+        user_message="ping",
+        messages=[{"role": "system", "content": "sys"}],
+        provider="deepseek",
+        get_tool_fn=lambda _: None,
+        tools=[],
+    ):
+        pass
+
+    assert record_path.exists(), "recording file should have been created"
+    recorded = build_replay_stream(record_path)[0]  # rebuild replay from recording
+    events = [
+        e async for e in recorded([], [], 0.5, "deepseek")
+    ]
+    assert any(e["type"] == "final" for e in events)
+    # The original fixture had 5 content_token events; the recording captures
+    # exactly what the agent observed.
+    tokens = [e for e in events if e["type"] == "content_token"]
+    assert len(tokens) == 5
+
+    # Reload agent again WITHOUT env set, to avoid polluting subsequent tests
+    monkeypatch.delenv("ALPHA_RECORD_SESSION_PATH", raising=False)
+    importlib.reload(_agent)
+
+
+@pytest.mark.asyncio
 async def test_error_finish_reason_surfaces(monkeypatch):
     """When the LLM stream ends with `error` set, the agent must propagate
     it as an `error` event with the message attached — not a silent empty
