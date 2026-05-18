@@ -10,7 +10,8 @@ import logging
 from collections.abc import AsyncGenerator
 
 from ..approval import is_denied, needs_approval
-from ..config import LOOP_DETECTION, MAX_ITERATIONS  # noqa: F401 — LOOP_DETECTION re-exported for back-compat
+from ..config import LOOP_DETECTION, MAX_ITERATIONS, get_provider_config  # noqa: F401 — LOOP_DETECTION re-exported for back-compat
+from ..cost import record_usage
 from ..context import (
     compress_until_under_budget,
     estimate_messages_tokens,
@@ -138,6 +139,15 @@ async def run_agent(
                 yield {"type": "error", "message": "No response from LLM"}
                 return
 
+            try:
+                record_usage(
+                    provider=provider,
+                    model=get_provider_config(provider).get("model", ""),
+                    usage=final_event.get("usage"),
+                )
+            except Exception as e:
+                logger.debug("cost tracking failed (non-fatal): %s", e)
+
             err = final_event.get("error")
             if err and is_context_overflow_error(err) and not overflow_retried:
                 overflow_retried = True
@@ -249,6 +259,16 @@ async def run_agent(
                     forced_final = event
                     if event.get("content"):
                         full_response += event["content"]
+
+            if forced_final is not None:
+                try:
+                    record_usage(
+                        provider=provider,
+                        model=get_provider_config(provider).get("model", ""),
+                        usage=forced_final.get("usage"),
+                    )
+                except Exception as e:
+                    logger.debug("cost tracking failed (non-fatal): %s", e)
 
             # Force-text path nao pode sumir com erro do LLM em silencio:
             # o usuario veria reply vazio sem motivo. Propagar.

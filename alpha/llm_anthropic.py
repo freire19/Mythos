@@ -250,6 +250,11 @@ async def stream_anthropic(
     blocks: dict[int, dict] = {}  # index → {"type": "text"|"tool_use", ...}
     yielded_any = False
     dsml_stripper = DsmlStripper()
+    # Aggregated usage across the stream. Anthropic emits input_tokens in
+    # `message_start` and final output_tokens in `message_delta`. Both stay
+    # in the same dict shape so alpha.cost.record_usage handles both
+    # Anthropic and OpenAI without per-provider branches.
+    last_usage: dict = {}
 
     client = await _get_client(timeout)
     last_error: str | None = None
@@ -281,6 +286,15 @@ async def stream_anthropic(
                         continue
 
                     etype = event.get("type")
+
+                    if etype == "message_start":
+                        msg_usage = (event.get("message") or {}).get("usage") or {}
+                        if msg_usage:
+                            last_usage.update(msg_usage)
+                    elif etype == "message_delta":
+                        delta_usage = event.get("usage") or {}
+                        if delta_usage:
+                            last_usage.update(delta_usage)
 
                     if etype == "content_block_start":
                         idx = event["index"]
@@ -382,4 +396,5 @@ async def stream_anthropic(
         "content": accumulated_content,
         "tool_calls": tool_calls,
         "error": None,
+        "usage": last_usage or None,
     }

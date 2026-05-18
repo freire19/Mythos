@@ -48,6 +48,7 @@ from typing import Any, Callable
 from alpha.agents import AgentScope, get_agent
 from alpha.attachments import build_user_content
 from alpha.config import get_available_providers, get_provider_config
+from alpha.cost import reset_session as reset_cost_session, session_summary
 from alpha.display import (
     C,
     c,
@@ -132,8 +133,38 @@ def _handle_clear(ctx: ReplContext, parts: list[str]) -> DispatchResult:
     ctx.messages[:] = [{"role": "system", "content": ctx.system_prompt}]
     ctx.session_id = generate_session_id()
     reset_approve_all()
+    reset_cost_session()
     os.system("clear" if os.name != "nt" else "cls")
     print_banner(ctx.provider, ctx.cfg["model"])
+    return DispatchResult.CONTINUE
+
+
+def _handle_cost(ctx: ReplContext, parts: list[str]) -> DispatchResult:
+    """Show running token/cost totals for the current session."""
+    s = session_summary()
+    if s["calls"] == 0:
+        print(f"  {c(C.GRAY, 'No LLM calls yet this session.')}")
+        return DispatchResult.CONTINUE
+    print()
+    print(f"  {c(C.VIOLET + C.BOLD, '┌─ COST — current session ─────────────────')}")
+    print(
+        f"  {c(C.VIOLET, '│')} "
+        f"{c(C.WHITE + C.BOLD, f'{s[\"calls\"]} call(s)')} — "
+        f"{c(C.WHITE, f'{s[\"tokens_in\"]:,}')} {c(C.GRAY, 'in')} / "
+        f"{c(C.WHITE, f'{s[\"tokens_out\"]:,}')} {c(C.GRAY, 'out')} — "
+        f"{c(C.GREEN + C.BOLD, f'${s[\"cost_usd\"]:.4f}')}"
+    )
+    if s["by_model"] and len(s["by_model"]) > 1:
+        print(f"  {c(C.VIOLET, '│')}")
+        for row in s["by_model"]:
+            label = f"{row['provider']}/{row['model']}"
+            print(
+                f"  {c(C.VIOLET, '│')} {c(C.GRAY, '·')} "
+                f"{c(C.CYAN, label)}: "
+                f"{row['tokens_in']:,} in / {row['tokens_out']:,} out — "
+                f"{c(C.GREEN, f'${row['cost_usd']:.4f}')}"
+            )
+    print(f"  {c(C.VIOLET + C.BOLD, '└──────────────────────────────────────────')}")
     return DispatchResult.CONTINUE
 
 
@@ -542,6 +573,7 @@ def _handle_help(ctx: ReplContext, parts: list[str]) -> DispatchResult:
     print(f"  {c(C.CYAN, '/continue')} — Resume from last session")
     print(f"  {c(C.CYAN, '/sessions')} — List saved sessions")
     print(f"  {c(C.CYAN, '/context')}  — Show context window usage")
+    print(f"  {c(C.CYAN, '/cost')}     — Show token usage and estimated USD cost for this session")
     print(f"  {c(C.CYAN, '/accept-edits')} — Toggle auto-approve for destructive tools (shift+tab)")
     print(f"  {c(C.CYAN, '/tools')}    — List available tools")
     print(f"  {c(C.CYAN, '/skills')}   — List registered skills (ready vs inactive)")
@@ -579,6 +611,7 @@ _DISPATCH: dict[str, Callable[[ReplContext, list[str]], DispatchResult]] = {
     "/accept-edits": _handle_accept_edits,
     "/accept_edits": _handle_accept_edits,
     "/help": _handle_help,
+    "/cost": _handle_cost,
 }
 
 
