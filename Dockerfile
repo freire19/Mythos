@@ -1,4 +1,4 @@
-# Alpha Code — Docker image (Plano-Upgrade-v3 H3 #15).
+# Mythos — Docker image (originally Alpha_Code H3 #15, ported to Mythos).
 #
 # Two-stage build:
 #   1. `builder` produces a wheel from the current source tree.
@@ -11,11 +11,11 @@
 #     so any package-data drift (H3 #13) surfaces here too.
 #
 # Usage:
-#   docker build -t alpha-code .
+#   docker build -t mythos .
 #   docker run --rm -it \
 #     -v "$PWD:/workspace" \
 #     -e DEEPSEEK_API_KEY \
-#     ghcr.io/freire19/alpha-code "What does this repo do?"
+#     mythos "audit this codebase for vulns"
 #
 # Mounting the host workspace into `/workspace` lets Alpha read/write
 # the user's project. The container's own filesystem is ephemeral
@@ -57,21 +57,21 @@ RUN apt-get update \
 
 # Non-root user so the agent can't trivially write to system paths
 # even if a tool slips past the approval gate.
-RUN useradd --create-home --shell /bin/bash --uid 1000 alpha
+RUN useradd --create-home --shell /bin/bash --uid 1000 mythos
 
 WORKDIR /workspace
-RUN chown alpha:alpha /workspace
+RUN chown mythos:mythos /workspace
 
 COPY --from=builder /build/dist/*.whl /tmp/
 RUN pip install --no-cache-dir /tmp/*.whl && rm /tmp/*.whl
 
-USER alpha
+USER mythos
 
 # Disable color when stdout isn't a TTY so piped output stays grep-friendly.
-# Alpha already checks `sys.stdout.isatty()` via supports_color, this is
+# Mythos already checks `sys.stdout.isatty()` via supports_color, this is
 # just a belt-and-suspenders default for non-interactive `docker run`.
 ENV PYTHONUNBUFFERED=1 \
     NO_COLOR=
 
-ENTRYPOINT ["alpha"]
+ENTRYPOINT ["mythos"]
 CMD ["--help"]

@@ -12,6 +12,7 @@
 prompts/system.md               merge=ours
 alpha/prompts/system.md         merge=ours
 alpha/prompts/subagent.md       merge=ours
+tests/snapshots/system_prompt.md merge=ours
 ALPHA.md                        merge=ours
 README.md                       merge=ours
 docs/USER_GUIDE.md              merge=ours
