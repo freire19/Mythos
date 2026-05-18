@@ -701,6 +701,27 @@ def _handle_accept_edits(ctx: ReplContext, parts: list[str]) -> DispatchResult:
     return DispatchResult.CONTINUE
 
 
+def _handle_sandbox(ctx: ReplContext, parts: list[str]) -> DispatchResult:
+    """`/sandbox` — print the active sandbox state for destructive shell tools."""
+    from alpha import sandbox as _sandbox
+
+    print(f"  {c(C.CYAN, _sandbox.describe())}")
+    cfg = _sandbox.load_config()
+    if cfg.enabled:
+        print(c(C.GRAY, f"  tool={cfg.tool}  deny_network={cfg.deny_network}"))
+        if cfg.extra_args:
+            print(c(C.GRAY, f"  extra_args={cfg.extra_args}"))
+    else:
+        print(
+            c(
+                C.GRAY,
+                "  Configure under \"sandbox\" in .alpha/settings.json, "
+                "or set ALPHA_SANDBOX=1 for the current session.",
+            )
+        )
+    return DispatchResult.CONTINUE
+
+
 def _handle_help(ctx: ReplContext, parts: list[str]) -> DispatchResult:
     print(f"  {c(C.CYAN, '/init')}     — Draft an ALPHA.md for this project")
     print(f"  {c(C.CYAN, '/clear')}    — Clear history and screen")
@@ -721,6 +742,7 @@ def _handle_help(ctx: ReplContext, parts: list[str]) -> DispatchResult:
     print(f"  {c(C.CYAN, '/agents')}   — List named agents")
     print(f"  {c(C.CYAN, '/agent')}    — Show/switch active agent")
     print(f"  {c(C.CYAN, '/model')}    — Show/switch provider & model")
+    print(f"  {c(C.CYAN, '/sandbox')}  — Show sandbox state for destructive shell tools")
     print(f"  {c(C.CYAN, '/<skill>')}  — Invoke a skill by name (e.g. /skill-creator)")
     print(f"  {c(C.CYAN, '/exit')}     — Exit")
     return DispatchResult.CONTINUE
@@ -753,6 +775,7 @@ _DISPATCH: dict[str, Callable[[ReplContext, list[str]], DispatchResult]] = {
     "/cost": _handle_cost,
     "/stats": _handle_stats,
     "/memory": _handle_memory,
+    "/sandbox": _handle_sandbox,
 }
 
 

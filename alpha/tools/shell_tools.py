@@ -37,6 +37,8 @@ async def _execute_shell_windows(command: str, cwd: str, timeout: int) -> dict:
     Injection vem so da string do comando, ja validada via HARD_BLOCKED_RE.
     """
     try:
+        # Sandbox flag isn't applied on Windows — firejail/bubblewrap are
+        # Linux-only. Documented in alpha/sandbox.py.
         r = await run_subprocess_safe(
             "cmd.exe", "/c", command, timeout=timeout, cwd=cwd,
         )
@@ -137,7 +139,7 @@ async def _execute_shell(command: str, cwd: str = None, timeout: int | None = No
                 try:
                     r = await run_subprocess_safe(
                         *seg_parts, timeout=timeout, cwd=cwd,
-                        stdin=prev_output,
+                        stdin=prev_output, sandbox=True,
                     )
                 except SubprocessTimeoutError:
                     return {
@@ -156,7 +158,7 @@ async def _execute_shell(command: str, cwd: str = None, timeout: int | None = No
         else:
             try:
                 r = await run_subprocess_safe(
-                    *cmd_parts, timeout=timeout, cwd=cwd,
+                    *cmd_parts, timeout=timeout, cwd=cwd, sandbox=True,
                 )
             except SubprocessTimeoutError:
                 return {

@@ -172,6 +172,31 @@ python main.py --list-providers
 /sessions    List saved sessions
 ```
 
+## Sandbox (optional, Linux)
+
+For higher-risk workflows, opt destructive shell commands into a
+`firejail` or `bubblewrap` sandbox via `.alpha/settings.json`:
+
+```json
+{
+  "sandbox": {
+    "enabled": true,
+    "tool": "auto",
+    "deny_network": true,
+    "extra_args": []
+  }
+}
+```
+
+`tool` accepts `auto` (firejail preferred, bubblewrap fallback),
+`firejail`, or `bubblewrap`. With `deny_network: true` the sandboxed
+command can't reach the network — useful for blast-radius reduction
+on untrusted code, expected to break installers and curl-based fetches.
+Install the backend you want: `sudo apt install firejail` (or
+`bubblewrap`). The `/sandbox` REPL command prints the active state.
+
+Override per-session without editing settings: `ALPHA_SANDBOX=1 alpha ...`.
+
 ## Managing skills
 
 Install, list, update, and remove skills from git repos or local paths:
