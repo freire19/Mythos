@@ -1,0 +1,18 @@
+# Pure-identity files — sempre mantem a versao do Mythos em merges do upstream Alpha_Code.
+#
+# Requer (uma vez por clone, nao vai pro repo):
+#   git config merge.ours.driver true
+#
+# Arquivos com brand-only conflitam 100% das vezes em pontos que NUNCA queremos do upstream
+# (persona, README, ALPHA.md de casa, changelog do release-please, configs de release).
+#
+# main.py e pyproject.toml NAO estao aqui de proposito — sao 95% logica compartilhada com
+# o upstream e so ~1 linha de branding cada. Quando conflitar, vale revisar manual.
+
+prompts/system.md               merge=ours
+ALPHA.md                        merge=ours
+README.md                       merge=ours
+docs/USER_GUIDE.md              merge=ours
+CHANGELOG.md                    merge=ours
+.release-please-manifest.json   merge=ours
+release-please-config.json      merge=ours
