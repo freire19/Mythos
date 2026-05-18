@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.11.0](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.10.0...alpha-code-v1.11.0) (2026-05-18)
+
+
+### Features
+
+* cross-session memory — H2 [#10](https://github.com/freire19/Alpha_Code/issues/10) phase 1 ([34c5bbd](https://github.com/freire19/Alpha_Code/commit/34c5bbd93777ab0c2ee116aead65eba49843fce6))
+* session replay CLI (replay phase 2) — H2 [#9](https://github.com/freire19/Alpha_Code/issues/9) ([423f8b8](https://github.com/freire19/Alpha_Code/commit/423f8b852b890e91117e3e9b0575b16281a079de))
+
 ## [1.10.0](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.9.0...alpha-code-v1.10.0) (2026-05-18)
 
 
