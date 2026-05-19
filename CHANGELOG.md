@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.18.0](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.17.0...alpha-code-v1.18.0) (2026-05-19)
+
+
+### Features
+
+* bundle built-in agents inside the wheel — pipx UX gap ([813309e](https://github.com/freire19/Alpha_Code/commit/813309e94b557119fa6522f9a52c7fa2bdaf909a))
+
 ## [1.17.0](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.16.0...alpha-code-v1.17.0) (2026-05-19)
 
 
