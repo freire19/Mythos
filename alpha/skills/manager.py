@@ -32,6 +32,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
 
+from .._json_utils import load_json_file
+
 USER_SKILLS_DIR = Path.home() / ".alpha" / "skills"
 INSTALLED_INDEX = USER_SKILLS_DIR / ".installed.json"
 
@@ -93,15 +95,10 @@ def parse_source(source: str) -> ParsedSource:
 
 
 def _load_index() -> dict[str, dict]:
-    if not INSTALLED_INDEX.exists():
-        return {}
-    try:
-        return json.loads(INSTALLED_INDEX.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        # Corrupt index — preserve the bad file for forensics, start fresh.
-        # The user can still `alpha skills install` again; the on-disk
-        # skill dirs survive whether the index is valid or not.
-        return {}
+    # Silent fallback: a corrupt index is preserved on disk for forensics,
+    # and the user can rebuild it with `alpha skills install`. The on-disk
+    # skill dirs survive whether the index is valid or not.
+    return load_json_file(INSTALLED_INDEX, default={})
 
 
 def _save_index(index: dict[str, dict]) -> None:

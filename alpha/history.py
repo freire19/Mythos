@@ -14,6 +14,8 @@ import secrets
 import time
 from pathlib import Path
 
+from ._json_utils import load_json_file
+
 # Session IDs come from `generate_session_id()` (timestamp_hex8) but the REPL
 # also accepts user input via `/load <id>`. Without validation, an id like
 # `../etc/passwd` resolves outside ~/.alpha_code/history/ — read or overwrite
@@ -285,50 +287,32 @@ def save_session(
     return path
 
 
-def load_session(session_id: str) -> list[dict] | None:
-    """
-    Load conversation messages from disk.
+def _load_session_data(session_id: str, caller: str) -> dict | None:
+    """Read the on-disk JSON for a session, returning None on any failure.
 
-    Returns message list or None if not found, or if the id is invalid
-    (path traversal attempt — logged but not raised so the REPL doesn't
-    crash on a bad ``/load`` input).
+    Invalid ids log a warning instead of raising so the REPL doesn't crash
+    on a bad ``/load`` input.
     """
     try:
         path = _session_path(session_id)
     except InvalidSessionId as e:
-        logger.warning(f"load_session refused invalid id: {e}")
+        logger.warning(f"{caller} refused invalid id: {e}")
         return None
     if not path.exists():
         return None
+    return load_json_file(path, default=None, logger=logger)
 
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        return data.get("messages", [])
-    except (json.JSONDecodeError, KeyError, UnicodeDecodeError, OSError) as e:
-        logger.warning(f"Failed to load session {session_id}: {e}")
-        return None
+
+def load_session(session_id: str) -> list[dict] | None:
+    """Load conversation messages from disk. Returns None if not found."""
+    data = _load_session_data(session_id, "load_session")
+    return None if data is None else data.get("messages", [])
 
 
 def load_session_summary(session_id: str) -> str | None:
-    """
-    Load just the session summary for lightweight resume.
-
-    Returns summary string or None if not found / invalid id.
-    """
-    try:
-        path = _session_path(session_id)
-    except InvalidSessionId as e:
-        logger.warning(f"load_session_summary refused invalid id: {e}")
-        return None
-    if not path.exists():
-        return None
-
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        return data.get("summary")
-    except (json.JSONDecodeError, KeyError) as e:
-        logger.warning(f"Failed to load session summary {session_id}: {e}")
-        return None
+    """Load just the session summary for lightweight resume."""
+    data = _load_session_data(session_id, "load_session_summary")
+    return None if data is None else data.get("summary")
 
 
 def get_last_session_id() -> str | None:
