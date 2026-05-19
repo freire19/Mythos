@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.19.0](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.18.1...alpha-code-v1.19.0) (2026-05-19)
+
+
+### Features
+
+* pre_flight cards — strategy approval before tool batches (slice 1) ([1ce5697](https://github.com/freire19/Alpha_Code/commit/1ce5697f5490a702f6709e0aa43e7141012c10e4))
+
+
+### Documentation
+
+* RFC for pre-flight cards — strategy approval before execution ([0992056](https://github.com/freire19/Alpha_Code/commit/099205685ceb7a94dc1bb9844d01c55384dff117))
+
 ## [1.18.1](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.18.0...alpha-code-v1.18.1) (2026-05-19)
 
 
