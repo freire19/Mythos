@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.17.0](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.16.0...alpha-code-v1.17.0) (2026-05-19)
+
+
+### Features
+
+* standalone binary via PyInstaller — Plano-v3 §4 Tier 2 ([a95a867](https://github.com/freire19/Alpha_Code/commit/a95a867dbcd9a29011fa178e33e4ac367a6ac118))
+
 ## [1.16.0](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.15.0...alpha-code-v1.16.0) (2026-05-19)
 
 
