@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.16.0](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.15.0...alpha-code-v1.16.0) (2026-05-19)
+
+
+### Features
+
+* PyPI Tier 1 — dotenv discovery + project metadata — Plano-v3 §4 ([c584013](https://github.com/freire19/Alpha_Code/commit/c5840133dbc597a48224b22b8dbd9df6bd9eba20))
+* wire firejail/bwrap sandbox into execute_python — Plano-v3 §1.3 ([bf5d5b8](https://github.com/freire19/Alpha_Code/commit/bf5d5b88a37291e960ce790697a73e3ff9370994))
+
+
+### Refactoring
+
+* centralize tolerant JSON file reads — Plano-v3 §2.3 ([1268f20](https://github.com/freire19/Alpha_Code/commit/1268f20c33eb12d52a3b6f9efe9217f58ea2a6c5))
+
 ## [1.15.0](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.14.0...alpha-code-v1.15.0) (2026-05-18)
 
 
