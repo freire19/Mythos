@@ -98,6 +98,9 @@ def print_approval_request(tool_name: str, args: dict) -> bool:
 
     if tool_name == "present_plan":
         _print_plan_card(args)
+    elif tool_name == "pre_flight":
+        from .planning import _print_preflight_card
+        _print_preflight_card(args)
     else:
         print()
         print(f"  {c(C.RED + C.BOLD, '┌─ APROVAÇÃO NECESSÁRIA ─────────────────────')}")

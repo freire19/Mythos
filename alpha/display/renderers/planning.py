@@ -46,3 +46,71 @@ def _print_plan_card(args: dict) -> None:
             text = text[:DISPLAY_PROMPT_VALUE_TRUNCATE - 3] + "..."
         print(f"  {c(C.YELLOW, '│')} {c(C.GRAY, f'{i:>2}.')} {text}")
     print(f"  {c(C.YELLOW + C.BOLD, '└──────────────────────────────────────')}")
+
+
+_CONFIDENCE_COLOR = {
+    "high": C.GREEN,
+    "medium": C.YELLOW,
+    "low": C.RED_DARK,
+}
+
+
+def _print_preflight_card(args: dict) -> None:
+    """Pretty-print a pre_flight strategy approval card.
+
+    Distinct from _print_plan_card because pre_flight carries quantified
+    cost/time and structured per-step rows. Same visual family (yellow
+    box) so the user reads them as variants of the same "review before
+    execute" gesture.
+    """
+    from ...preflight import estimate_step_cost, estimate_step_time
+
+    goal = str(args.get("goal", ""))
+    steps = args.get("steps", []) or []
+    alts = args.get("alternatives_rejected", []) or []
+    confidence = str(args.get("confidence", "medium"))
+    model = str(args.get("model", "") or "")
+    total_cost = 0.0
+    total_time = 0.0
+
+    print()
+    print(f"  {c(C.YELLOW + C.BOLD, '┌─ PRE-FLIGHT ────────────────────────────────────────')}")
+    print(f"  {c(C.YELLOW, '│')} {c(C.WHITE + C.BOLD, 'Goal:')} {goal}")
+    print(f"  {c(C.YELLOW, '│')}")
+    print(f"  {c(C.YELLOW, '│')} {c(C.WHITE + C.BOLD, 'Planned')} {c(C.GRAY, f'({len(steps)} tool(s)):')}")
+    for i, step in enumerate(steps, start=1):
+        if not isinstance(step, dict):
+            continue
+        tool = str(step.get("tool", ""))
+        preview = str(step.get("args_preview", ""))
+        if len(preview) > 40:
+            preview = preview[:37] + "..."
+        cost = estimate_step_cost(tool, str(step.get("args_preview", "")), model)
+        time_s = estimate_step_time(tool)
+        total_cost += cost
+        total_time += time_s
+        cost_str = f"${cost:.4f}" if cost else "  ~$?"
+        line = f"{i:>2}. {tool:<22} {c(C.GRAY, preview):<40}"
+        meta = c(C.GRAY, f"{cost_str:>7} {time_s:>5.1f}s")
+        print(f"  {c(C.YELLOW, '│')}   {line}  {meta}")
+
+    if alts:
+        print(f"  {c(C.YELLOW, '│')}")
+        print(f"  {c(C.YELLOW, '│')} {c(C.GRAY, 'Rejected:')}")
+        for alt in alts:
+            if not isinstance(alt, dict):
+                continue
+            approach = str(alt.get("approach", ""))
+            why = str(alt.get("why_rejected", ""))
+            line = f"✗ {approach}" + (f" — {why}" if why else "")
+            print(f"  {c(C.YELLOW, '│')}   {c(C.GRAY, line)}")
+
+    conf_color = _CONFIDENCE_COLOR.get(confidence, C.YELLOW)
+    print(f"  {c(C.YELLOW, '│')}")
+    print(
+        f"  {c(C.YELLOW, '│')} "
+        f"{c(C.WHITE + C.BOLD, 'Total:')} "
+        f"~${total_cost:.4f}  ~{total_time:.0f}s   "
+        f"{c(C.GRAY, 'confidence:')} {c(conf_color, confidence)}"
+    )
+    print(f"  {c(C.YELLOW + C.BOLD, '└─────────────────────────────────────────────────────')}")
