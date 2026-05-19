@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.20.0](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.19.0...alpha-code-v1.20.0) (2026-05-19)
+
+
+### Features
+
+* pre_flight slice 2 — enforcement + session cap + feedback log ([cf0c034](https://github.com/freire19/Alpha_Code/commit/cf0c034b6ddc380d7425b2d40b9a1a53c01f7456))
+
 ## [1.19.0](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.18.1...alpha-code-v1.19.0) (2026-05-19)
 
 
