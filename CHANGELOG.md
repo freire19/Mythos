@@ -1,5 +1,39 @@
 # Changelog
 
+## [1.18.1](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.18.0...alpha-code-v1.18.1) (2026-05-19)
+
+
+### Refactoring
+
+* /simplify pass on bundled-agents commit ([14828b6](https://github.com/freire19/Alpha_Code/commit/14828b6b0bc49a6e22af47675582e88bd7f911e6))
+
+## [1.18.0](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.17.0...alpha-code-v1.18.0) (2026-05-19)
+
+
+### Features
+
+* bundle built-in agents inside the wheel — pipx UX gap ([813309e](https://github.com/freire19/Alpha_Code/commit/813309e94b557119fa6522f9a52c7fa2bdaf909a))
+
+## [1.17.0](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.16.0...alpha-code-v1.17.0) (2026-05-19)
+
+
+### Features
+
+* standalone binary via PyInstaller — Plano-v3 §4 Tier 2 ([a95a867](https://github.com/freire19/Alpha_Code/commit/a95a867dbcd9a29011fa178e33e4ac367a6ac118))
+
+## [1.16.0](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.15.0...alpha-code-v1.16.0) (2026-05-19)
+
+
+### Features
+
+* PyPI Tier 1 — dotenv discovery + project metadata — Plano-v3 §4 ([c584013](https://github.com/freire19/Alpha_Code/commit/c5840133dbc597a48224b22b8dbd9df6bd9eba20))
+* wire firejail/bwrap sandbox into execute_python — Plano-v3 §1.3 ([bf5d5b8](https://github.com/freire19/Alpha_Code/commit/bf5d5b88a37291e960ce790697a73e3ff9370994))
+
+
+### Refactoring
+
+* centralize tolerant JSON file reads — Plano-v3 §2.3 ([1268f20](https://github.com/freire19/Alpha_Code/commit/1268f20c33eb12d52a3b6f9efe9217f58ea2a6c5))
+
 ## [1.15.0](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.14.0...alpha-code-v1.15.0) (2026-05-18)
 
 

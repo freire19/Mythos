@@ -1,9 +1,12 @@
 """Tests for configuration system."""
 
 import os
+from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
+from alpha import config
 from alpha.config import FEATURES, get_available_providers, get_provider_config, load_system_prompt
 
 
@@ -66,3 +69,53 @@ class TestProviderVisionFlag:
         monkeypatch.setenv("OPENAI_API_KEY", "test")
         cfg = get_provider_config("openai")
         assert cfg["vision_format"] == "openai"
+
+
+class TestDotenvDiscovery:
+    """§4 PyPI prep: .env must be discoverable when alpha is installed via
+    pipx (no _PROJECT_ROOT/.env in site-packages). Discovery order is
+    repo .env → ~/.alpha/.env → CWD .env, with later sources overriding."""
+
+    def test_cwd_env_overrides_user_home(self, tmp_path, monkeypatch):
+        home = tmp_path / "home"
+        cwd = tmp_path / "cwd"
+        (home / ".alpha").mkdir(parents=True)
+        cwd.mkdir()
+        (home / ".alpha" / ".env").write_text("ALPHA_TEST_VAR=from_home\n")
+        (cwd / ".env").write_text("ALPHA_TEST_VAR=from_cwd\n")
+
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.chdir(cwd)
+        monkeypatch.delenv("ALPHA_TEST_VAR", raising=False)
+
+        loaded = config._load_env_files()
+        assert os.environ.get("ALPHA_TEST_VAR") == "from_cwd"
+        # Both files were loaded — the override semantics are what made CWD win.
+        assert any(p.name == ".env" and p.parent == cwd for p in loaded)
+
+    def test_missing_env_is_silent(self, tmp_path, monkeypatch):
+        """No .env anywhere = no crash, no error. The 12-factor path where
+        all config comes from env vars must keep working."""
+        home = tmp_path / "home"
+        cwd = tmp_path / "cwd"
+        home.mkdir()
+        cwd.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.chdir(cwd)
+
+        loaded = config._load_env_files()
+        # Only thing we might find is the dev repo's own .env — anything
+        # under tmp_path was empty. Confirm we didn't crash and got a list.
+        assert isinstance(loaded, list)
+
+    def test_search_paths_include_home_alpha(self, monkeypatch, tmp_path):
+        """~/.alpha/.env is the recommended location for pipx users; it
+        must appear in the search chain."""
+        monkeypatch.setenv("HOME", str(tmp_path))
+        paths = config._dotenv_search_paths()
+        assert tmp_path / ".alpha" / ".env" in paths
+
+    def test_search_paths_include_cwd(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        paths = config._dotenv_search_paths()
+        assert tmp_path / ".env" in paths

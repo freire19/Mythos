@@ -12,11 +12,11 @@ Two helpers:
 
 from __future__ import annotations
 
-import json
 import logging
 from pathlib import Path
 from typing import Any
 
+from ._json_utils import load_json_file
 from .config import _PROJECT_ROOT
 
 logger = logging.getLogger(__name__)
@@ -51,10 +51,4 @@ def find_config_file(filename: str) -> Path | None:
 
 def read_json(path: Path | None, default: Any = None) -> Any:
     """Read a JSON file. Returns `default` if the path is None, missing, or invalid."""
-    if path is None:
-        return default
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as e:
-        logger.warning("Failed to read %s: %s", path, e)
-        return default
+    return load_json_file(path, default, logger=logger)

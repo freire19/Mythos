@@ -199,8 +199,15 @@ async def _execute_python(code: str, timeout: int | None = None) -> dict:
             f.flush()
             script_path = f.name
         try:
+            # sandbox=True respects the user's `.alpha/settings.json` setting:
+            # passthrough when disabled, firejail/bwrap wrap when enabled. The
+            # static import blocklist above (_validate_code_safety) is regex-
+            # based and bypassable via obfuscation (chr(), getattr, etc.) —
+            # the sandbox is defense-in-depth at the kernel level (no network,
+            # private /tmp) for users who opted in to higher-risk workflows.
             r = await run_subprocess_safe(
                 sys.executable, "-u", script_path, timeout=timeout,
+                sandbox=True,
             )
         except SubprocessTimeoutError:
             return {

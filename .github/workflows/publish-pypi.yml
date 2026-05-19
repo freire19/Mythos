@@ -1,0 +1,86 @@
+# Publish to PyPI when release-please cuts a tag (Plano-v3 §4 Tier 1).
+#
+# Trigger: tags shaped `alpha-code-v*` (release-please's format —
+# already proven by alpha-code-v1.16.0). Each merged release PR
+# creates one tag, which fires this workflow exactly once per release.
+#
+# Auth: OIDC "trusted publishing" — no API token stored as a secret.
+# One-time setup on pypi.org before the first release lands:
+#
+#   1. Sign in at pypi.org and reserve the `alpha-code` name (upload
+#      any 0.0.0 placeholder, OR add as pending publisher first then
+#      let this workflow create the first real release).
+#   2. Go to https://pypi.org/manage/project/alpha-code/settings/publishing/
+#      (or /manage/account/publishing/ if reserving the name via
+#      "pending publisher").
+#   3. Add a publisher with:
+#        Owner:          freire19
+#        Repository:     Alpha_Code
+#        Workflow:       publish-pypi.yml
+#        Environment:    (leave blank — no protected environment here)
+#   4. Save. The first successful run from this workflow promotes
+#      the pending publisher to a verified trusted publisher.
+#
+# Why OIDC over API token: tokens require rotation, can leak via
+# logs/forks/maintainer departure. Trusted publishing scopes tokens
+# to one workflow + one repo and re-issues them per run.
+
+name: publish-pypi
+
+on:
+  push:
+    tags:
+      - 'alpha-code-v*'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build wheel + sdist
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install build tooling
+        run: |
+          python -m pip install --upgrade pip
+          pip install build
+
+      - name: Build distributions
+        run: python -m build
+
+      - name: Upload dist artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-distributions
+          path: dist/
+          if-no-files-found: error
+
+  publish:
+    name: Upload to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    # `id-token: write` is the entire point — it lets gh-action-pypi-publish
+    # mint a short-lived OIDC token that PyPI accepts via trusted publishing.
+    permissions:
+      id-token: write
+    steps:
+      - name: Download dist artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: python-distributions
+          path: dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        # No `with:` block needed — the action defaults to PyPI (not TestPyPI)
+        # and reads dist/ for distributions. OIDC is automatic when the job
+        # has `id-token: write` and the repo is configured as a trusted
+        # publisher on PyPI.

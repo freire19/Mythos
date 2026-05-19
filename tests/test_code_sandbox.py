@@ -236,3 +236,77 @@ class TestSafeCodeStillPassesAfterV12:
         assert _validate_code_safety(code) is None, (
             f"Legitimate code blocked: {code!r}"
         )
+
+
+class TestExecutePythonHonorsSandbox:
+    """The static blocklist above is regex-based and bypassable via
+    obfuscation (`__import__(chr(111)+chr(115))`, `getattr(__builtins__, ...)`).
+    When the user opts into the firejail/bwrap sandbox, execute_python must
+    pass `sandbox=True` to `run_subprocess_safe` so kernel-level isolation
+    kicks in. Without this wiring, sandbox.enabled=True silently leaves
+    arbitrary Python execution unsandboxed."""
+
+    @pytest.mark.asyncio
+    async def test_execute_python_passes_sandbox_true(self, monkeypatch):
+        """The wiring contract: every call to run_subprocess_safe from
+        _execute_python must carry sandbox=True."""
+        calls: list[dict] = []
+
+        class FakeResult:
+            returncode = 0
+            stdout = b""
+            stderr = b""
+
+        async def fake_run(*args, **kwargs):
+            calls.append(kwargs)
+            return FakeResult()
+
+        monkeypatch.setattr(
+            "alpha.tools.code_tools.run_subprocess_safe", fake_run
+        )
+
+        from alpha.tools.code_tools import _execute_python
+
+        result = await _execute_python("print('hi')")
+        assert "error" not in result, result
+        assert calls, "run_subprocess_safe was not called"
+        assert calls[0].get("sandbox") is True, (
+            f"sandbox=True missing from call: {calls[0]}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_execute_python_surfaces_sandbox_unavailable(
+        self, tmp_path, monkeypatch
+    ):
+        """When the user has sandbox enabled but no backend is installed,
+        the SandboxUnavailableError must surface in the tool result so
+        the agent (and the user via the approval prompt) sees a real
+        explanation instead of a silent unsandboxed execution."""
+        from alpha import sandbox
+
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("ALPHA_SANDBOX", "1")
+        monkeypatch.setattr(sandbox, "resolve_tool", lambda _: None)
+
+        from alpha.tools.code_tools import _execute_python
+
+        result = await _execute_python("print('hi')")
+        assert "error" in result
+        assert "sandbox" in result["error"].lower()
+
+    @pytest.mark.asyncio
+    async def test_execute_python_passthrough_when_sandbox_disabled(
+        self, tmp_path, monkeypatch
+    ):
+        """Sandbox disabled = sandbox=True is a no-op in run_subprocess_safe.
+        The code still runs natively, preserving the existing UX for users
+        who never opted in."""
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.delenv("ALPHA_SANDBOX", raising=False)
+
+        from alpha.tools.code_tools import _execute_python
+
+        result = await _execute_python("print(2 + 2)")
+        assert "error" not in result, result
+        assert result["exit_code"] == 0
+        assert "4" in result["stdout"]

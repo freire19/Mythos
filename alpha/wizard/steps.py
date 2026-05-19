@@ -7,9 +7,19 @@ from pathlib import Path
 from ..display import C, c
 from .prompts import ask, ask_choice, ask_secret, ask_yes_no
 
-from ..config import _PROJECT_ROOT, _PROVIDERS as _CONFIG_PROVIDERS
+from ..config import _PROVIDERS as _CONFIG_PROVIDERS
+from ..settings import alpha_user_dir
 
-_AGENTS_DIR = _PROJECT_ROOT / "agents"
+
+def _agents_dir() -> Path:
+    """User-scope agent profiles. Pre-1.18 this pointed at _PROJECT_ROOT/
+    agents, which broke for pipx installs (site-packages is read-only).
+    Built-in defaults ship bundled at alpha/data/agents/ via the registry;
+    the wizard only writes net-new ones.
+
+    Resolved per call so tests that monkeypatch HOME after import see the
+    patched location."""
+    return alpha_user_dir("agents")
 
 # #086: derivar do config.py em vez de duplicar. Wizard mostrava lista
 # desatualizada (4 entries) com modelo default divergente (qwen2.5-coder:14b
@@ -70,7 +80,7 @@ def step_create_agent(provider: dict, model: str, workspace: str) -> Path | None
         return None
 
     name = name.strip().replace(" ", "-").lower()
-    target_dir = _AGENTS_DIR / name
+    target_dir = _agents_dir() / name
     target_file = target_dir / "agent.yaml"
 
     if target_file.exists():
