@@ -143,8 +143,8 @@ class TestSessionCap:
     async def test_aborts_when_session_cost_above_cap(self, monkeypatch):
         # Inject already-spent session cost above the cap.
         monkeypatch.setattr(
-            "alpha.agent._cost_session_summary",
-            lambda: {"cost_usd": 1.5},
+            "alpha.agent.session_cost_usd",
+            lambda: 1.5,
         )
         monkeypatch.setenv("ALPHA_MAX_SESSION_COST_USD", "1.0")
         monkeypatch.setenv("DEEPSEEK_API_KEY", "test")
@@ -171,8 +171,8 @@ class TestSessionCap:
     @pytest.mark.asyncio
     async def test_passes_when_under_cap(self, monkeypatch):
         monkeypatch.setattr(
-            "alpha.agent._cost_session_summary",
-            lambda: {"cost_usd": 0.05},
+            "alpha.agent.session_cost_usd",
+            lambda: 0.05,
         )
         monkeypatch.setenv("ALPHA_MAX_SESSION_COST_USD", "1.0")
         monkeypatch.setenv("DEEPSEEK_API_KEY", "test")
@@ -197,8 +197,8 @@ class TestSessionCap:
     async def test_no_cap_set_never_blocks(self, monkeypatch):
         monkeypatch.delenv("ALPHA_MAX_SESSION_COST_USD", raising=False)
         monkeypatch.setattr(
-            "alpha.agent._cost_session_summary",
-            lambda: {"cost_usd": 1_000_000.0},  # absurdly high
+            "alpha.agent.session_cost_usd",
+            lambda: 1_000_000.0,  # absurdly high
         )
         monkeypatch.setenv("DEEPSEEK_API_KEY", "test")
 
@@ -222,8 +222,8 @@ class TestSessionCap:
     async def test_malformed_cap_is_ignored(self, monkeypatch):
         monkeypatch.setenv("ALPHA_MAX_SESSION_COST_USD", "not-a-number")
         monkeypatch.setattr(
-            "alpha.agent._cost_session_summary",
-            lambda: {"cost_usd": 1_000_000.0},
+            "alpha.agent.session_cost_usd",
+            lambda: 1_000_000.0,
         )
         monkeypatch.setenv("DEEPSEEK_API_KEY", "test")
 

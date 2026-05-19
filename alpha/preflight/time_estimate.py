@@ -1,12 +1,13 @@
 """Heuristic time estimator for a planned tool call.
 
-Slice 1: hard-coded per-tool-family medians. Good enough to surface "this
-batch will take ~30s vs ~5min" on the approval card.
+Hard-coded per-tool-family medians — good enough to surface "this batch
+will take ~30s vs ~5min" on the approval card.
 
-Slice 2: read `~/.alpha/stats/tool_latency.jsonl` (already written by the
-existing `/stats` instrumentation in alpha/stats.py) to compute per-tool
-medians from actual usage, falling back to the defaults below for
-cold-start sessions.
+A future slice will read per-tool medians from this user's actual latency
+history; today `alpha/stats.py` keeps that data in memory only, so the
+on-disk source doesn't exist yet. When it does, replace the defaults
+below with a `~/.alpha/stats/tool_latency.jsonl` median lookup that
+falls back to these defaults for cold-start sessions.
 """
 
 from __future__ import annotations

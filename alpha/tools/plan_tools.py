@@ -92,14 +92,13 @@ async def _pre_flight(
     alternatives_rejected: list[Any] | None = None,
     model: str | None = None,
 ) -> dict[str, Any]:
-    """Emit a strategy approval card with cost + time estimates.
-
-    Model defaults to env-var lookup so a missing arg doesn't crash the
-    estimate — the worst case is unknown-model → $0.00 surfaced as `~$?`
-    on the card. Real model name comes from the agent loop wiring.
-    """
+    """Emit a strategy approval card with cost + time estimates."""
     from ..config import get_provider_config
-    from ..preflight import estimate_total_cost, estimate_total_time
+    from ..preflight import (
+        env_float,
+        estimate_step_cost,
+        estimate_step_time,
+    )
 
     if not isinstance(goal, str) or not goal.strip():
         return {"error": "goal is required"}
@@ -110,7 +109,23 @@ async def _pre_flight(
             "error": f"confidence must be one of {VALID_CONFIDENCE}, got {confidence!r}"
         }
 
-    normalized_steps: list[dict[str, str]] = []
+    # Best-effort model resolution — the worst case is unknown-model →
+    # $0.00 surfaced as `~$?` on the card.
+    if not model:
+        provider = os.environ.get("ALPHA_PROVIDER", "deepseek")
+        try:
+            model = get_provider_config(provider).get("model", "")
+        except Exception:
+            model = ""
+    model = model or ""
+
+    # Normalize steps AND attach per-step cost/time estimates here so
+    # the renderer doesn't have to re-run the estimators per step. Also
+    # guarantees the card total matches the per-step sum (no double-
+    # rounding drift between executor and renderer).
+    normalized_steps: list[dict[str, Any]] = []
+    estimated_cost_usd = 0.0
+    estimated_time_s = 0.0
     for i, raw in enumerate(steps, start=1):
         if not isinstance(raw, dict):
             return {"error": f"step[{i}] must be an object with 'tool' and 'args_preview'"}
@@ -119,9 +134,22 @@ async def _pre_flight(
         why = str(raw.get("why", "")).strip()
         if not tool:
             return {"error": f"step[{i}] missing 'tool'"}
-        normalized_steps.append(
-            {"tool": tool, "args_preview": args_preview, "why": why}
-        )
+        step_cost = estimate_step_cost(tool, args_preview, model)
+        step_time = estimate_step_time(tool)
+        estimated_cost_usd += step_cost
+        estimated_time_s += step_time
+        normalized_steps.append({
+            "tool": tool,
+            "args_preview": args_preview,
+            "why": why,
+            "cost_usd": step_cost,
+            "time_s": step_time,
+        })
+    # estimate_total_time adds one LLM round-trip per step on top of
+    # tool wall-clock — bake the same overhead in here so the card
+    # total matches what `estimate_total_time` would have returned.
+    from ..preflight.time_estimate import _LLM_TURN_OVERHEAD_S
+    estimated_time_s += _LLM_TURN_OVERHEAD_S * len(normalized_steps)
 
     normalized_alts: list[dict[str, str]] = []
     for raw in alternatives_rejected or []:
@@ -132,40 +160,20 @@ async def _pre_flight(
         if approach:
             normalized_alts.append({"approach": approach, "why_rejected": why_rejected})
 
-    # Best-effort model resolution. The agent loop will eventually pass
-    # `model` explicitly; until then derive from the active provider so
-    # estimates have a price source.
-    if not model:
-        provider = os.environ.get("ALPHA_PROVIDER", "deepseek")
-        try:
-            model = get_provider_config(provider).get("model", "")
-        except Exception:
-            model = ""
-
-    estimated_cost_usd = estimate_total_cost(normalized_steps, model or "")
-    estimated_time_s = estimate_total_time(normalized_steps)
-
-    # Budget cap: per-turn USD ceiling. Unset = no cap (current behavior).
-    # When the estimate exceeds the cap, surface a structured refusal
-    # the agent loop can recognize and act on (slice 1 just returns the
-    # error; slice 2 wires it into the loop to actually halt execution).
-    cap_raw = os.environ.get("ALPHA_MAX_TURN_COST_USD", "").strip()
-    if cap_raw:
-        try:
-            cap = float(cap_raw)
-        except ValueError:
-            cap = None
-        if cap is not None and estimated_cost_usd > cap:
-            return {
-                "error": "budget_cap_exceeded",
-                "estimated_cost_usd": round(estimated_cost_usd, 4),
-                "cap_usd": cap,
-                "message": (
-                    f"Pre-flight estimated ${estimated_cost_usd:.4f} but "
-                    f"ALPHA_MAX_TURN_COST_USD={cap} — turn aborted. Split "
-                    f"the task, raise the cap, or remove steps."
-                ),
-            }
+    # Per-turn USD ceiling. Unset = no cap. When the estimate exceeds
+    # the cap, surface a structured refusal the agent loop can act on.
+    cap = env_float("ALPHA_MAX_TURN_COST_USD")
+    if cap is not None and estimated_cost_usd > cap:
+        return {
+            "error": "budget_cap_exceeded",
+            "estimated_cost_usd": round(estimated_cost_usd, 4),
+            "cap_usd": cap,
+            "message": (
+                f"Pre-flight estimated ${estimated_cost_usd:.4f} but "
+                f"ALPHA_MAX_TURN_COST_USD={cap} — turn aborted. Split "
+                f"the task, raise the cap, or remove steps."
+            ),
+        }
 
     return {
         "approved": True,

@@ -12,11 +12,29 @@ once that path is implemented (out of scope for slice 1).
 
 from __future__ import annotations
 
+import os
+
 from .cost_estimate import estimate_step_cost, estimate_total_cost
 from .feedback import record_decision, summarize
 from .time_estimate import estimate_step_time, estimate_total_time
 
+
+def env_float(name: str) -> float | None:
+    """Read a float from an env var; return None when unset, empty, or
+    malformed. Used by per-turn and per-session budget caps that share
+    the same parse-or-ignore semantics — silently dropping a typo'd
+    cap is the documented behavior (RFC open question #2)."""
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return None
+    try:
+        return float(raw)
+    except ValueError:
+        return None
+
+
 __all__ = [
+    "env_float",
     "estimate_step_cost",
     "estimate_step_time",
     "estimate_total_cost",

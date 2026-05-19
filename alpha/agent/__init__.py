@@ -11,7 +11,8 @@ from collections.abc import AsyncGenerator
 
 from ..approval import is_denied, needs_approval
 from ..config import LOOP_DETECTION, MAX_ITERATIONS, get_provider_config  # noqa: F401 — LOOP_DETECTION re-exported for back-compat
-from ..cost import record_usage, session_summary as _cost_session_summary
+from ..cost import record_usage, session_cost_usd
+from ..preflight import env_float
 from ..stats import record_iteration
 
 import os as _os
@@ -30,7 +31,7 @@ from ..context import (
 )
 from ..executor import build_assistant_tool_message, execute_tool_calls
 from ..llm import stream_chat_with_tools
-from ..tools import ToolSafety
+from ..tools import ToolCategory, ToolSafety
 from .loop import (
     _call_signature,
     _CYCLE_WINDOW,
@@ -45,6 +46,35 @@ from .loop import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Pre-flight enforcement thresholds (Plano-v3 RFC slice 2). Module-scope
+# so tests can monkeypatch without reaching into closures.
+PREFLIGHT_REPROMPT_LIMIT = 1
+PREFLIGHT_REQUIRED_DESTRUCTIVE_COUNT = 2
+
+
+def _count_destructive_non_planning(
+    tool_calls: list[dict],
+    get_tool_fn,
+) -> int:
+    """Count tool calls that are DESTRUCTIVE and not in the PLANNING
+    category. Planning tools (pre_flight, present_plan, todo_write) are
+    DESTRUCTIVE only to force the approval gate — they don't mutate
+    state or cost real money, so they don't trigger the re-prompt rule.
+    """
+    n = 0
+    for tc in tool_calls:
+        name = tc.get("name", "")
+        try:
+            td = get_tool_fn(name)
+        except Exception:
+            td = None
+        if td is None or td.category == ToolCategory.PLANNING:
+            continue
+        if td.safety == ToolSafety.DESTRUCTIVE:
+            n += 1
+    return n
+
 
 async def run_agent(
     messages: list[dict],
@@ -105,12 +135,14 @@ async def run_agent(
 
     # Pre-flight enforcement counter (slice 2). Per-task, not per-iteration:
     # once we've re-prompted once we accept that the next planning attempt
-    # is the agent's final word and execute whatever it returns, even if
-    # it still skips pre_flight. Avoids infinite re-prompt loops on
-    # provider-side prompts that resist instruction.
+    # is the agent's final word and execute whatever it returns. Avoids
+    # infinite re-prompt loops on providers that resist instruction.
     _preflight_reprompts_this_task = 0
-    _PREFLIGHT_REPROMPT_LIMIT = 1
-    _PREFLIGHT_REQUIRED_DESTRUCTIVE_COUNT = 2
+
+    # Cache the session-cap parse once per task — env var doesn't change
+    # mid-run, and parsing it every iteration is wasted work when the
+    # env var is set (which is when the parse happens).
+    _session_cap_usd = env_float("ALPHA_MAX_SESSION_COST_USD")
 
     for iteration in range(iteration_limit):
         logger.info(f"Agent iteration {iteration + 1}/{iteration_limit}")
@@ -118,29 +150,22 @@ async def run_agent(
 
         # ── Session-wide budget cap (Plano-v3 pre-flight slice 2) ──
         # Per-turn cap is enforced inside the pre_flight tool (gates the
-        # batch before any tool fires). Session cap is enforced here so a
-        # long-running agent can't quietly accumulate cost across many
-        # turns each individually under the per-turn ceiling. Unset = no
-        # cap (preserves pre-1.19 behavior).
-        _session_cap = _os.environ.get("ALPHA_MAX_SESSION_COST_USD", "").strip()
-        if _session_cap:
-            try:
-                _cap_usd = float(_session_cap)
-            except ValueError:
-                _cap_usd = None
-            if _cap_usd is not None:
-                _spent = _cost_session_summary().get("cost_usd", 0.0)
-                if _spent >= _cap_usd:
-                    yield {
-                        "type": "error",
-                        "message": (
-                            f"Session cost ${_spent:.4f} reached "
-                            f"ALPHA_MAX_SESSION_COST_USD=${_cap_usd:.4f}. "
-                            f"Session aborted. Use /cost to inspect or "
-                            f"raise the cap and restart."
-                        ),
-                    }
-                    return
+        # batch before any tool fires). Session cap is enforced here so
+        # a long-running agent can't quietly accumulate cost across many
+        # turns each under the per-turn ceiling. Unset = no cap.
+        if _session_cap_usd is not None:
+            _spent = session_cost_usd()
+            if _spent >= _session_cap_usd:
+                yield {
+                    "type": "error",
+                    "message": (
+                        f"Session cost ${_spent:.4f} reached "
+                        f"ALPHA_MAX_SESSION_COST_USD=${_session_cap_usd:.4f}. "
+                        f"Session aborted. Use /cost to inspect or "
+                        f"raise the cap and restart."
+                    ),
+                }
+                return
 
         # ── Pre-call adaptive compression ──
         if needs_compression(messages, provider):
@@ -375,57 +400,48 @@ async def run_agent(
         # When the agent plans 2+ destructive tools in a turn without
         # calling pre_flight first, inject a synthetic user note asking
         # it to re-plan with pre_flight. Once per task — repeated misses
-        # fall through to execute as-is (the user gave us a clear signal
-        # this provider won't comply, no point looping).
+        # fall through to execute as-is (provider won't comply, no point
+        # looping).
         if (
-            _preflight_reprompts_this_task < _PREFLIGHT_REPROMPT_LIMIT
+            _preflight_reprompts_this_task < PREFLIGHT_REPROMPT_LIMIT
             and get_tool_fn is not None
+            and not any(
+                tc.get("name") == "pre_flight" for tc in final_event["tool_calls"]
+            )
         ):
-            tc_names = [tc.get("name", "") for tc in final_event["tool_calls"]]
-            if "pre_flight" not in tc_names:
-                n_destructive = 0
-                for name in tc_names:
-                    # Skip planning tools — they're DESTRUCTIVE only to
-                    # force the approval gate, not because they cost
-                    # anything or mutate state.
-                    if name in ("present_plan", "todo_write", "pre_flight"):
-                        continue
-                    try:
-                        td = get_tool_fn(name)
-                    except Exception:
-                        td = None
-                    if td and td.safety == ToolSafety.DESTRUCTIVE:
-                        n_destructive += 1
-                if n_destructive >= _PREFLIGHT_REQUIRED_DESTRUCTIVE_COUNT:
-                    # Preserve the assistant's text reasoning but DROP the
-                    # tool_calls — same pattern as loop detection above:
-                    # appending tool_calls without matching tool responses
-                    # would 400 the next provider request.
-                    if final_event.get("content"):
-                        messages.append({
-                            "role": "assistant",
-                            "content": final_event["content"],
-                        })
+            n_destructive = _count_destructive_non_planning(
+                final_event["tool_calls"], get_tool_fn
+            )
+            if n_destructive >= PREFLIGHT_REQUIRED_DESTRUCTIVE_COUNT:
+                # Preserve assistant's text reasoning but DROP the
+                # tool_calls — appending tool_calls without matching
+                # tool responses would 400 the next provider request
+                # (same pattern as loop detection above).
+                if final_event.get("content"):
                     messages.append({
-                        "role": "user",
-                        "content": (
-                            "[ALPHA SYSTEM NOTE] You planned "
-                            f"{n_destructive} destructive tool calls "
-                            "this turn without calling `pre_flight` "
-                            "first. Per the PLANNING rule in your "
-                            "system prompt, call `pre_flight(goal, "
-                            "steps, confidence)` now to show the user "
-                            "the strategy + cost estimate, then proceed "
-                            "with the planned tools after approval."
-                        ),
+                        "role": "assistant",
+                        "content": final_event["content"],
                     })
-                    _preflight_reprompts_this_task += 1
-                    logger.info(
-                        "pre_flight re-prompt fired at iteration %d "
-                        "(planned %d destructive tools, no pre_flight)",
-                        iteration + 1, n_destructive,
-                    )
-                    continue  # restart the iteration
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        "[ALPHA SYSTEM NOTE] You planned "
+                        f"{n_destructive} destructive tool calls "
+                        "this turn without calling `pre_flight` "
+                        "first. Per the PLANNING rule in your "
+                        "system prompt, call `pre_flight(goal, "
+                        "steps, confidence)` now to show the user "
+                        "the strategy + cost estimate, then proceed "
+                        "with the planned tools after approval."
+                    ),
+                })
+                _preflight_reprompts_this_task += 1
+                logger.info(
+                    "pre_flight re-prompt fired at iteration %d "
+                    "(planned %d destructive tools, no pre_flight)",
+                    iteration + 1, n_destructive,
+                )
+                continue  # restart the iteration
 
         # Process tool calls
         messages.append(

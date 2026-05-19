@@ -161,6 +161,14 @@ def reset_session() -> None:
     _session.reset()
 
 
+def session_cost_usd() -> float:
+    """Lightweight cost-only accessor for hot-path callers (agent loop's
+    session cap check). Skips the sorted by_model materialization that
+    `session_summary` does — at zero entries the overhead is real
+    because we call this on every iteration."""
+    return _session.total_cost_usd
+
+
 def session_summary() -> dict:
     """Return a structured snapshot for /cost and /stats."""
     return {

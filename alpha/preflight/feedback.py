@@ -17,29 +17,36 @@ import json
 import logging
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from ..settings import alpha_user_dir
 
 logger = logging.getLogger(__name__)
 
+# Decisions the user can take on a pre_flight card. Centralized as a
+# Literal so the producer (display/renderers/prompts.py) and the
+# consumer (this module + analytics) can't drift via typo'd strings.
+PreflightDecision = Literal[
+    "approve", "reject", "approve_all", "auto_approve", "eof", "interrupt"
+]
+
 _FEEDBACK_DIR = alpha_user_dir("memory")
 _FEEDBACK_PATH = _FEEDBACK_DIR / "preflight_feedback.jsonl"
-_FEEDBACK_ROTATE_LINES = 10_000
+# ~200 bytes per entry typical; 2 MB ≈ 10K entries. Rotating by size
+# is cheaper than counting lines and equivalent in practice.
+_FEEDBACK_ROTATE_BYTES = 2 * 1024 * 1024
+_GOAL_TRUNCATE = 200
 
 
 def _maybe_rotate(path: Path) -> None:
-    """Rotate when the log gets unwieldy. Cheap line-count via wc-style
-    walk so we don't load the whole file just to check size."""
+    """Rotate when the log exceeds _FEEDBACK_ROTATE_BYTES."""
     if not path.exists():
         return
     try:
         size = path.stat().st_size
     except OSError:
         return
-    # ~200 bytes per entry typical; 10K lines ≈ 2 MB. Rotating by size
-    # is cheaper than counting lines and equivalent in practice.
-    if size < 2 * 1024 * 1024:
+    if size < _FEEDBACK_ROTATE_BYTES:
         return
     backup = path.with_suffix(".jsonl.1")
     try:
@@ -121,7 +128,7 @@ def summarize(entries: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     }
 
 
-def record_decision(card: dict[str, Any], decision: str) -> None:
+def record_decision(card: dict[str, Any], decision: PreflightDecision) -> None:
     """Append a feedback entry.
 
     `card` is the dict the executor returned (`goal`, `steps`,
@@ -136,7 +143,7 @@ def record_decision(card: dict[str, Any], decision: str) -> None:
         entry = {
             "ts": time.time(),
             "decision": decision,
-            "goal": str(card.get("goal", ""))[:200],
+            "goal": str(card.get("goal", ""))[:_GOAL_TRUNCATE],
             "confidence": card.get("confidence"),
             "estimated_cost_usd": card.get("estimated_cost_usd"),
             "estimated_time_s": card.get("estimated_time_s"),
