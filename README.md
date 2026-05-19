@@ -20,6 +20,22 @@ Pure async Python, minimal dependencies (`httpx`, `python-dotenv`, `ddgs`, `pyya
 
 Requires Python ≥ 3.11.
 
+### From PyPI (recommended for end users)
+
+When the package is published, install globally with `pipx`:
+
+```bash
+pipx install alpha-code
+alpha --init        # one-time wizard: pick provider, set API key, workspace
+```
+
+`pipx` keeps Alpha and its dependencies isolated from your system Python.
+Configuration lives at `~/.alpha/.env` (API keys) and `~/.alpha/settings.json`
+(permissions, hooks). Project-local overrides in `./.env` and `./.alpha/`
+take precedence when present.
+
+### From source (contributors / unreleased changes)
+
 ```bash
 git clone <your-repo-url>/Alpha_Code.git
 cd Alpha_Code

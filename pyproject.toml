@@ -1,8 +1,33 @@
 [project]
 name = "alpha-code"
 version = "1.15.0"
-description = "Alpha Code — Standalone terminal agent"
+description = "Standalone terminal agent with multi-provider LLM support, MCP, and multi-agent delegation."
+readme = "README.md"
+license = { text = "MIT" }
 requires-python = ">=3.11"
+authors = [
+    { name = "Jonatas Freire", email = "eujonatasfreire@gmail.com" },
+]
+keywords = [
+    "llm", "agent", "terminal", "cli", "deepseek", "anthropic", "openai",
+    "mcp", "claude-code-alternative", "tool-calling",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development",
+    "Topic :: Software Development :: Code Generators",
+    "Topic :: Terminals",
+    "Typing :: Typed",
+]
 # DEEP_SECURITY #036: upper bounds em todas as deps. Sem cap, `pip install -U`
 # pode puxar uma major release com breaking changes ou CVE recem-introduzido
 # antes de termos chance de auditar. Cap por major + 1 segue o padrao de
@@ -58,6 +83,12 @@ dev = [
     # pip-audit pra detectar CVEs em CI / pre-release (#036).
     "pip-audit>=2.7,<3.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/freire19/Alpha_Code"
+Repository = "https://github.com/freire19/Alpha_Code"
+Issues = "https://github.com/freire19/Alpha_Code/issues"
+Changelog = "https://github.com/freire19/Alpha_Code/blob/master/CHANGELOG.md"
 
 [project.scripts]
 alpha = "main:main"

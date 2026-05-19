@@ -7,10 +7,34 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-# Load .env from project root (not CWD) so `alpha` works from any directory
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
-# 12-factor: env vars sao a fonte de verdade; .env so preenche faltantes.
-load_dotenv(_PROJECT_ROOT / ".env", override=False)
+
+
+def _dotenv_search_paths() -> list[Path]:
+    """Return .env paths in load order (later wins via override=True).
+
+    A pipx-installed user typically has no _PROJECT_ROOT/.env (it lives in
+    site-packages); ~/.alpha/.env is the recommended location for them.
+    """
+    return [
+        _PROJECT_ROOT / ".env",        # dev install (git clone + pip install -e .)
+        Path.home() / ".alpha" / ".env",  # per-user global (pipx default)
+        Path.cwd() / ".env",           # project-local override (closest to invocation)
+    ]
+
+
+def _load_env_files() -> list[Path]:
+    """Load every existing .env in the discovery chain. Returns paths loaded."""
+    loaded: list[Path] = []
+    for path in _dotenv_search_paths():
+        if path.is_file():
+            load_dotenv(path, override=True)
+            loaded.append(path)
+    return loaded
+
+
+# 12-factor: env vars are the source of truth; .env files only fill gaps.
+_load_env_files()
 
 # ─── Defaults ───
 
