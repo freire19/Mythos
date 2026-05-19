@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.21.1](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.21.0...alpha-code-v1.21.1) (2026-05-19)
+
+
+### Refactoring
+
+* /simplify pass on pre-flight feature (slices 1+2+2.5) ([6054e04](https://github.com/freire19/Alpha_Code/commit/6054e0452ae22bd539166a9c44c1c3642edc3df2))
+
 ## [1.21.0](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.20.0...alpha-code-v1.21.0) (2026-05-19)
 
 
