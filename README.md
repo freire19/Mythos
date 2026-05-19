@@ -178,8 +178,8 @@ python main.py --list-providers
 
 ## Sandbox (optional, Linux)
 
-For higher-risk workflows, opt destructive shell commands into a
-`firejail` or `bubblewrap` sandbox via `.alpha/settings.json`:
+For higher-risk workflows, opt destructive shell commands AND `execute_python`
+into a `firejail` or `bubblewrap` sandbox via `.alpha/settings.json`:
 
 ```json
 {
