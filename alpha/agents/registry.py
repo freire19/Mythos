@@ -14,16 +14,16 @@ from ..config import _PROJECT_ROOT  # #095: fonte unica
 from .loader import load_agent_file
 from .scope import AgentScope
 
-# Search order: bundled defaults → user-global → project-local override.
-# FileBackedRegistry indexes by name and the LAST source wins, so the
-# ordering below means project files override user files, which override
-# the bundled defaults. `package_data` resolves the bundled dir whether
-# the install is editable, wheel, or zipped — Path(__file__).parent.parent
-# would resolve to the wrong location inside non-editable site-packages.
+# Mythos's FileBackedRegistry is FIRST-wins (see _registry.py:57 — skips
+# names already loaded from an earlier path), so the order is user >
+# project > bundled fallback. Bundled lives last so users can override
+# default/lean/researcher by dropping a same-named agent.yaml under
+# ~/.alpha/agents/ or <project>/agents/. `package_data` resolves the
+# bundled dir whether the install is editable, wheel, or zipped.
 _SEARCH_PATHS = [
-    package_data("data", "agents"),
     Path.home() / ".alpha" / "agents",
     _PROJECT_ROOT / "agents",
+    package_data("data", "agents"),
 ]
 
 _registry: FileBackedRegistry[AgentScope] = FileBackedRegistry(
