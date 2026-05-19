@@ -111,6 +111,10 @@ include = ["alpha*"]
 # Without this, only .py files land in the wheel (H3 #13).
 [tool.setuptools.package-data]
 "alpha.prompts" = ["*.md"]
+# Bundle the built-in agent profiles (default/lean/researcher) so a
+# pipx-installed Alpha has them out-of-the-box without the user copying
+# anything into ~/.alpha/agents/.
+"alpha.data" = ["agents/**/*.yaml", "agents/**/*.md"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

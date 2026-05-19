@@ -7,9 +7,15 @@ from pathlib import Path
 from ..display import C, c
 from .prompts import ask, ask_choice, ask_secret, ask_yes_no
 
-from ..config import _PROJECT_ROOT, _PROVIDERS as _CONFIG_PROVIDERS
+from ..config import _PROVIDERS as _CONFIG_PROVIDERS
+from ..settings import alpha_user_dir
 
-_AGENTS_DIR = _PROJECT_ROOT / "agents"
+# User-scope agent profiles. Pre-1.18 this pointed at _PROJECT_ROOT/agents,
+# which broke for pipx installs (site-packages is read-only and the wrong
+# semantic place for user-created agents anyway). Built-in defaults still
+# ship bundled at alpha/data/agents/ and are picked up by the registry —
+# the wizard only writes net-new ones.
+_AGENTS_DIR = alpha_user_dir("agents")
 
 # #086: derivar do config.py em vez de duplicar. Wizard mostrava lista
 # desatualizada (4 entries) com modelo default divergente (qwen2.5-coder:14b
