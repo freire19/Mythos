@@ -107,6 +107,24 @@ docker run --rm -it \
 The mounted workspace is where Alpha reads/writes; anything outside
 the mount is ephemeral. The image runs as a non-root user.
 
+### Standalone binary (no Python at runtime)
+
+Build a single-file executable that ships its own Python interpreter,
+so end users can run `alpha` without installing Python or pipx at all.
+Useful for Windows users, locked-down environments, or distribution
+via GitHub Releases.
+
+```bash
+pip install -e ".[binary]"
+pyinstaller alpha.spec
+./dist/alpha --help
+```
+
+The resulting `dist/alpha` is ~20MB on Linux (~30MB compressed with
+`upx=True` in `alpha.spec`). It bundles the prompts and core deps
+but excludes the optional extras (`browser`, `multimodal`, etc.) to
+stay lean — users needing those install via `pipx` instead.
+
 ## Update
 
 Easiest path — the bundled updater handles pull + reinstall + diff of `.env.example`:
