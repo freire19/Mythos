@@ -208,6 +208,9 @@ python main.py --list-providers
 /audio PATH  Attach audio (transcribed via OpenAI Whisper)
 /clear       Clear conversation history
 /sessions    List saved sessions
+/cost        Token spend + estimated USD this session
+/stats       Iterations, tool latency, approval rate
+/preflight   Lifetime feedback on pre_flight cards (approve/reject mix)
 ```
 
 ## Sandbox (optional, Linux)

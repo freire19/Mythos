@@ -50,6 +50,77 @@ def _maybe_rotate(path: Path) -> None:
         logger.warning("preflight_feedback rotation failed: %s", e)
 
 
+def _read_entries(limit: int | None = None) -> list[dict[str, Any]]:
+    """Stream the feedback log into a list of parsed dicts.
+
+    Broken lines (malformed JSON, partial writes) are silently skipped —
+    the log is append-only but a crash mid-write could leave a bad line.
+    `limit` returns the most-recent N entries; None returns all.
+    """
+    if not _FEEDBACK_PATH.exists():
+        return []
+    entries: list[dict[str, Any]] = []
+    try:
+        with _FEEDBACK_PATH.open("r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entries.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+    except OSError as e:
+        logger.warning("preflight_feedback read failed: %s", e)
+        return []
+    if limit is not None:
+        return entries[-limit:]
+    return entries
+
+
+def summarize(entries: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    """Aggregate the feedback log into a summary dict for /preflight.
+
+    Pass `entries` to summarize a subset (testing); omit to read the full
+    log from disk. Returns counts per decision, totals, and per-tool
+    decision breakdowns. Empty log returns zeros — caller decides how to
+    render that.
+    """
+    if entries is None:
+        entries = _read_entries()
+    if not entries:
+        return {
+            "total": 0,
+            "decisions": {},
+            "by_tool": {},
+            "avg_estimated_cost_usd": 0.0,
+            "total_estimated_cost_usd": 0.0,
+        }
+
+    decisions: dict[str, int] = {}
+    by_tool: dict[str, dict[str, int]] = {}
+    total_cost = 0.0
+    cost_samples = 0
+    for entry in entries:
+        decision = str(entry.get("decision", "unknown"))
+        decisions[decision] = decisions.get(decision, 0) + 1
+        cost = entry.get("estimated_cost_usd")
+        if isinstance(cost, (int, float)):
+            total_cost += float(cost)
+            cost_samples += 1
+        for tool in entry.get("step_tools") or []:
+            bucket = by_tool.setdefault(tool, {})
+            bucket[decision] = bucket.get(decision, 0) + 1
+
+    return {
+        "total": len(entries),
+        "decisions": decisions,
+        "by_tool": by_tool,
+        "avg_estimated_cost_usd": total_cost / cost_samples if cost_samples else 0.0,
+        "total_estimated_cost_usd": total_cost,
+    }
+
+
 def record_decision(card: dict[str, Any], decision: str) -> None:
     """Append a feedback entry.
 

@@ -13,7 +13,7 @@ once that path is implemented (out of scope for slice 1).
 from __future__ import annotations
 
 from .cost_estimate import estimate_step_cost, estimate_total_cost
-from .feedback import record_decision
+from .feedback import record_decision, summarize
 from .time_estimate import estimate_step_time, estimate_total_time
 
 __all__ = [
@@ -22,4 +22,5 @@ __all__ = [
     "estimate_total_cost",
     "estimate_total_time",
     "record_decision",
+    "summarize",
 ]
