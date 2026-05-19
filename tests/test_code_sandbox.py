@@ -282,7 +282,10 @@ class TestExecutePythonHonorsSandbox:
         the SandboxUnavailableError must surface in the tool result so
         the agent (and the user via the approval prompt) sees a real
         explanation instead of a silent unsandboxed execution."""
-        from alpha import sandbox
+        # Mythos renames the upstream `alpha.sandbox` (firejail/bwrap wrapper)
+        # to `alpha.shell_sandbox` — `alpha.sandbox` here is the red-team
+        # exploit-execution sandbox (Docker/podman). See .gitattributes.
+        from alpha import shell_sandbox as sandbox
 
         monkeypatch.chdir(tmp_path)
         monkeypatch.setenv("ALPHA_SANDBOX", "1")
