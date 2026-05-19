@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.21.0](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.20.0...alpha-code-v1.21.0) (2026-05-19)
+
+
+### Features
+
+* /preflight REPL command — analytics on the feedback log ([658afdc](https://github.com/freire19/Alpha_Code/commit/658afdcc8edad690c10443907fcca99a516074ab))
+
 ## [1.20.0](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.19.0...alpha-code-v1.20.0) (2026-05-19)
 
 
