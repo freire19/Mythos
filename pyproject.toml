@@ -1,6 +1,6 @@
 [project]
 name = "alpha-code"
-version = "1.18.0"
+version = "1.18.1"
 description = "Standalone terminal agent with multi-provider LLM support, MCP, and multi-agent delegation."
 readme = "README.md"
 license = { text = "MIT" }

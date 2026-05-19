@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.18.1](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.18.0...alpha-code-v1.18.1) (2026-05-19)
+
+
+### Refactoring
+
+* /simplify pass on bundled-agents commit ([14828b6](https://github.com/freire19/Alpha_Code/commit/14828b6b0bc49a6e22af47675582e88bd7f911e6))
+
 ## [1.18.0](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.17.0...alpha-code-v1.18.0) (2026-05-19)
 
 
