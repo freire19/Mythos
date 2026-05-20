@@ -112,12 +112,14 @@ class TestGitPushForceCheckRemoved:
 
         from alpha.tools import git_tools
 
-        src = inspect.getsource(git_tools._git_operation)
+        # #DM044: o elif chain virou dispatch dict. O check vivia em
+        # _git_operation antes; agora cada acao tem handler proprio.
+        # `_git_push` deve conter a explicacao mas nao o check dead.
+        src = inspect.getsource(git_tools._git_push)
         # O check `if "--force" in extra or "-f" in extra:` era dead code.
         # _sanitize_git_args ja rejeita essas flags antes.
         # O fix removeu o check redundante mas mantem comentario explicativo.
-        push_block = src.split("elif action == \"push\":")[1].split("elif")[0]
-        assert "--force" not in push_block or "lembrar" in push_block.lower()
+        assert "--force" not in src or "lembrar" in src.lower()
 
     def test_sanitize_still_rejects_force(self):
         from alpha.tools.git_tools import _sanitize_git_args
