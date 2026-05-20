@@ -1,5 +1,32 @@
-"""
-Configuration for Alpha Code — provider settings, environment, system prompt.
+"""Configuration hub for Alpha Code.
+
+Central source of truth for everything that controls agent behavior:
+
+- `_PROVIDERS` — registry of LLM providers (DeepSeek, OpenAI, Anthropic,
+  Grok, Gemini, Ollama). Each entry has base_url, model, API key env var,
+  api_format ("openai" | "anthropic"), supports_tools flag, low_temperature.
+- `LIMITS` — runtime caps (max_iterations, llm_timeout, token budgets).
+- `FEATURES` — feature flags (multi_agent_enabled, delegate_tool_enabled,
+  etc.) consumed via getters so env overrides take effect mid-session.
+- `TOOL_TIMEOUTS` / `TOOL_TIMEOUT_CAPS` (#D003) — three-layer timeout
+  system: per-category default, per-category hard cap, executor-level
+  default+slow tools. Tuning happens here, never inline.
+- `RETRY` — backoff config for LLM streaming retry loop.
+- `LOOP_DETECTION` — thresholds for the agent's loop detector (#085).
+- `LOG_TRUNCATION` — display truncation limits (#D010).
+
+Project root discovery (`_PROJECT_ROOT`) is computed at import time by
+walking up from this file. .env loading happens at module load with
+override semantics (project .env wins over ~/.alpha/.env).
+
+Runtime env vars are read via getters (`get_subagent_policy()`,
+`get_subagent_allow()`, etc.) rather than cached at import — AUDIT_V1.2
+#014 showed cached values miss runtime mutations.
+
+What's NOT here:
+- Provider implementations → `alpha.providers/`
+- Workspace/path config → `alpha.tools.workspace`
+- Hook config → `.alpha/settings.json` via `alpha.settings`
 """
 
 from __future__ import annotations

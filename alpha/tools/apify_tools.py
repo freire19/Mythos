@@ -1,4 +1,21 @@
-"""Apify integration — run any Actor and collect results."""
+"""Apify integration — run any Actor and collect results.
+
+Apify (https://apify.com) is a scraping-actors marketplace; this module
+wraps two operations the agent uses:
+
+- `apify_run_actor(actor_id, input)` — synchronously runs an Actor and
+  returns the dataset entries. DESTRUCTIVE category (#034) because it
+  consumes paid compute and emits external HTTP from the user's account.
+- `apify_search_actors(query)` — discovery search across the Apify store.
+
+Authentication: `APIFY_API_TOKEN` env var (configured in `.env`). Module
+no-ops gracefully when missing — the agent gets a clear error instead of
+an opaque HTTP 401.
+
+HTTP transport: `LoopAwareClient` from `alpha._http_singleton` (shared
+loop-aware httpx singleton — see #DM042). Polling for run completion
+uses bounded retries with `_calc_backoff` (#051/#D012) to avoid
+hammering Apify during long-running scrapes."""
 
 from __future__ import annotations
 

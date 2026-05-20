@@ -1,4 +1,35 @@
-"""File operation tools for ALPHA agent."""
+"""File operation tools for ALPHA agent.
+
+Exposes the agent's read/write/search vocabulary on the filesystem:
+
+- `read_file`, `write_file`, `edit_file` — atomic content I/O
+- `list_directory` — non-recursive listing with metadata
+- `glob_files`, `search_files` — pattern + content discovery (ripgrep fast-path)
+- `make_directory`, `move_path`, `copy_path`, `remove_path` — mutation primitives
+- `file_info` — stat + heuristic file-type detection
+
+Invariants enforced here:
+
+- All path arguments go through `path_helpers._validate_path` (workspace
+  containment + traversal guard); destructive mutations additionally route
+  through `_validate_path_no_symlink` so a symlink can't pivot out of the
+  workspace at rename/replace time.
+- `_SKIP_DIRS` skips noise directories (`.git`, `node_modules`,
+  `.venv`, `__pycache__`, *_cache dirs) in recursive scans — these
+  blow up `rglob` traversal time on monorepos and rarely have content
+  the agent should be looking at.
+- Search uses ripgrep when available (fast-path), falls back to a Python
+  walker; both honor `_SKIP_DIRS` and never escape the workspace.
+
+What's NOT here (lives elsewhere):
+
+- Path validation utilities → `alpha.tools.path_helpers`
+- Workspace bounds → `alpha.tools.workspace`
+- Composite project introspection (`project_overview`, `run_tests`) →
+  `alpha.tools._composite_*`
+- Shell-based file ops (`mv`, `cp` via subprocess) →
+  `alpha.tools.shell_tools` (the agent should prefer the structured
+  tools here over shelling out)."""
 
 from __future__ import annotations
 
