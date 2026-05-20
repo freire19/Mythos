@@ -16,11 +16,34 @@ import asyncio
 import atexit
 import os
 import sys
+from typing import Callable
 
 from alpha import hooks
 from alpha.display import cleanup_indicator
 from alpha.mcp import shutdown_mcp_servers
 from alpha.repl_input import cleanup_temp_images
+
+
+def _stderr(msg: str) -> None:
+    """atexit-safe write to stderr.
+
+    Uses `print` instead of `logger` because atexit can run after the
+    logging subsystem has been torn down (tests, embedded use). The
+    nested try/except guards the print itself: if stderr is already
+    closed, fail silently rather than crash on shutdown.
+    """
+    try:
+        print(msg, file=sys.stderr)
+    except Exception:
+        pass
+
+
+def _safe_shutdown(name: str, fn: Callable[[], None]) -> None:
+    """Run a sync shutdown step; route any failure to stderr."""
+    try:
+        fn()
+    except Exception as e:
+        _stderr(f"{name}: {type(e).__name__}: {e}")
 
 
 def _shutdown_browser_session() -> None:
@@ -46,32 +69,20 @@ def _shutdown_browser_session() -> None:
     except ImportError:
         pass  # Playwright nao instalado, sem session pra fechar
     except Exception as e:
-        # Logar para diagnostico — antes era engolido em `except: pass`.
-        # `print` em vez de logger porque atexit roda apos shutdown do
-        # logging em alguns paths.
-        try:
-            print(
-                f"shutdown_browser_session: {type(e).__name__}: {e}",
-                file=sys.stderr,
-            )
-        except Exception:
-            pass
+        _stderr(f"shutdown_browser_session: {type(e).__name__}: {e}")
 
 
 def _shutdown_mcp_servers() -> None:
     """atexit hook: terminate any spawned MCP server subprocesses."""
-    try:
-        shutdown_mcp_servers()
-    except Exception:
-        pass
+    _safe_shutdown("shutdown_mcp_servers", shutdown_mcp_servers)
 
 
 def _fire_on_stop() -> None:
     """atexit hook: fire user-defined on_stop hooks."""
-    try:
-        hooks.fire("on_stop", workspace=os.getcwd())
-    except Exception:
-        pass
+    _safe_shutdown(
+        "on_stop_hooks",
+        lambda: hooks.fire("on_stop", workspace=os.getcwd()),
+    )
 
 
 def _install_sigterm_handler() -> None:
@@ -89,10 +100,7 @@ def _install_sigterm_handler() -> None:
         return
 
     def _on_sigterm(signum, frame):
-        try:
-            print("\n[ALPHA] SIGTERM received — running cleanup", file=sys.stderr)
-        except Exception:
-            pass
+        _stderr("\n[ALPHA] SIGTERM received — running cleanup")
         sys.exit(143)  # 128 + 15 (SIGTERM), Unix convention
 
     _signal.signal(_signal.SIGTERM, _on_sigterm)

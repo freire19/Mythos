@@ -328,16 +328,28 @@ def _cluster_answers(answers: list[str]) -> list[list[int]]:
     """Greedy single-link clustering by SequenceMatcher ratio.
 
     Each cluster is a list of indices into `answers`. Empty / whitespace-only
-    answers form their own degenerate cluster so a failed sub-agent doesn't
-    get absorbed into someone else's group by string accident."""
-    clusters: list[list[int]] = []
-    representatives: list[str] = []
+    answers share a single degenerate cluster so N failed sub-agents don't
+    surface as N dissent groups."""
+    empty_indices: list[int] = []
+    non_empty: list[tuple[int, str]] = []
     for idx, ans in enumerate(answers):
         normalized = (ans or "").strip()[:_CONSENSUS_ANSWER_PREVIEW_CHARS]
+        if not normalized:
+            empty_indices.append(idx)
+        else:
+            non_empty.append((idx, normalized))
+
+    clusters: list[list[int]] = []
+    representatives: list[str] = []
+    if empty_indices:
+        clusters.append(empty_indices)
+        representatives.append("")
+
+    for idx, normalized in non_empty:
         placed = False
         for ci, rep in enumerate(representatives):
-            if not normalized or not rep:
-                continue  # both must be non-empty to compare
+            if not rep:
+                continue
             ratio = difflib.SequenceMatcher(None, normalized, rep).ratio()
             if ratio >= _CONSENSUS_SIMILARITY_THRESHOLD:
                 clusters[ci].append(idx)
