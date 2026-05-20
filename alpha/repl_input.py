@@ -108,6 +108,18 @@ def _build_key_bindings(attached: dict[int, Path]) -> KeyBindings:
         toggle_auto_accept()
         event.app.invalidate()  # redraw bottom toolbar
 
+    @kb.add("c-c")
+    def _(event):
+        # See `read_input` docstring for rationale (Ctrl+Shift+C ambiguity).
+        buf = event.current_buffer
+        if buf.text:
+            buf.reset()
+            return
+        from .display import C, c
+        get_app().print_text(
+            ANSI(c(C.GRAY, "  (use /exit or Ctrl+D to exit)\n"))
+        )
+
     return kb
 
 
@@ -457,8 +469,10 @@ def _read_input_simple(prompt_ansi: str) -> tuple[str, list[Path]]:
 def read_input(prompt_ansi: str) -> tuple[str, list[Path]]:
     """Read a line from the user. Returns (text, image_paths).
 
-    Raises EOFError on Ctrl+D and KeyboardInterrupt on Ctrl+C — same as
-    the builtin `input()`.
+    Raises EOFError on Ctrl+D (use this to exit, or type `/exit`). Ctrl+C
+    at the prompt clears the current input instead of exiting — many
+    terminals deliver Ctrl+Shift+C as Ctrl+C, and stray copy attempts
+    from adjacent windows would otherwise close the session by accident.
     """
     if use_simple_input():
         return _read_input_simple(prompt_ansi)
