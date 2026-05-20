@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.22.0](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.21.10...alpha-code-v1.22.0) (2026-05-20)
+
+
+### Features
+
+* ※ recap line for end-of-task summaries ([6520ffc](https://github.com/freire19/Alpha_Code/commit/6520ffc6562c5f8ac650aa21ca6a6dc5cbe22822))
+
 ## [1.21.10](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.21.9...alpha-code-v1.21.10) (2026-05-20)
 
 
