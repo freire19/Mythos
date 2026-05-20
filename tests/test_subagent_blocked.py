@@ -56,11 +56,12 @@ class TestBlocklistCoversAllDestructiveExceptPolicyExceptions:
 
     # Tools DESTRUCTIVE com tratamento especial fora da blocklist:
     # - delegate_*: bloqueadas separadamente (anti-recursao)
-    # - present_plan: ferramenta de planning, sem efeito real
+    # - present_plan / pre_flight: planning tools, sem efeito real (DESTRUCTIVE
+    #   apenas para forcar approval gate)
     # - git_operation: gating dinamico via _auto_approve_no_callback
     POLICY_EXCEPTIONS = frozenset({
         "delegate_task", "delegate_parallel", "delegate_consensus",
-        "present_plan", "git_operation",
+        "present_plan", "pre_flight", "git_operation",
     })
 
     def test_every_destructive_is_classified(self):

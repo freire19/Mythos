@@ -6,6 +6,8 @@ SECURITY: Clipboard write is destructive (overwrites content).
 Screenshot is safe (read-only). Notifications are safe.
 """
 
+from __future__ import annotations
+
 import asyncio
 import logging
 import shutil

@@ -83,25 +83,29 @@ class TestLoopDetectionStillWorks:
 
 
 class TestHttpxClientLoopBinding:
-    """Client deve ser recriado quando o event loop muda."""
+    """Client deve ser recriado quando o event loop muda.
+
+    #DM042: web_search._shared_client e agora um LoopAwareClient — reset
+    direto vai aos atributos internos _client/_loop em vez de globals
+    soltos (que nao existem mais)."""
 
     def test_client_recreated_across_loops(self):
         from alpha import web_search
 
-        # Reset module state
-        web_search._shared_client = None
-        web_search._client_loop = None
+        # Reset LoopAwareClient internal state
+        web_search._shared_client._client = None
+        web_search._shared_client._loop = None
 
         async def get_client():
             return await web_search._get_shared_client()
 
         # Loop 1: cria
         c1 = asyncio.run(get_client())
-        loop1_ref = web_search._client_loop
+        loop1_ref = web_search._shared_client._loop
 
         # Loop 2: deve detectar e recriar (loops diferentes)
         c2 = asyncio.run(get_client())
-        loop2_ref = web_search._client_loop
+        loop2_ref = web_search._shared_client._loop
 
         assert c1 is not c2, "client should be recreated across loops"
         assert loop1_ref is not loop2_ref

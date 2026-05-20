@@ -9,6 +9,8 @@ Apos #030 split: este arquivo agora apenas re-exporta os 4 modulos
 especializados. Cada sub-modulo registra sua propria tool no import.
 """
 
+from __future__ import annotations
+
 # Re-import sub-modules — each registers itself via register_tool() at import time.
 from . import _composite_project  # noqa: F401 — side-effect: register_tool
 from . import _composite_tests    # noqa: F401

@@ -36,13 +36,24 @@ class TestDeadRegexRemoved:
         err = _validate_code_safety("from runpy import run_path")
         assert err is not None
 
-    def test_open_read_no_false_positive(self):
-        # Bug do regex legacy: \bopen\s*\(.*(w|a|x) casava em open("read.txt")
-        # por causa do "a" em "read".
+    def test_open_blocked_with_clean_message_not_legacy_regex(self):
+        # Historicamente o regex legacy `\bopen\s*\(.*(w|a|x)` casava em
+        # `open("read.txt")` por causa do "a" em "read" — false positive.
+        # DEEP_SECURITY V3.3 #D124: agora bloqueamos TODO `open()` (mesmo
+        # modo "r") por design, com mensagem clara. Este test garante que
+        # o bloqueio venha do check explicito do AST (mensagem mencionando
+        # `read_file`/`write_file`), nao de uma regressao do regex legacy.
         from alpha.tools.code_tools import _validate_code_safety
 
-        assert _validate_code_safety('open("read.txt")') is None
-        assert _validate_code_safety('open("read.txt", "r")') is None
+        err = _validate_code_safety('open("read.txt")')
+        assert err is not None
+        assert "read_file" in err or "write_file" in err, (
+            f"Expected new V3.3 message, got: {err}"
+        )
+
+        err = _validate_code_safety('open("read.txt", "r")')
+        assert err is not None
+        assert "read_file" in err or "write_file" in err
 
 
 # ─── #028 — safe_env TTL ───────────────────────────────────────────

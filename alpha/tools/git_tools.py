@@ -6,6 +6,8 @@ SECURITY: Only operates within AGENT_WORKSPACE. Destructive operations
 (push, reset, clean) require approval. Read operations are safe.
 """
 
+from __future__ import annotations
+
 import asyncio
 import logging
 import re
@@ -193,6 +195,239 @@ def _reject_dash_prefixed(label: str, value: str) -> str | None:
     return None
 
 
+# ── Action handlers (#DM044): elif chain de 22 acoes virou dict dispatch.
+# Cada handler recebe so o que precisa via kwargs. Vantagens vs. elif:
+# - Cada handler e unidade testavel sozinha
+# - Adicionar acao = mais uma entrada em _GIT_ACTIONS (nao precisa achar
+#   o lugar certo no meio de 180L de elif)
+# - Validacao comum (resolve cwd, reject dash-prefixed) e DRY: vive em
+#   `_git_operation` antes do dispatch, nao replica nas 22 ramificacoes
+
+
+async def _git_status(*, cwd, **_):
+    return await _run_git(["status", "--porcelain", "-b"], cwd)
+
+
+async def _git_diff(*, cwd, args=None, **_):
+    extra, err = _sanitize_git_args("diff", args)
+    if err:
+        return {"error": err}
+    return await _run_git(["diff"] + extra, cwd)
+
+
+async def _git_log(*, cwd, args=None, **_):
+    extra, err = _sanitize_git_args("log", args)
+    if err:
+        return {"error": err}
+    return await _run_git(["log"] + (extra or ["--oneline", "-20"]), cwd)
+
+
+async def _git_branch(*, cwd, **_):
+    return await _run_git(["branch", "-a", "-v"], cwd)
+
+
+async def _git_show(*, cwd, args=None, **_):
+    extra, err = _sanitize_git_args("show", args)
+    if err:
+        return {"error": err}
+    # #DL035: extra pode conter flags + positional. Passa tudo pro git;
+    # fallback HEAD quando vazio (evitava extra[0] que confundia flag com ref).
+    return await _run_git(["show", "--stat"] + (extra or ["HEAD"]), cwd)
+
+
+async def _git_blame(*, cwd, files=None, **_):
+    if not files:
+        return {"error": "blame requer 'files' com pelo menos um arquivo"}
+    return await _run_git(["blame", "--porcelain", files[0]], cwd, timeout=60)
+
+
+async def _git_stash_list(*, cwd, **_):
+    return await _run_git(["stash", "list"], cwd)
+
+
+async def _git_remote(*, cwd, **_):
+    return await _run_git(["remote", "-v"], cwd)
+
+
+async def _git_tag(*, cwd, **_):
+    return await _run_git(["tag", "-l", "--sort=-creatordate"], cwd)
+
+
+async def _git_add(*, cwd, files=None, **_):
+    return await _run_git(["add"] + (files or ["."]), cwd)
+
+
+async def _git_commit(*, cwd, message=None, **_):
+    if not message:
+        return {"error": "commit requer 'message'"}
+    return await _run_git(["commit", "-m", message], cwd)
+
+
+async def _git_checkout(*, cwd, branch=None, **_):
+    if not branch:
+        return {"error": "checkout requer 'branch'"}
+    return await _run_git(["checkout", branch], cwd)
+
+
+async def _git_branch_create(*, cwd, branch=None, **_):
+    if not branch:
+        return {"error": "branch_create requer 'branch'"}
+    return await _run_git(["checkout", "-b", branch], cwd)
+
+
+async def _git_branch_delete(*, cwd, branch=None, **_):
+    if not branch:
+        return {"error": "branch_delete requer 'branch'"}
+    if branch in ("main", "master"):
+        return {"error": "Não é permitido deletar branch main/master"}
+    return await _run_git(["branch", "-d", branch], cwd)
+
+
+async def _git_stash(*, cwd, message=None, **_):
+    msg = ["-m", message] if message else []
+    return await _run_git(["stash", "push"] + msg, cwd)
+
+
+async def _git_stash_pop(*, cwd, **_):
+    return await _run_git(["stash", "pop"], cwd)
+
+
+async def _git_pull(*, cwd, **_):
+    return await _run_git(["pull", "--rebase"], cwd, timeout=60)
+
+
+async def _git_push(*, cwd, args=None, **_):
+    extra, err = _sanitize_git_args("push", args)
+    if err:
+        return {"error": err}
+    # Force push e bloqueado a priori: `_ALLOWED_GIT_FLAGS["push"]` so
+    # permite `--set-upstream`, `-u`, `--tags`. Qualquer `--force`/`-f`
+    # rejeitado pelo `_sanitize_git_args` antes de chegar aqui (#D029).
+    # Se um dia force push for permitido em branches nao-main, lembrar
+    # de adicionar a allowlist E reintroduzir o check de current branch.
+    return await _run_git(["push"] + extra, cwd, timeout=60)
+
+
+async def _git_merge(*, cwd, branch=None, **_):
+    if not branch:
+        return {"error": "merge requer 'branch'"}
+    return await _run_git(["merge", branch], cwd)
+
+
+async def _git_rebase(*, cwd, branch=None, **_):
+    if not branch:
+        return {"error": "rebase requer 'branch'"}
+    return await _run_git(["rebase", branch], cwd)
+
+
+async def _git_reset(*, cwd, args=None, **_):
+    extra, err = _sanitize_git_args("reset", args)
+    if err:
+        return {"error": err}
+    if not extra:
+        extra = ["--mixed", "HEAD~1"]
+    else:
+        # Inject --mixed if no mode flag provided (avoid implicit git defaults)
+        has_mode = any(f in extra for f in ("--soft", "--mixed", "--hard", "--merge", "--keep"))
+        if not has_mode:
+            extra = ["--mixed"] + extra
+    return await _run_git(["reset"] + extra, cwd)
+
+
+async def _git_clean(*, cwd, **_):
+    return await _run_git(["clean", "-fd"], cwd)
+
+
+async def _git_tag_create(*, cwd, args=None, message=None, **_):
+    if not args:
+        return {"error": "tag_create requer 'args' com o nome da tag"}
+    tag_args, err = _sanitize_git_args("tag_create", args)
+    if err:
+        return {"error": err}
+    if not tag_args:
+        return {"error": "tag_create requer pelo menos o nome da tag"}
+    # #DL036: tag_args may carry flags (-a, -m) before the positional
+    # tag name. Pick the first non-flag token; refuse if there isn't one.
+    tag_name = next((p for p in tag_args if not p.startswith("-")), None)
+    if tag_name is None:
+        return {"error": "tag_create requer um nome de tag positional"}
+    if message:
+        return await _run_git(["tag", "-a", tag_name, "-m", message], cwd)
+    return await _run_git(["tag"] + tag_args, cwd)
+
+
+_GIT_ACTIONS = {
+    # Read-only (_SAFE_ACTIONS)
+    "status": _git_status,
+    "diff": _git_diff,
+    "log": _git_log,
+    "branch": _git_branch,
+    "show": _git_show,
+    "blame": _git_blame,
+    "stash_list": _git_stash_list,
+    "remote": _git_remote,
+    "tag": _git_tag,
+    # Write/mutating (_DESTRUCTIVE_ACTIONS)
+    "add": _git_add,
+    "commit": _git_commit,
+    "checkout": _git_checkout,
+    "branch_create": _git_branch_create,
+    "branch_delete": _git_branch_delete,
+    "stash": _git_stash,
+    "stash_pop": _git_stash_pop,
+    "pull": _git_pull,
+    "push": _git_push,
+    "merge": _git_merge,
+    "rebase": _git_rebase,
+    "reset": _git_reset,
+    "clean": _git_clean,
+    "tag_create": _git_tag_create,
+}
+
+# Invariant: dispatch table must cover the action enum exposed to the LLM.
+# Drift here = HTTP 400 / silent failure at runtime.
+assert set(_GIT_ACTIONS) == _ALL_ACTIONS, (
+    f"_GIT_ACTIONS drift vs _ALL_ACTIONS: "
+    f"missing={_ALL_ACTIONS - set(_GIT_ACTIONS)}, "
+    f"extra={set(_GIT_ACTIONS) - _ALL_ACTIONS}"
+)
+
+
+def _resolve_git_cwd(path: str | None) -> tuple[str | None, dict | None]:
+    """Resolve and validate workspace path, then find enclosing .git repo.
+
+    Returns (cwd, None) on success or (None, error_dict) on failure.
+    """
+    if path:
+        repo_path = Path(path).expanduser().resolve()
+        err = assert_within_workspace(repo_path)
+        if err:
+            return None, {"error": err}
+        cwd = str(repo_path)
+    else:
+        cwd = str(AGENT_WORKSPACE)
+
+    repo_root = _find_git_repo(cwd)
+    if not repo_root:
+        return None, {"error": f"Nenhum repositório git encontrado em {cwd} ou diretórios pais"}
+    return repo_root, None
+
+
+def _validate_user_inputs(branch, message, files) -> str | None:
+    """Reject values starting with '-' that git would treat as flags."""
+    if branch is not None:
+        if (err := _reject_dash_prefixed("branch", branch)):
+            return err
+    if message is not None:
+        if (err := _reject_dash_prefixed("message", message)):
+            return err
+    if files:
+        for f in files:
+            if (err := _reject_dash_prefixed("files[]", f)):
+                return err
+    return None
+
+
 async def _git_operation(
     action: str,
     path: str = None,
@@ -201,180 +436,25 @@ async def _git_operation(
     files: list = None,
     args: str = None,
 ) -> dict:
-    """Execute a structured git operation."""
+    """Execute a structured git operation via dispatch table (#DM044)."""
     action = action.lower().strip()
-
-    if action not in _ALL_ACTIONS:
+    handler = _GIT_ACTIONS.get(action)
+    if handler is None:
         return {
             "error": f"Ação git '{action}' não reconhecida. "
             f"Ações disponíveis: {', '.join(sorted(_ALL_ACTIONS))}",
         }
 
-    if branch is not None:
-        err = _reject_dash_prefixed("branch", branch)
-        if err:
-            return {"error": err}
-    if message is not None:
-        err = _reject_dash_prefixed("message", message)
-        if err:
-            return {"error": err}
-    if files:
-        for f in files:
-            err = _reject_dash_prefixed("files[]", f)
-            if err:
-                return {"error": err}
+    if (err := _validate_user_inputs(branch, message, files)):
+        return {"error": err}
 
-    # Resolve repo path
-    if path:
-        repo_path = Path(path).expanduser().resolve()
-        err = assert_within_workspace(repo_path)
-        if err:
-            return {"error": err}
-        cwd = str(repo_path)
-    else:
-        cwd = str(AGENT_WORKSPACE)
+    cwd, cwd_err = _resolve_git_cwd(path)
+    if cwd_err:
+        return cwd_err
 
-    # Find git repo
-    repo_root = _find_git_repo(cwd)
-    if not repo_root:
-        return {"error": f"Nenhum repositório git encontrado em {cwd} ou diretórios pais"}
-
-    cwd = repo_root
-
-    # Route to specific action
-    if action == "status":
-        return await _run_git(["status", "--porcelain", "-b"], cwd)
-
-    elif action == "diff":
-        extra, err = _sanitize_git_args("diff", args)
-        if err:
-            return {"error": err}
-        return await _run_git(["diff"] + extra, cwd)
-
-    elif action == "log":
-        extra, err = _sanitize_git_args("log", args)
-        if err:
-            return {"error": err}
-        if not extra:
-            extra = ["--oneline", "-20"]
-        return await _run_git(["log"] + extra, cwd)
-
-    elif action == "branch":
-        return await _run_git(["branch", "-a", "-v"], cwd)
-
-    elif action == "show":
-        extra, err = _sanitize_git_args("show", args)
-        if err:
-            return {"error": err}
-        # #DL035: extra pode conter flags + positional. Passa tudo pro git;
-        # fallback HEAD quando vazio (evitava extra[0] que confundia flag com ref).
-        return await _run_git(["show", "--stat"] + (extra or ["HEAD"]), cwd)
-
-    elif action == "blame":
-        if not files:
-            return {"error": "blame requer 'files' com pelo menos um arquivo"}
-        return await _run_git(["blame", "--porcelain", files[0]], cwd, timeout=60)
-
-    elif action == "stash_list":
-        return await _run_git(["stash", "list"], cwd)
-
-    elif action == "remote":
-        return await _run_git(["remote", "-v"], cwd)
-
-    elif action == "tag":
-        return await _run_git(["tag", "-l", "--sort=-creatordate"], cwd)
-
-    elif action == "add":
-        targets = files if files else ["."]
-        return await _run_git(["add"] + targets, cwd)
-
-    elif action == "commit":
-        if not message:
-            return {"error": "commit requer 'message'"}
-        return await _run_git(["commit", "-m", message], cwd)
-
-    elif action == "checkout":
-        if not branch:
-            return {"error": "checkout requer 'branch'"}
-        return await _run_git(["checkout", branch], cwd)
-
-    elif action == "branch_create":
-        if not branch:
-            return {"error": "branch_create requer 'branch'"}
-        return await _run_git(["checkout", "-b", branch], cwd)
-
-    elif action == "branch_delete":
-        if not branch:
-            return {"error": "branch_delete requer 'branch'"}
-        if branch in ("main", "master"):
-            return {"error": "Não é permitido deletar branch main/master"}
-        return await _run_git(["branch", "-d", branch], cwd)
-
-    elif action == "stash":
-        msg = ["-m", message] if message else []
-        return await _run_git(["stash", "push"] + msg, cwd)
-
-    elif action == "stash_pop":
-        return await _run_git(["stash", "pop"], cwd)
-
-    elif action == "pull":
-        return await _run_git(["pull", "--rebase"], cwd, timeout=60)
-
-    elif action == "push":
-        extra, err = _sanitize_git_args("push", args)
-        if err:
-            return {"error": err}
-        # Force push e bloqueado a priori: `_ALLOWED_GIT_FLAGS["push"]` so
-        # permite `--set-upstream`, `-u`, `--tags`. Qualquer `--force`/`-f`
-        # rejeitado pelo `_sanitize_git_args` antes de chegar aqui (#D029).
-        # Se um dia force push for permitido em branches nao-main, lembrar
-        # de adicionar a allowlist E reintroduzir o check de current branch.
-        return await _run_git(["push"] + extra, cwd, timeout=60)
-
-    elif action == "merge":
-        if not branch:
-            return {"error": "merge requer 'branch'"}
-        return await _run_git(["merge", branch], cwd)
-
-    elif action == "rebase":
-        if not branch:
-            return {"error": "rebase requer 'branch'"}
-        return await _run_git(["rebase", branch], cwd)
-
-    elif action == "reset":
-        extra, err = _sanitize_git_args("reset", args)
-        if err:
-            return {"error": err}
-        if not extra:
-            extra = ["--mixed", "HEAD~1"]
-        else:
-            # Inject --mixed if no mode flag provided (avoid implicit git defaults)
-            has_mode = any(f in extra for f in ("--soft", "--mixed", "--hard", "--merge", "--keep"))
-            if not has_mode:
-                extra = ["--mixed"] + extra
-        return await _run_git(["reset"] + extra, cwd)
-
-    elif action == "clean":
-        return await _run_git(["clean", "-fd"], cwd)
-
-    elif action == "tag_create":
-        if not args:
-            return {"error": "tag_create requer 'args' com o nome da tag"}
-        tag_args, err = _sanitize_git_args("tag_create", args)
-        if err:
-            return {"error": err}
-        if not tag_args:
-            return {"error": "tag_create requer pelo menos o nome da tag"}
-        # #DL036: tag_args may carry flags (-a, -m) before the positional
-        # tag name. Pick the first non-flag token; refuse if there isn't one.
-        tag_name = next((p for p in tag_args if not p.startswith("-")), None)
-        if tag_name is None:
-            return {"error": "tag_create requer um nome de tag positional"}
-        if message:
-            return await _run_git(["tag", "-a", tag_name, "-m", message], cwd)
-        return await _run_git(["tag"] + tag_args, cwd)
-
-    return {"error": f"Ação '{action}' não implementada"}
+    return await handler(
+        cwd=cwd, path=path, message=message, branch=branch, files=files, args=args
+    )
 
 
 # Register safe version (read-only operations)

@@ -1,13 +1,13 @@
 """run_tests tool — composite (#030 split)."""
 
+from __future__ import annotations
+
 import shlex
 
 from ..executor import _annotate_error
 from . import ToolCategory, ToolDefinition, ToolSafety, register_tool
-from ._composite_helpers import _run_tool, _violation
+from ._composite_helpers import _resolve_target, _run_tool
 from .file_tools import _SKIP_DIRS
-from .path_helpers import _validate_path
-from .workspace import AGENT_WORKSPACE
 
 
 async def _run_tests(
@@ -16,11 +16,9 @@ async def _run_tests(
     pattern: str = None,
 ) -> dict:
     """Detect test framework and run tests."""
-    target = path or str(AGENT_WORKSPACE)
-    try:
-        target_path = _validate_path(target)
-    except PermissionError as e:
-        return _violation(str(e))
+    target_path, err = _resolve_target(path)
+    if err:
+        return err
 
     # Auto-detect framework
     if framework == "auto":

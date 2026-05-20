@@ -4,6 +4,8 @@ Defaults to current working directory (like Claude Code).
 Set AGENT_WORKSPACE env var to override.
 """
 
+from __future__ import annotations
+
 import logging
 import os
 from pathlib import Path

@@ -47,3 +47,29 @@ jobs:
           name: coverage-${{ matrix.python-version }}
           path: coverage.xml
           if-no-files-found: warn
+
+  security-audit:
+    # DEEP_SECURITY V3.3 #033: pip-audit detecta CVEs em dependencias
+    # automaticamente. Antes deste step, a CVE-2026-45409 idna 3.11 (#005)
+    # passou meses sem deteccao. Rodado em job separado para isolar
+    # falhas de cobertura/lint vs falhas de seguranca de deps.
+    name: Audit dependencies for CVEs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install pip-audit
+        run: |
+          python -m pip install --upgrade pip
+          pip install pip-audit
+
+      - name: Run pip-audit on lockfile
+        # `--strict` falha o build em vulneraveis. `--requirement` audita
+        # o lockfile exato que vai pra producao em vez de re-resolver deps.
+        run: pip-audit --strict --requirement requirements.lock

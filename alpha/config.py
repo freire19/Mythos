@@ -1,6 +1,35 @@
+"""Configuration hub for Alpha Code.
+
+Central source of truth for everything that controls agent behavior:
+
+- `_PROVIDERS` — registry of LLM providers (DeepSeek, OpenAI, Anthropic,
+  Grok, Gemini, Ollama). Each entry has base_url, model, API key env var,
+  api_format ("openai" | "anthropic"), supports_tools flag, low_temperature.
+- `LIMITS` — runtime caps (max_iterations, llm_timeout, token budgets).
+- `FEATURES` — feature flags (multi_agent_enabled, delegate_tool_enabled,
+  etc.) consumed via getters so env overrides take effect mid-session.
+- `TOOL_TIMEOUTS` / `TOOL_TIMEOUT_CAPS` (#D003) — three-layer timeout
+  system: per-category default, per-category hard cap, executor-level
+  default+slow tools. Tuning happens here, never inline.
+- `RETRY` — backoff config for LLM streaming retry loop.
+- `LOOP_DETECTION` — thresholds for the agent's loop detector (#085).
+- `LOG_TRUNCATION` — display truncation limits (#D010).
+
+Project root discovery (`_PROJECT_ROOT`) is computed at import time by
+walking up from this file. .env loading happens at module load with
+override semantics (project .env wins over ~/.alpha/.env).
+
+Runtime env vars are read via getters (`get_subagent_policy()`,
+`get_subagent_allow()`, etc.) rather than cached at import — AUDIT_V1.2
+#014 showed cached values miss runtime mutations.
+
+What's NOT here:
+- Provider implementations → `alpha.providers/`
+- Workspace/path config → `alpha.tools.workspace`
+- Hook config → `.alpha/settings.json` via `alpha.settings`
 """
-Configuration for Mythos — provider settings, environment, system prompt.
-"""
+
+from __future__ import annotations
 
 import os
 from pathlib import Path
@@ -54,6 +83,15 @@ LIMITS = {
 MAX_ITERATIONS = LIMITS["max_iterations"]
 TOOL_RESULT_MAX_CHARS = LIMITS["tool_result_max_chars"]
 LLM_TIMEOUT = LIMITS["llm_timeout"]
+
+# #P004: connection pool limits compartilhados por todos os clientes
+# HTTP do LLM. Conservador: agent loop tipico nao paraleliza alem de
+# 3-5 LLM calls (delegate_parallel), e providers upstream rate-limitam
+# bem antes de 20 keepalive.
+HTTPX_LIMITS_LLM = {
+    "max_keepalive_connections": 5,
+    "max_connections": 20,
+}
 
 # Retry config centralizado (#DM036). LLM e HTTP usam backoff exponencial
 # com jitter, mas com parametros diferentes (LLM calls sao mais caras e

@@ -8,6 +8,8 @@ Usage:
     python main.py --provider grok "fix the bug in main.py"
 """
 
+from __future__ import annotations
+
 import argparse
 import asyncio
 import os
@@ -66,6 +68,134 @@ install_lifecycle_hooks()
 # ALPHA_JSON_LOGS=1 is set. No-op otherwise.
 from alpha.jsonlogs import maybe_install as _maybe_install_jsonlogs  # noqa: E402
 _maybe_install_jsonlogs()
+
+
+# ─── run_repl helpers ───
+
+
+def _print_startup_status(provider: str, cfg: dict, tools: list, active_agent) -> None:
+    """Print the post-banner status lines (tools, skills, MCP, project ctx)."""
+    if not cfg["supports_tools"]:
+        print_phase(f"{c(C.YELLOW, 'chat-only')} — {provider} does not support tool-calling")
+    elif tools:
+        print_phase(f"Loaded {len(tools)} tools")
+    else:
+        print_phase("No tools loaded — running in chat-only mode")
+
+    skills_count = len(list_skills())
+    if skills_count:
+        print_phase(f"Loaded {skills_count} skills")
+
+    mcp_servers = list_mcp_servers()
+    if mcp_servers:
+        total_mcp_tools = sum(len(s["tools"]) for s in mcp_servers)
+        print_phase(
+            f"MCP: {len(mcp_servers)} server(s), {total_mcp_tools} tool(s)"
+        )
+
+    if active_agent:
+        print_phase(f"Active agent: {active_agent.name}")
+
+    # Surface auto-loaded project context so the user sees what Alpha
+    # picked up. Uses the same loader as `_build_system_prompt` — both
+    # paths are cheap (single read, capped at MAX_BYTES) so the redundant
+    # call is fine.
+    from alpha.project_context import load_project_context
+    _proj_ctx = load_project_context()
+    if _proj_ctx is not None:
+        rel = os.path.relpath(_proj_ctx.path)
+        size_kb = _proj_ctx.raw_size / 1024
+        suffix = " (truncated)" if _proj_ctx.truncated else ""
+        print_phase(f"Project context: {rel} ({size_kb:.1f} KB){suffix}")
+
+
+def _try_at_dispatch(
+    user_input: str, default_provider: str, default_temperature: float
+) -> bool:
+    """`@name message` — fire a one-shot agent without leaving the REPL.
+
+    Returns True if the input matched and was handled (caller should
+    `continue` the REPL loop), False otherwise.
+    """
+    if not user_input.startswith("@"):
+        return False
+    parts = user_input.split(maxsplit=1)
+    if len(parts) != 2 or len(parts[0]) <= 1:
+        return False
+
+    at_name = parts[0][1:]
+    at_msg = parts[1]
+    at_agent = get_agent(at_name)
+    if at_agent is None:
+        print_error(f"Agent not found: {at_name}")
+        return True
+
+    at_provider = at_agent.provider or default_provider
+    at_temperature = (
+        at_agent.temperature if at_agent.temperature is not None
+        else default_temperature
+    )
+    at_system = _build_system_prompt(at_agent)
+    at_get_tool, at_tools = _get_tools_for_agent(at_agent)
+
+    print(c(C.GRAY, f"  (one-shot → {at_name})"))
+    print()
+
+    cwd = os.getcwd()
+    at_messages = [
+        {"role": "system", "content": at_system},
+        {"role": "user", "content": f"[CWD: {cwd}]\n{at_msg}"},
+    ]
+    try:
+        asyncio.run(
+            _run_once(
+                at_messages, at_msg, at_provider, at_temperature,
+                at_get_tool, at_tools,
+                workspace=at_agent.workspace,
+            )
+        )
+    except KeyboardInterrupt:
+        print(c(C.YELLOW, "\n\nInterrupted."))
+    print()
+    return True
+
+
+def _attach_ocr_if_needed(
+    contextualized: str,
+    image_paths: list,
+    cfg: dict,
+    provider: str,
+) -> tuple[str, list]:
+    """Run Gemini OCR over images when the active provider isn't vision-capable.
+
+    Returns (possibly-augmented contextualized text, possibly-emptied
+    image_paths). When the provider DOES support vision, the call is a
+    no-op pass-through.
+    """
+    if not image_paths or cfg.get("supports_vision", False):
+        return contextualized, image_paths
+
+    gemini_key = os.getenv("GEMINI_API_KEY", "")
+    if gemini_key:
+        sys.stdout.write(f"  {c(C.GRAY, '✾ Analisando imagem...')}")
+        sys.stdout.flush()
+        ocr_text = ocr_images_sync(image_paths, gemini_key)
+        sys.stdout.write("\r\033[K")
+        sys.stdout.flush()
+        if ocr_text:
+            contextualized = (
+                f"{contextualized}\n\n"
+                f"[Conteudo extraido da imagem via OCR (Gemini)]:\n{ocr_text}"
+            )
+        else:
+            print_error("  OCR falhou — imagem ignorada.")
+    else:
+        print_error(
+            f"Provider '{provider}' (modelo {cfg['model']}) nao suporta imagens. "
+            f"Imagem(s) ignorada(s). Defina GEMINI_API_KEY para OCR automatico "
+            f"ou use /provider para um modelo vision-capable (google, openai, anthropic)."
+        )
+    return contextualized, []
 
 
 async def _run_once(messages, user_message, provider, temperature, get_tool_fn, tools, workspace=None):
@@ -199,38 +329,7 @@ def run_repl(provider: str, temperature: float):
 
     get_tool_fn, tools = _get_tools_for_agent(active_agent)
 
-    if not cfg["supports_tools"]:
-        print_phase(f"{c(C.YELLOW, 'chat-only')} — {provider} does not support tool-calling")
-    elif tools:
-        print_phase(f"Loaded {len(tools)} tools")
-    else:
-        print_phase("No tools loaded — running in chat-only mode")
-
-    skills_count = len(list_skills())
-    if skills_count:
-        print_phase(f"Loaded {skills_count} skills")
-
-    mcp_servers = list_mcp_servers()
-    if mcp_servers:
-        total_mcp_tools = sum(len(s["tools"]) for s in mcp_servers)
-        print_phase(
-            f"MCP: {len(mcp_servers)} server(s), {total_mcp_tools} tool(s)"
-        )
-
-    if active_agent:
-        print_phase(f"Active agent: {active_agent.name}")
-
-    # Surface auto-loaded project context so the user sees what Alpha
-    # picked up. Uses the same loader as `_build_system_prompt` — both
-    # paths are cheap (single read, capped at MAX_BYTES) so the redundant
-    # call is fine.
-    from alpha.project_context import load_project_context
-    _proj_ctx = load_project_context()
-    if _proj_ctx is not None:
-        rel = os.path.relpath(_proj_ctx.path)
-        size_kb = _proj_ctx.raw_size / 1024
-        suffix = " (truncated)" if _proj_ctx.truncated else ""
-        print_phase(f"Project context: {rel} ({size_kb:.1f} KB){suffix}")
+    _print_startup_status(provider, cfg, tools, active_agent)
 
     while True:
         try:
@@ -259,43 +358,8 @@ def run_repl(provider: str, temperature: float):
             continue
 
         # One-shot agent dispatch: "@name message"
-        if user_input.startswith("@"):
-            parts = user_input.split(maxsplit=1)
-            if len(parts) == 2 and len(parts[0]) > 1:
-                at_name = parts[0][1:]
-                at_msg = parts[1]
-                at_agent = get_agent(at_name)
-                if at_agent is None:
-                    print_error(f"Agent not found: {at_name}")
-                    continue
-
-                at_provider = at_agent.provider or provider
-                at_temperature = (
-                    at_agent.temperature if at_agent.temperature is not None else temperature
-                )
-                at_system = _build_system_prompt(at_agent)
-                at_get_tool, at_tools = _get_tools_for_agent(at_agent)
-
-                print(c(C.GRAY, f"  (one-shot → {at_name})"))
-                print()
-
-                cwd = os.getcwd()
-                at_messages = [
-                    {"role": "system", "content": at_system},
-                    {"role": "user", "content": f"[CWD: {cwd}]\n{at_msg}"},
-                ]
-                try:
-                    asyncio.run(
-                        _run_once(
-                            at_messages, at_msg, at_provider, at_temperature,
-                            at_get_tool, at_tools,
-                            workspace=at_agent.workspace,
-                        )
-                    )
-                except KeyboardInterrupt:
-                    print(c(C.YELLOW, "\n\nInterrupted."))
-                print()
-                continue
+        if _try_at_dispatch(user_input, provider, temperature):
+            continue
 
         # Slash command? Dispatch via alpha/cli/commands.
         # Skip when the first token has an embedded `/` so that paths
@@ -334,28 +398,9 @@ def run_repl(provider: str, temperature: float):
         # Inject CWD context
         cwd = os.getcwd()
         contextualized = f"[CWD: {cwd}]\n{user_input}"
-        if image_paths and not cfg.get("supports_vision", False):
-            gemini_key = os.getenv("GEMINI_API_KEY", "")
-            if gemini_key:
-                sys.stdout.write(f"  {c(C.GRAY, '✾ Analisando imagem...')}")
-                sys.stdout.flush()
-                ocr_text = ocr_images_sync(image_paths, gemini_key)
-                sys.stdout.write("\r\033[K")
-                sys.stdout.flush()
-                if ocr_text:
-                    contextualized = (
-                        f"{contextualized}\n\n"
-                        f"[Conteudo extraido da imagem via OCR (Gemini)]:\n{ocr_text}"
-                    )
-                else:
-                    print_error("  OCR falhou — imagem ignorada.")
-            else:
-                print_error(
-                    f"Provider '{provider}' (modelo {cfg['model']}) nao suporta imagens. "
-                    f"Imagem(s) ignorada(s). Defina GEMINI_API_KEY para OCR automatico "
-                    f"ou use /provider para um modelo vision-capable (google, openai, anthropic)."
-                )
-            image_paths = []
+        contextualized, image_paths = _attach_ocr_if_needed(
+            contextualized, image_paths, cfg, provider
+        )
         user_content = build_user_content(
             contextualized, image_paths, vision_format=cfg.get("vision_format", "openai")
         )

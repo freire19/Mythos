@@ -5,8 +5,11 @@ Holds a single Playwright browser instance shared across all browser_* tools
 so cookies, login state, and tab history survive between tool calls.
 """
 
+from __future__ import annotations
+
 import asyncio
 import logging
+import sys
 from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
@@ -112,10 +115,52 @@ class BrowserSession:
             self.pages = [page]
             self.active_idx = 0
             self.context.on("page", self._on_new_page)
+            self._wire_navigation_guard(page)
 
     def _on_new_page(self, page) -> None:
         if page not in self.pages:
             self.pages.append(page)
+            self._wire_navigation_guard(page)
+
+    def _wire_navigation_guard(self, page) -> None:
+        """DEEP_SECURITY V3.3 #D120: re-validar URL pos-navegacao.
+
+        `browser_navigate` valida URL inicial (scheme + allowlist + SSRF),
+        mas paginas podem navegar via window.location, meta-refresh, ou
+        redirect HTTP que o Playwright segue automaticamente. Sem listener
+        `framenavigated`, o browser pode terminar em dominio fora da
+        allowlist sem o agente saber.
+
+        Fail-safe: ao detectar navegacao para URL nao-permitida, navegamos
+        para about:blank descartando a pagina maliciosa. Logamos para
+        diagnostico.
+        """
+        def _on_frame_nav(frame):
+            try:
+                # So validamos main frame — iframes sao isolados por origin.
+                if frame != page.main_frame:
+                    return
+                url = frame.url
+                if not url or url.startswith(("about:", "chrome:", "data:")):
+                    return
+                err = validate_browser_url(url)
+                if err:
+                    logger.warning(
+                        "browser navigation blocked post-load: %s (%s)", url, err
+                    )
+                    import asyncio as _aio
+                    try:
+                        loop = _aio.get_event_loop()
+                        loop.create_task(page.goto("about:blank"))
+                    except Exception as e:
+                        logger.warning("Failed to rescue page from bad URL: %s", e)
+            except Exception as e:
+                logger.debug("framenavigated guard error: %s", e)
+
+        try:
+            page.on("framenavigated", _on_frame_nav)
+        except Exception as e:
+            logger.warning("Could not wire framenavigated listener: %s", e)
 
     async def close(self) -> None:
         async with self._get_lock():
@@ -126,10 +171,11 @@ class BrowserSession:
             if self.context is not None:
                 try:
                     self.context.remove_listener("page", self._on_new_page)
-                except Exception:
+                except Exception as e:
                     # Playwright pode levantar se o context ja foi descartado
-                    # — nao impede o close.
-                    pass
+                    # — nao impede o close, mas registramos para diagnostico
+                    # em cenarios de stress (DR013).
+                    logger.debug("browser close: remove_listener failed (non-fatal): %s", e)
             if self.browser:
                 try:
                     await self.browser.close()
@@ -172,11 +218,35 @@ def validate_browser_url(url: str) -> str | None:
         from ..net_utils import validate_url as _validate
 
         return _validate(url)
+    except Exception as e:
+        # Fail-closed: previously returned None, which let metadata-service
+        # IPs (169.254.169.254 / GCP) through whenever the SSRF validator
+        # itself crashed. Truncate the URL in the log to avoid leaking
+        # query-string secrets.
+        logger.warning("SSRF validator failed for %s: %s", url[:80], e)
+        return "Validação de URL indisponível — tente novamente"
+
+
+def _atexit_say(msg: str) -> None:
+    # See alpha/cli/lifecycle.py:_stderr for atexit-safe print rationale.
+    try:
+        print(msg, file=sys.stderr)
     except Exception:
-        return None
+        pass
 
 
 async def shutdown_browser() -> None:
-    """Cleanup hook called on application shutdown."""
-    if BrowserSession._instance is not None and BrowserSession._instance.is_open():
-        await BrowserSession._instance.close()
+    """Cleanup hook called on application shutdown.
+
+    DR012/#015-V1.7: `browser.close()` pode travar em problemas de
+    WebSocket/rede; sem o `wait_for`, atexit pendura o processo ate
+    SIGKILL (em containers Docker, o timeout default de 10s).
+    """
+    if BrowserSession._instance is None or not BrowserSession._instance.is_open():
+        return
+    try:
+        await asyncio.wait_for(BrowserSession._instance.close(), timeout=10)
+    except asyncio.TimeoutError:
+        _atexit_say("shutdown_browser: timeout after 10s — forcing")
+    except Exception as e:
+        _atexit_say(f"shutdown_browser: {type(e).__name__}: {e}")

@@ -5,11 +5,15 @@ Executes tool calls with parallel support, handles approval flow, formats result
 When multiple tools are called in the same turn, independent tools run in parallel.
 """
 
+from __future__ import annotations
+
 import asyncio
 import json
 import logging
+import os
 import time
 from collections.abc import AsyncGenerator, Callable
+from itertools import islice
 
 from . import hooks
 from .stats import record_approval, record_tool
@@ -88,22 +92,58 @@ def _cheap_len(v) -> int:
 
     DEEP_PERFORMANCE #D030: `len(str(v))` em dicts/listas aninhados
     materializa a representação inteira só para medir. Para coleções,
-    amostramos os primeiros 50 itens e extrapolamos.
+    amostramos os primeiros 50 itens e extrapolamos. Em dicts usamos
+    `islice` para nao alocar O(N) tuplas (#P003).
+
+    DR007: a margem absoluta `+100` era irrelevante em coleções grandes
+    (lista de 10k itens com sample de 50KB ficaria com erro >> 100 chars
+    de margem). Substituido por margem proporcional 5% do extrapolado +
+    100 absoluto. Cobre viés de amostragem onde os primeiros 50 itens
+    são menores que a média da coleção; ainda subestima em distribuições
+    fortemente skewed, mas o consumidor (_format_result) corta strings
+    por campo depois de detectar excesso — qualquer subestima vira corte
+    extra, nao corrupção.
     """
+    def _with_margin(extrapolated: int) -> int:
+        return extrapolated + (extrapolated // 20) + 100  # 5% + 100
+
     if isinstance(v, str):
         return len(v)
     if isinstance(v, (list, tuple)):
         if len(v) <= 50:
             return sum(_cheap_len(x) for x in v)
         sample = sum(_cheap_len(x) for x in v[:50])
-        return sample * (len(v) // 50) + 100  # margem de segurança
+        return _with_margin(sample * (len(v) // 50))
     if isinstance(v, dict):
-        items = list(v.items())
-        if len(items) <= 50:
-            return sum(_cheap_len(k) + _cheap_len(val) + 4 for k, val in items)
-        sample = sum(_cheap_len(k) + _cheap_len(val) + 4 for k, val in items[:50])
-        return sample * (len(items) // 50) + 100
+        n = len(v)
+        if n <= 50:
+            return sum(_cheap_len(k) + _cheap_len(val) + 4 for k, val in v.items())
+        sample = sum(
+            _cheap_len(k) + _cheap_len(val) + 4
+            for k, val in islice(v.items(), 50)
+        )
+        return _with_margin(sample * (n // 50))
     return len(str(v))
+
+
+# DEEP_SECURITY V3.3 #007: cache do home path para reescrita em tool results.
+# Se `expanduser("~")` falhar (sem HOME env, container minimal), `_HOME_PATH`
+# fica vazio e a sanitizacao vira no-op em vez de quebrar.
+_HOME_PATH = os.path.expanduser("~")
+if _HOME_PATH in ("~", "", "/"):
+    _HOME_PATH = ""
+
+
+def _sanitize_paths(text: str) -> str:
+    """Substituir $HOME absoluto por `~` antes de mandar tool result ao LLM.
+
+    Provider LLM nao precisa do username do usuario em todo path; `~`
+    preserva informacao topologica ("esta sob home") sem vazar identidade.
+    Hot-path: short-circuit quando home nao esta no texto.
+    """
+    if not _HOME_PATH or _HOME_PATH not in text:
+        return text
+    return text.replace(_HOME_PATH, "~")
 
 
 def _format_result(result: dict, tool_name: str) -> str:
@@ -121,7 +161,7 @@ def _format_result(result: dict, tool_name: str) -> str:
     result = {k: v for k, v in result.items() if not (isinstance(k, str) and k.startswith("_"))}
     estimated = sum(_cheap_len(v) for v in result.values()) + 100
     if estimated <= TOOL_RESULT_MAX_CHARS:
-        return json.dumps(result, ensure_ascii=False)
+        return _sanitize_paths(json.dumps(result, ensure_ascii=False))
 
     preview = {
         k: (v[:_PREVIEW_FIELD_MAX] if isinstance(v, str) else v)
@@ -152,7 +192,7 @@ def _format_result(result: dict, tool_name: str) -> str:
             ),
         }
         out = json.dumps(minimal, ensure_ascii=False)
-    return out
+    return _sanitize_paths(out)
 
 
 def _annotate_error(result: dict, category: str) -> dict:
@@ -178,13 +218,51 @@ def _append_tool_msg(messages: list[dict], tc_id: str, result: dict, tool_name: 
     e success paths usem o mesmo `_format_result` (truncamento, preview por
     campo). Sem este helper, error messages com paths absolutos longos
     podiam passar de TOOL_RESULT_MAX_CHARS (#D022).
+
+    DEEP_SECURITY V3.3 #D125: `json.dumps(ensure_ascii=False)` nao escapa `<`
+    ou `>` no conteudo — uma string adversarial vinda de web_search,
+    extract_page_content, MCP, ou query_database pode conter literalmente
+    `</tool_result>` e simular fim do wrapper para o LLM, abrindo vetor de
+    indirect prompt injection. Neutralizamos a tag de fechamento embedida
+    substituindo `<` por zero-width-non-joiner (U+200C) no token. O resultado
+    e visualmente identico mas a regex que o LLM usa para delimitar o
+    tool_result nao casa mais.
     """
     content = _format_result(result, tool_name)
+    # Escape any `</tool_result>` (case-insensitive) appearing inside the
+    # content so the wrapper boundary stays unambiguous.
+    if "</tool_result>" in content.lower():
+        content = _neutralize_close_tag(content)
     messages.append({
         "role": "tool",
         "tool_call_id": tc_id,
         "content": f"<tool_result>{content}</tool_result>",
     })
+
+
+def _neutralize_close_tag(content: str) -> str:
+    """Replace literal `</tool_result>` with a visually-identical but
+    structurally-different sequence (`</tool_result‌>`).
+
+    Case-insensitive scan: an attacker might inject `</TOOL_RESULT>` to
+    bypass a naive case-sensitive replace. We walk the string and re-emit
+    each match with a zero-width-non-joiner before the closing `>`.
+    """
+    out = []
+    i = 0
+    target = "</tool_result>"
+    n = len(target)
+    lc = content.lower()
+    while i < len(content):
+        if lc[i:i + n] == target:
+            # Preserve original case of the attacker's text; only break the lexical match.
+            out.append(content[i:i + n - 1])  # `</tool_result` without `>`
+            out.append("‌>")             # ZWNJ + `>` — invisible to LLM, no regex match
+            i += n
+        else:
+            out.append(content[i])
+            i += 1
+    return "".join(out)
 
 
 def _record_skip(tc: dict, tool_name: str, result: dict, messages: list[dict]) -> dict:
@@ -215,12 +293,12 @@ async def _execute_single_tool(tool_def, tool_name: str, args: dict) -> dict:
             timeout=tool_timeout,
         )
     except TimeoutError:
-        logger.exception(f"Tool timeout ({tool_name}): {tool_timeout}s")
+        logger.exception("Tool timeout (%s): %ss", tool_name, tool_timeout)
         result = _annotate_error(
             {"error": f"Execution timed out ({tool_timeout}s)"}, "timeout"
         )
     except Exception as e:
-        logger.exception(f"Tool error ({tool_name}): {type(e).__name__}: {e}")
+        logger.exception("Tool error (%s): %s: %s", tool_name, type(e).__name__, e)
         result = _annotate_error(
             {"error": f"{type(e).__name__}: {e}"}, "runtime"
         )
@@ -474,7 +552,7 @@ async def execute_tool_calls(
     for i, r in enumerate(results):
         if isinstance(r, Exception):
             tc, tool_name, args, _ = runnable[i]
-            logger.exception(f"Parallel tool execution error ({tool_name}): {type(r).__name__}: {r}")
+            logger.exception("Parallel tool execution error (%s): %s: %s", tool_name, type(r).__name__, r)
             result = _annotate_error(
                 {"error": f"{type(r).__name__}: {r}"}, "runtime"
             )

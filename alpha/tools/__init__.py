@@ -31,6 +31,8 @@ Tool module index (where each tool lives, see #096):
                        check_misconfigurations
 """
 
+from __future__ import annotations
+
 import importlib
 import logging
 import os

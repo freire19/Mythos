@@ -81,6 +81,21 @@ def toggle_auto_accept() -> bool:
     return _approve_all
 
 
+def _record_preflight_decision(tool_name: str, args: dict, decision: str) -> None:
+    """Slice 2: capture pre_flight approve/reject for future estimator
+    learning. No-op for any other tool (only pre_flight cards carry the
+    structured shape `preflight.feedback` expects)."""
+    if tool_name != "pre_flight":
+        return
+    try:
+        from ...preflight import record_decision
+        record_decision(args, decision)
+    except Exception:
+        # Feedback log is best-effort — never fail the approval flow on
+        # a disk-write error or import problem.
+        pass
+
+
 def print_approval_request(tool_name: str, args: dict) -> bool:
     """Show approval request with Kali-style danger indication.
 
@@ -94,10 +109,14 @@ def print_approval_request(tool_name: str, args: dict) -> bool:
     # If user previously chose "approve all", auto-approve
     if _approve_all:
         print(f"  {c(C.GREEN, '✦')} {c(C.CYAN, tool_name)} {c(C.GREEN_DARK, '(auto-approved)')}")
+        _record_preflight_decision(tool_name, args, "auto_approve")
         return True
 
     if tool_name == "present_plan":
         _print_plan_card(args)
+    elif tool_name == "pre_flight":
+        from .planning import _print_preflight_card
+        _print_preflight_card(args)
     else:
         print()
         print(f"  {c(C.RED + C.BOLD, '┌─ APROVAÇÃO NECESSÁRIA ─────────────────────')}")
@@ -115,9 +134,11 @@ def print_approval_request(tool_name: str, args: dict) -> bool:
             ).strip().lower()
             if resp in ("s", "sim", "y", "yes"):
                 print(f"  {c(C.GREEN, '✓ Aprovado')}")
+                _record_preflight_decision(tool_name, args, "approve")
                 return True
             if resp in ("n", "não", "nao", "no"):
                 print(f"  {c(C.RED, '✗ Negado')}")
+                _record_preflight_decision(tool_name, args, "reject")
                 return False
             if resp in ("a", "all", "todos"):
                 # Persists across REPL restarts. `/clear` clears it via
@@ -125,12 +146,15 @@ def print_approval_request(tool_name: str, args: dict) -> bool:
                 # /accept-edits) can turn it back off.
                 set_auto_accept(True)
                 print(f"  {c(C.GREEN + C.BOLD, '✓ Aprovado (all — salvo para futuras sessões)')}")
+                _record_preflight_decision(tool_name, args, "approve_all")
                 return True
     except EOFError:
         print(f"  {c(C.GRAY, '(auto-denied — sem terminal interativo)')}")
+        _record_preflight_decision(tool_name, args, "eof")
         return False
     except KeyboardInterrupt:
         # Sem este handler, Ctrl+C durante o prompt mata o REPL inteiro.
         # Tratar como "negado" e devolver controle preserva a sessao.
         print(f"\n  {c(C.RED, '✗ Negado (Ctrl+C)')}")
+        _record_preflight_decision(tool_name, args, "interrupt")
         return False

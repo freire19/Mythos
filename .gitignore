@@ -83,3 +83,9 @@ skills/audit-3-front-ux/
 skills/audit-4-front-perf/
 skills/audit-front-deep/
 test_targets/aiohttp/
+
+# Session scratch / audit helpers — avoid accidental commits (#DM046)
+_audit_*.py
+_scratch_*.py
+_tmp_*
+OK/

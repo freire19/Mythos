@@ -8,6 +8,8 @@ Fail-closed means: if DNS resolution fails or the IP cannot be parsed,
 the address is treated as private/blocked.  This is the secure default.
 """
 
+from __future__ import annotations
+
 import asyncio
 import ipaddress
 import logging

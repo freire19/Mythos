@@ -5,6 +5,8 @@ Supports single delegation (delegate_task) and parallel delegation
 (delegate_parallel) with concurrency limited by max_parallel_agents.
 """
 
+from __future__ import annotations
+
 import asyncio
 import json
 import logging

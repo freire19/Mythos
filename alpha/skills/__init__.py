@@ -10,6 +10,8 @@ The agent gets a compact index of available skills in its system prompt
 and can call load_skill(name) to pull the full instructions on demand.
 """
 
+from __future__ import annotations
+
 from .loader import Skill, load_skill_file
 from .prompt import build_skill_index, inject_skill_index
 from .registry import get_skill, list_skills, load_all_skills

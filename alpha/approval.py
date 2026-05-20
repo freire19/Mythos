@@ -8,6 +8,8 @@ User-defined `allow` / `deny` rules from `.alpha/settings.json` override the
 built-in defaults — see `_load_permission_rules` for the schema.
 """
 
+from __future__ import annotations
+
 import logging
 import os
 import re
@@ -16,6 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ._platform import IS_WINDOWS
+from .security import PIPELINE_REDIRECT_SPLIT_RE, PIPELINE_SPLIT_RE
 from .settings import find_config_file, read_json
 
 logger = logging.getLogger(__name__)
@@ -152,6 +155,10 @@ _SAFE_SHELL_COMMANDS_WIN_LOWER = frozenset(c.lower() for c in SAFE_SHELL_COMMAND
 # Dangerous operators (subshells, redirection, variable expansion)
 # Pipes (|) are allowed if all commands in the pipeline are safe
 _DANGEROUS_OPS = re.compile(r"[;&`<>\n\r]|\$\(|&&|\|\||\$\{")
+
+# #P001: shell-expansion/injection vectors checked by _is_safe_pipeline
+# (allows &&, ||, ; — these are decomposed into per-command safety checks).
+_PIPELINE_DANGEROUS_RE = re.compile(r"[`<>]|\$\(|\$\{|\n|\r")
 
 # Dangerous args per command (exfiltration / destructive writes)
 # V-001 FIX: validate individual args (not joined string)
@@ -318,18 +325,17 @@ def _is_safe_pipeline(pipeline: str) -> bool:
     Still blocks dangerous operators like backticks, $(), redirects.
     """
     # Block shell expansion / injection vectors (but NOT &&, ||, ;)
-    _PIPELINE_DANGEROUS = re.compile(r"[`<>]|\$\(|\$\{|\n|\r")
-    if _PIPELINE_DANGEROUS.search(pipeline):
+    if _PIPELINE_DANGEROUS_RE.search(pipeline):
         return False
 
     # Split by logical operators and pipes, validate each command
-    segments = re.split(r"\s*(?:&&|\|\||;|\|)\s*", pipeline)
+    segments = PIPELINE_SPLIT_RE.split(pipeline)
     for seg in segments:
         seg = seg.strip()
         if not seg:
             continue
         # Strip redirects for validation
-        cmd_part = re.split(r"\s*(?:>>?|2>>?|<)\s*", seg)[0].strip()
+        cmd_part = PIPELINE_REDIRECT_SPLIT_RE.split(seg)[0].strip()
         if not cmd_part:
             continue
         if not _is_single_command_safe(cmd_part):
@@ -346,7 +352,13 @@ def _is_safe_pipeline(pipeline: str) -> bool:
 _RULE_PARSE = re.compile(r"^([a-zA-Z_][\w]*)(?:\(([^)]*)\)|:(.+))?$")
 
 # Per-tool primary arg name (used to match args against rule patterns).
-# Falls back to the first string value if the tool isn't listed here.
+#
+# DEEP_SECURITY V3.3 #D126: a versao anterior tinha um fallback "primeira
+# string em args.values()" para tools fora desta tabela. Isso era nao-
+# deterministico (depende de dict-order do JSON do modelo) e podia fazer
+# uma rule literal bater contra o arg errado — ex: `delegate_task(task)`
+# matching contra `context="task"` por acidente. Removido o fallback;
+# adicionamos aqui tools que precisam ser regulaveis.
 _PRIMARY_ARG = {
     "execute_shell": "command",
     "execute_pipeline": "pipeline",
@@ -360,6 +372,15 @@ _PRIMARY_ARG = {
     "git_operation": "action",
     "query_database": "query",
     "search_and_replace": "path",
+    # Adicionados em V3.3 (#D126) — antes caiam no fallback nao-deterministico
+    "delegate_task": "task",
+    "delegate_parallel": "tasks",
+    "delegate_consensus": "question",
+    "browser_navigate": "url",
+    "browser_new_tab": "url",
+    "apify_run_actor": "actor_id",
+    "install_package": "package",
+    "execute_python": "code",
 }
 
 
@@ -384,15 +405,25 @@ class PermissionRule:
 
 
 def _primary_arg_value(tool_name: str, args: dict) -> str | None:
+    """Retorna o valor do "primary arg" para matching de allow/deny rules.
+
+    DEEP_SECURITY V3.3 #D126: removido o fallback "primeira string em
+    args.values()". A previsibilidade do approval system depende de
+    rules baterem contra o campo *explicitamente* mapeado em _PRIMARY_ARG.
+    Tools fora do mapping retornam None — rules literal/regex sobre args
+    nao batem (apenas rules tool-name-only, comportamento esperado).
+    """
     if not isinstance(args, dict):
         return None
     key = _PRIMARY_ARG.get(tool_name)
-    if key and key in args:
+    if key is None:
+        # Tool sem mapping — sem heuristica de adivinhacao. Rules
+        # tool-name-only continuam funcionando (PermissionRule.matches
+        # retorna True quando literal e pattern sao None).
+        return None
+    if key in args:
         val = args[key]
         return str(val) if val is not None else None
-    for v in args.values():
-        if isinstance(v, str):
-            return v
     return None
 
 

@@ -1,21 +1,19 @@
 """deploy_check tool — composite (#030 split)."""
 
+from __future__ import annotations
+
 import asyncio
 
 from . import ToolCategory, ToolDefinition, ToolSafety, register_tool
-from ._composite_helpers import _run_tool, _violation
+from ._composite_helpers import _resolve_target, _run_tool
 from ._composite_tests import _run_tests
-from .path_helpers import _validate_path
-from .workspace import AGENT_WORKSPACE
 
 
 async def _deploy_check(path: str = None) -> dict:
     """Run pre-deployment checklist: tests, git status, lint."""
-    target = path or str(AGENT_WORKSPACE)
-    try:
-        target_path = _validate_path(target)
-    except PermissionError as e:
-        return _violation(str(e))
+    target_path, err = _resolve_target(path)
+    if err:
+        return err
 
     checks = {}
 

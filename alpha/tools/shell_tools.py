@@ -1,4 +1,38 @@
-"""Shell execution tool for ALPHA agent."""
+"""Shell execution tool for ALPHA agent.
+
+Implements `execute_shell` (DESTRUCTIVE) — the agent's escape hatch when
+no structured tool fits. The skinny surface (one tool, one function)
+intentionally pushes the agent toward `git_operation`, `read_file`,
+`execute_pipeline`, etc. for things those tools already handle safely.
+
+Defense layers BEFORE subprocess spawn:
+
+1. `HARD_BLOCKED_RE` (from `alpha.security`, combined regex per #D020)
+   rejects patterns the security review marks "never run", like writes
+   to /dev/disk, /etc/cron.d, /etc/sudoers.d. This is fail-closed —
+   tested via `test_security_v10_v11_*`.
+2. `validate_command()` (from `alpha.security`) enforces a 75+ command
+   allowlist + operator blacklist (`;`, `&`, backticks, `$()`); pipes
+   handled separately via `validate_pipeline` (whitelisted operators
+   like `|`, `>`, `>>` with redirect-target containment checks).
+3. `assert_within_workspace(cwd)` — explicit `cwd` arg can't escape
+   AGENT_WORKSPACE via `..` traversal or absolute path.
+4. `get_safe_env()` strips LD_PRELOAD / LD_LIBRARY_PATH / PYTHONPATH
+   from the child env (#D122) so a compromised env var can't pivot.
+
+Execution: `run_subprocess_safe` from `_subprocess_helpers` (sync
+subprocess timeout + `proc.kill()` on cancel/timeout, never `shell=True`).
+
+Windows uses `_execute_shell_windows` shim (cmd.exe semantics) but with
+the same security gates.
+
+What's NOT here:
+- Pipelines → `alpha.tools.pipeline_tools` (`execute_pipeline`)
+- Subprocess primitives + timeout handling → `_subprocess_helpers`
+- Security policy → `alpha.security`
+"""
+
+from __future__ import annotations
 
 import asyncio
 import shlex

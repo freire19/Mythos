@@ -90,16 +90,19 @@ def _sse(payload: dict) -> str:
 @pytest.fixture
 def _reset_shared_llm_client():
     """Os testes monkeypatcham `httpx.AsyncClient` para devolver um fake.
-    Como o cliente real e cacheado em `_shared_llm_client` (#026/#076),
+    Como o cliente real e cacheado no LoopAwareClient (#026/#076, #DM042),
     precisamos limpar o singleton entre testes — caso contrario o segundo
     teste reusa o fake do primeiro (e os fakes sao stateful)."""
     from alpha import llm
 
-    llm._shared_llm_client = None
-    llm._llm_client_loop = None
+    # Reset internal state of LoopAwareClient — assignment to None is the
+    # cheap way: o proximo get() detecta cliente faltando e reconstrui via
+    # build callable (que ja capturou o monkeypatched httpx.AsyncClient).
+    llm._shared_llm_client._client = None
+    llm._shared_llm_client._loop = None
     yield
-    llm._shared_llm_client = None
-    llm._llm_client_loop = None
+    llm._shared_llm_client._client = None
+    llm._shared_llm_client._loop = None
 
 
 @pytest.mark.asyncio

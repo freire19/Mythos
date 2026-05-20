@@ -4,6 +4,8 @@ Exposes web search as a callable tool so the LLM can search on demand
 instead of relying on the pre-loop web search phase.
 """
 
+from __future__ import annotations
+
 import logging
 
 from . import ToolCategory, ToolDefinition, ToolSafety, register_tool

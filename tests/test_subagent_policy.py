@@ -89,12 +89,16 @@ class TestRuntimeEnvOverrides:
 
 
 class TestRunSubagentReadsGetters:
-    """`_run_subagent` chama os getters runtime em vez de FEATURES dict."""
+    """`_run_subagent` chama os getters runtime em vez de FEATURES dict.
+
+    #DM040 split: blocklist logic moved to `_resolve_subagent_blocklist`.
+    These tests now inspect that helper instead of `_run_subagent`.
+    """
 
     def test_run_subagent_calls_getters(self):
         from alpha.tools import delegate_tools
 
-        src = inspect.getsource(delegate_tools._run_subagent)
+        src = inspect.getsource(delegate_tools._resolve_subagent_blocklist)
         # Os 3 getters devem ser chamados.
         assert "get_subagent_policy()" in src
         assert "get_subagent_extra_block()" in src
@@ -105,7 +109,7 @@ class TestRunSubagentReadsGetters:
         evitando regressao silenciosa do cache import-time."""
         from alpha.tools import delegate_tools
 
-        src = inspect.getsource(delegate_tools._run_subagent)
+        src = inspect.getsource(delegate_tools._resolve_subagent_blocklist)
         assert 'feat.get("subagent_policy"' not in src
         assert 'feat.get("subagent_extra_block"' not in src
         assert 'feat.get("subagent_allow"' not in src
@@ -113,14 +117,14 @@ class TestRunSubagentReadsGetters:
     def test_relaxed_policy_skips_destructive_blocklist(self):
         from alpha.tools import delegate_tools
 
-        src = inspect.getsource(delegate_tools._run_subagent)
+        src = inspect.getsource(delegate_tools._resolve_subagent_blocklist)
         assert 'policy != "relaxed"' in src or 'policy == "strict"' in src
 
     def test_delegate_invariant_preserved(self):
         """Mesmo com allow incluindo delegate_*, anti-recursao permanece."""
         from alpha.tools import delegate_tools
 
-        src = inspect.getsource(delegate_tools._run_subagent)
+        src = inspect.getsource(delegate_tools._resolve_subagent_blocklist)
         # Conta ocorrencias — esperamos no minimo 2 (inicio + apos allow override).
         assert src.count('"delegate_task", "delegate_parallel"') >= 2
 

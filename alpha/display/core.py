@@ -5,6 +5,8 @@ Kali Linux-inspired color scheme with priority-based visual indicators.
 Green/red dominant palette, safety-aware tool display, hacker aesthetic.
 """
 
+from __future__ import annotations
+
 import os
 
 # Theme primitives — colors, display constants, safety icons, _truncate.
@@ -32,10 +34,12 @@ from .markdown import render_markdown  # noqa: F401, E402
 # for back-compat (Plano-Upgrade-v3 §1.1).
 from .renderers.planning import _TODO_STATUS_GLYPH, _print_todo_list  # noqa: F401
 from .renderers.tools import (  # noqa: F401
-    _CATEGORY_ICONS,        # used below by print_tools_list
-    _display_tool_name,     # back-compat (display/__init__.py)
-    _render_diff,           # back-compat (display/__init__.py)
-    _tool_args_preview,     # back-compat (delegate_tools.py imports it)
+    _CATEGORY_ICONS,
+    _display_tool_name,
+    _format_tool_call_header,
+    _print_result_body,
+    _render_diff,
+    _tool_args_preview,
     label_for_tool,
     live_label_for_tool,
     print_tool_call,

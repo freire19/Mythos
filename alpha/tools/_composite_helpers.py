@@ -2,8 +2,11 @@
 
 Extracted from composite_tools.py (#030 split)."""
 
+from __future__ import annotations
+
 import asyncio
 import logging
+from pathlib import Path
 
 from ..executor import (
     TOOL_EXECUTION_TIMEOUT,
@@ -12,6 +15,8 @@ from ..executor import (
     _annotate_error,
 )
 from . import get_tool
+from .path_helpers import _validate_path
+from .workspace import AGENT_WORKSPACE
 
 logger = logging.getLogger(__name__)
 
@@ -19,6 +24,34 @@ logger = logging.getLogger(__name__)
 def _violation(msg: str) -> dict:
     """Workspace-violation result with the executor's standard error invariant."""
     return _annotate_error({"error": msg, "workspace_violation": True}, "violation")
+
+
+def _resolve_target(
+    path: str | None, *, default_to_workspace: bool = True
+) -> tuple[Path | None, dict | None]:
+    """Resolve and validate a composite tool's target path.
+
+    Centraliza o padrao `target = path or AGENT_WORKSPACE; _validate_path; _violation`
+    que era duplicado em todas as 4 composite tools (#DM025).
+
+    Returns:
+        (Path, None) on success — caller can use the resolved path.
+        (None, violation_dict) on failure — caller should `return` it directly.
+
+    Args:
+        path: Caminho a resolver. Se None/vazio e default_to_workspace=True,
+            usa AGENT_WORKSPACE. Se default_to_workspace=False, retorna
+            violation quando path estiver ausente (e.g. search_and_replace
+            que exige path explicito).
+    """
+    if not path:
+        if not default_to_workspace:
+            return None, _violation("path e obrigatorio para esta tool")
+        path = str(AGENT_WORKSPACE)
+    try:
+        return _validate_path(path), None
+    except PermissionError as e:
+        return None, _violation(str(e))
 
 
 async def _run_tool(name: str, *, timeout: float | None = None, **kwargs) -> dict:

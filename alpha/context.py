@@ -6,6 +6,8 @@ optimization. Instead of crude truncation, uses the LLM itself to summarize
 old messages when context grows too large.
 """
 
+from __future__ import annotations
+
 import json
 import logging
 import os
@@ -25,10 +27,40 @@ CHARS_PER_TOKEN = 4
 # so the compression trigger fires before the model's real budget is hit.
 IMAGE_TOKEN_COST = 1500
 
-# DEEP_PERFORMANCE #033: cache de estimate_messages_tokens.
+# DEEP_PERFORMANCE #033 + #P002: cache de estimate_messages_tokens.
+# Cache key inclui fingerprint do tail porque (id, len) sozinhos nao
+# detectam mutacao in-place — streaming append em messages[-1]["content"]
+# ou `del msg["reasoning_content"]` preservam len.
 _last_messages_id: int | None = None
 _last_messages_len: int = 0
+_last_tail_fingerprint: tuple = ()
 _last_token_estimate: int = 0
+
+
+def _tail_fingerprint(messages: list[dict]) -> tuple:
+    """Cheap fingerprint do tail para invalidar o cache quando o ultimo
+    message muda in-place sem alterar len(messages).
+
+    Coleta apenas o id() e tamanhos de content/reasoning/tool_calls do
+    ultimo message — strings nao sao re-iteradas. Custo O(1) amortizado.
+    """
+    if not messages:
+        return ()
+    last = messages[-1]
+    content = last.get("content")
+    if isinstance(content, str):
+        content_size = len(content)
+    elif isinstance(content, list):
+        content_size = sum(
+            len(b.get("text", "")) if isinstance(b, dict) and b.get("type") == "text" else 1
+            for b in content
+        )
+    else:
+        content_size = 0
+    reasoning = last.get("reasoning_content") or ""
+    tool_calls = last.get("tool_calls") or ()
+    return (id(last), content_size, len(reasoning), len(tool_calls))
+
 
 import contextvars  # noqa: E402 — keep grouped with the failure counter
 
@@ -96,14 +128,22 @@ def _estimate_content_tokens(content) -> int:
 def estimate_messages_tokens(messages: list[dict]) -> int:
     """Estimate total tokens across all messages.
 
-    DEEP_PERFORMANCE #033: cache por id(messages)+len. Chamada 4x por turno
-    (needs_compression, _context_pct, compress_until_under_budget, logging).
-    A lista é mutada in-place (append/pop), então len() captura mudanças.
+    DEEP_PERFORMANCE #033 + #P002: cache por (id, len, tail_fingerprint).
+    Chamada 4x por turno (needs_compression, _context_pct,
+    compress_until_under_budget, logging). O fingerprint do tail captura
+    mutacoes in-place do ultimo message — append de streaming, `del
+    reasoning_content`, etc. — que (id, len) sozinhos perdiam.
     """
-    global _last_messages_id, _last_messages_len, _last_token_estimate
+    global _last_messages_id, _last_messages_len
+    global _last_tail_fingerprint, _last_token_estimate
     mid = id(messages)
     mlen = len(messages)
-    if mid == _last_messages_id and mlen == _last_messages_len:
+    fp = _tail_fingerprint(messages)
+    if (
+        mid == _last_messages_id
+        and mlen == _last_messages_len
+        and fp == _last_tail_fingerprint
+    ):
         return _last_token_estimate
 
     total = 0
@@ -120,6 +160,7 @@ def estimate_messages_tokens(messages: list[dict]) -> int:
 
     _last_messages_id = mid
     _last_messages_len = mlen
+    _last_tail_fingerprint = fp
     _last_token_estimate = total
     return total
 

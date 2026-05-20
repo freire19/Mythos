@@ -23,9 +23,10 @@ from collections.abc import AsyncGenerator
 
 import httpx
 
+from ._http_singleton import LoopAwareClient
 from ._rate_limiter import acquire_llm_token as _rate_limit_acquire
 
-from .config import RETRY
+from .config import HTTPX_LIMITS_LLM, LLM_TIMEOUT, RETRY
 from .llm import DsmlStripper, _calc_backoff
 
 logger = logging.getLogger(__name__)
@@ -40,44 +41,26 @@ _TRANSIENT_HTTPX_ERRORS = (
     httpx.PoolTimeout,
 )
 
-# Loop-aware shared client; mirrors llm.py. Single-shot CLI (`asyncio.run`)
-# creates a new loop per invocation but the module stays import-cached, so we
-# rebuild when the loop or client is stale.
-_client: httpx.AsyncClient | None = None
-_client_loop: object | None = None
-_client_lock = asyncio.Lock()
+# Loop-aware shared client; #DM042 migrou para LoopAwareClient
+# (alpha/_http_singleton.py) — mesmo padrao usado por llm.py e web_search.py.
+# `timeout` deixou de ser parametro: stream_anthropic so passa LLM_TIMEOUT
+# (visto no unico call site em _stream_anthropic_provider). Per-request
+# timeout override iria via client.request(timeout=...) — nao usado aqui.
+_client = LoopAwareClient(
+    name="llm_anthropic",
+    build=lambda: httpx.AsyncClient(
+        timeout=httpx.Timeout(LLM_TIMEOUT, connect=10.0),
+        limits=httpx.Limits(**HTTPX_LIMITS_LLM),
+    ),
+)
 
 
-async def _get_client(timeout: float) -> httpx.AsyncClient:
-    """Return a loop-aware shared httpx.AsyncClient for Anthropic."""
-    global _client, _client_loop
-    loop = asyncio.get_running_loop()
-    if (
-        _client is not None
-        and not _client.is_closed
-        and _client_loop is loop
-    ):
-        return _client
-    # Lock protects the aclose() + reassign window from concurrent coroutines
-    # creating duplicate clients (mirrors the same guard in llm.py).
-    async with _client_lock:
-        if (
-            _client is not None
-            and not _client.is_closed
-            and _client_loop is loop
-        ):
-            return _client
-        if _client is not None and not _client.is_closed:
-            try:
-                await _client.aclose()
-            except Exception:
-                pass
-        _client = httpx.AsyncClient(
-            timeout=httpx.Timeout(timeout, connect=10.0),
-            limits=httpx.Limits(max_keepalive_connections=5, max_connections=20),
-        )
-        _client_loop = loop
-    return _client
+async def _get_client(timeout: float | None = None) -> httpx.AsyncClient:
+    """Return the loop-aware shared httpx.AsyncClient for Anthropic.
+
+    `timeout` parameter kept for back-compat; ignored (build callable usa
+    LLM_TIMEOUT). Per-request override deve ir via client.request(timeout=)."""
+    return await _client.get()
 
 
 # ── OpenAI → Anthropic conversion ──
@@ -213,6 +196,148 @@ def _convert_messages(openai_messages: list[dict]) -> tuple[str, list[dict]]:
 # ── Streaming ──
 
 
+class _AnthropicStreamState:
+    """Per-attempt accumulators for one Anthropic streaming call.
+
+    Mirrors `_StreamState` in `llm.py`: held outside `stream_anthropic`
+    so the event applier is a pure function of state. `blocks` maps
+    Anthropic's `index` → `{type, text|input_json, id?, name?}`.
+    `stopped` is set when the SSE loop sees `message_stop` so the caller
+    can break the line loop with a single flag instead of branching on
+    a dual return value.
+    """
+
+    __slots__ = (
+        "accumulated_content",
+        "blocks",
+        "dsml_stripper",
+        "last_usage",
+        "yielded_any",
+        "stopped",
+    )
+
+    def __init__(self) -> None:
+        self.accumulated_content = ""
+        self.blocks: dict[int, dict] = {}
+        self.dsml_stripper = DsmlStripper()
+        # Anthropic emits input_tokens in `message_start` and final
+        # output_tokens in `message_delta`. Both stay in the same dict
+        # shape so alpha.cost.record_usage handles both providers
+        # without per-provider branches.
+        self.last_usage: dict = {}
+        self.yielded_any = False
+        self.stopped = False
+
+
+def _build_anthropic_request(
+    messages: list[dict],
+    tools: list[dict],
+    temperature: float,
+    model: str,
+    api_key: str,
+) -> tuple[dict, dict]:
+    """Build (headers, payload) for the Anthropic /v1/messages POST."""
+    system_text, anthropic_messages = _convert_messages(messages)
+    anthropic_tools = _convert_tools(tools)
+    payload: dict = {
+        "model": model,
+        "max_tokens": DEFAULT_MAX_TOKENS,
+        "messages": anthropic_messages,
+        "stream": True,
+        "temperature": temperature,
+    }
+    if system_text:
+        payload["system"] = system_text
+    if anthropic_tools:
+        payload["tools"] = anthropic_tools
+    headers = {
+        "x-api-key": api_key,
+        "anthropic-version": ANTHROPIC_VERSION,
+        "content-type": "application/json",
+    }
+    return headers, payload
+
+
+def _apply_anthropic_event(event: dict, state: _AnthropicStreamState) -> str | None:
+    """Apply one streaming Anthropic event to ``state``. Returns any
+    user-visible text to yield as a ``content_token``, or None. Sets
+    ``state.stopped = True`` on ``message_stop``."""
+    etype = event.get("type")
+
+    if etype == "message_start":
+        msg_usage = (event.get("message") or {}).get("usage") or {}
+        if msg_usage:
+            state.last_usage.update(msg_usage)
+    elif etype == "message_delta":
+        delta_usage = event.get("usage") or {}
+        if delta_usage:
+            state.last_usage.update(delta_usage)
+
+    if etype == "content_block_start":
+        idx = event["index"]
+        block = event["content_block"]
+        if block["type"] == "text":
+            state.blocks[idx] = {"type": "text", "text": ""}
+        elif block["type"] == "tool_use":
+            state.blocks[idx] = {
+                "type": "tool_use",
+                "id": block.get("id", ""),
+                "name": block.get("name", ""),
+                "input_json": "",
+            }
+
+    elif etype == "content_block_delta":
+        idx = event["index"]
+        delta = event.get("delta", {})
+        block = state.blocks.get(idx)
+        if block is None:
+            return None
+        if delta.get("type") == "text_delta":
+            text = delta.get("text", "")
+            if text:
+                block["text"] = block.get("text", "") + text
+                safe = state.dsml_stripper.feed(text)
+                if safe:
+                    return safe
+        elif delta.get("type") == "input_json_delta":
+            block["input_json"] = block.get("input_json", "") + delta.get("partial_json", "")
+
+    elif etype == "message_stop":
+        state.stopped = True
+
+    return None
+
+
+def _collect_tool_calls(blocks: dict[int, dict]) -> list[dict]:
+    """Pick tool_use blocks into the final tool_calls list.
+
+    Anthropic emits `content_block_start` events with monotonically
+    increasing indices and CPython 3.7+ preserves dict insertion order,
+    so iterating `blocks.values()` produces them in original order.
+
+    Logs a warning if any input_json is malformed but keeps the raw
+    string so callers see what arrived.
+    """
+    tool_calls = []
+    for block in blocks.values():
+        if block["type"] != "tool_use":
+            continue
+        args_json = block.get("input_json", "") or "{}"
+        try:
+            json.loads(args_json)
+        except json.JSONDecodeError:
+            logger.warning(
+                "Anthropic tool '%s' returned malformed JSON args (kept verbatim)",
+                block.get("name"),
+            )
+        tool_calls.append({
+            "id": block.get("id", ""),
+            "name": block.get("name", ""),
+            "arguments": args_json,
+        })
+    return tool_calls
+
+
 async def stream_anthropic(
     messages: list[dict],
     tools: list[dict],
@@ -225,41 +350,14 @@ async def stream_anthropic(
     """Stream from Anthropic's /v1/messages endpoint, yielding the same event
     shape as the OpenAI streaming path: `content_token` and a single `final`.
     """
-    system_text, anthropic_messages = _convert_messages(messages)
-    anthropic_tools = _convert_tools(tools)
+    headers, payload = _build_anthropic_request(messages, tools, temperature, model, api_key)
 
-    payload: dict = {
-        "model": model,
-        "max_tokens": DEFAULT_MAX_TOKENS,
-        "messages": anthropic_messages,
-        "stream": True,
-        "temperature": temperature,
-    }
-    if system_text:
-        payload["system"] = system_text
-    if anthropic_tools:
-        payload["tools"] = anthropic_tools
-
-    headers = {
-        "x-api-key": api_key,
-        "anthropic-version": ANTHROPIC_VERSION,
-        "content-type": "application/json",
-    }
-
-    accumulated_content = ""
-    blocks: dict[int, dict] = {}  # index → {"type": "text"|"tool_use", ...}
-    yielded_any = False
-    dsml_stripper = DsmlStripper()
-    # Aggregated usage across the stream. Anthropic emits input_tokens in
-    # `message_start` and final output_tokens in `message_delta`. Both stay
-    # in the same dict shape so alpha.cost.record_usage handles both
-    # Anthropic and OpenAI without per-provider branches.
-    last_usage: dict = {}
-
+    state = _AnthropicStreamState()
     client = await _get_client(timeout)
     last_error: str | None = None
+    max_retries = RETRY["llm"]["max_retries"]
 
-    for attempt in range(RETRY["llm"]["max_retries"] + 1):
+    for attempt in range(max_retries + 1):
         try:
             await _rate_limit_acquire("anthropic")
             async with client.stream(
@@ -267,7 +365,7 @@ async def stream_anthropic(
             ) as response:
                 if response.status_code >= 400:
                     body = await response.aread()
-                    logger.error(f"Anthropic HTTP {response.status_code}: {body[:500]}")
+                    logger.error("Anthropic HTTP %d: %s", response.status_code, body[:500])
                     yield {
                         "type": "final",
                         "content": "",
@@ -279,62 +377,24 @@ async def stream_anthropic(
                 async for line in response.aiter_lines():
                     if not line.startswith("data: "):
                         continue
-                    data_str = line[6:]
                     try:
-                        event = json.loads(data_str)
+                        event = json.loads(line[6:])
                     except json.JSONDecodeError:
                         continue
 
-                    etype = event.get("type")
-
-                    if etype == "message_start":
-                        msg_usage = (event.get("message") or {}).get("usage") or {}
-                        if msg_usage:
-                            last_usage.update(msg_usage)
-                    elif etype == "message_delta":
-                        delta_usage = event.get("usage") or {}
-                        if delta_usage:
-                            last_usage.update(delta_usage)
-
-                    if etype == "content_block_start":
-                        idx = event["index"]
-                        block = event["content_block"]
-                        if block["type"] == "text":
-                            blocks[idx] = {"type": "text", "text": ""}
-                        elif block["type"] == "tool_use":
-                            blocks[idx] = {
-                                "type": "tool_use",
-                                "id": block.get("id", ""),
-                                "name": block.get("name", ""),
-                                "input_json": "",
-                            }
-
-                    elif etype == "content_block_delta":
-                        idx = event["index"]
-                        delta = event.get("delta", {})
-                        block = blocks.get(idx)
-                        if block is None:
-                            continue
-                        if delta.get("type") == "text_delta":
-                            text = delta.get("text", "")
-                            if text:
-                                block["text"] = block.get("text", "") + text
-                                safe = dsml_stripper.feed(text)
-                                if safe:
-                                    accumulated_content += safe
-                                    yielded_any = True
-                                    yield {"type": "content_token", "token": safe}
-                        elif delta.get("type") == "input_json_delta":
-                            block["input_json"] = block.get("input_json", "") + delta.get("partial_json", "")
-
-                    elif etype == "message_stop":
+                    emit = _apply_anthropic_event(event, state)
+                    if emit:
+                        state.accumulated_content += emit
+                        state.yielded_any = True
+                        yield {"type": "content_token", "token": emit}
+                    if state.stopped:
                         break
 
             # Drain any unclosed `<…` tail held back during streaming.
-            tail = dsml_stripper.flush()
+            tail = state.dsml_stripper.flush()
             if tail:
-                accumulated_content += tail
-                yielded_any = True
+                state.accumulated_content += tail
+                state.yielded_any = True
                 yield {"type": "content_token", "token": tail}
 
             # Success — break out of retry loop
@@ -345,20 +405,24 @@ async def stream_anthropic(
             last_error = f"{type(e).__name__}: {e}"
             # Once any token has been yielded to the caller the partial stream
             # is already committed downstream — replaying would duplicate it.
-            if yielded_any or attempt >= RETRY["llm"]["max_retries"]:
+            if state.yielded_any or attempt >= max_retries:
                 break
             backoff = _calc_backoff(attempt)
             logger.warning(
-                f"Anthropic transient error (attempt {attempt + 1}/{RETRY["llm"]["max_retries"] + 1}), "
-                f"retrying in {backoff:.1f}s: {e}"
+                "Anthropic transient error (attempt %d/%d), retrying in %.1fs: %s",
+                attempt + 1, max_retries + 1, backoff, e,
             )
-            blocks = {}
+            # Reset block accumulator + stopped flag for the next attempt;
+            # the already-yielded tokens are committed, accumulated_content
+            # carries forward so the final event reflects what reached the user.
+            state.blocks = {}
+            state.stopped = False
             await asyncio.sleep(backoff)
         except (asyncio.CancelledError, KeyboardInterrupt):
             raise
         except Exception as e:
             last_error = f"{type(e).__name__}: {e}"
-            logger.error(f"Anthropic non-transient error: {e}", exc_info=True)
+            logger.error("Anthropic non-transient error: %s", e, exc_info=True)
             break
 
     if last_error:
@@ -370,33 +434,12 @@ async def stream_anthropic(
         }
         return
 
-    tool_calls = []
-    for _, block in sorted(blocks.items()):
-        if block["type"] != "tool_use":
-            continue
-        args_json = block.get("input_json", "") or "{}"
-        # Validate the accumulated JSON; keep raw on failure so callers see what arrived.
-        try:
-            json.loads(args_json)
-        except json.JSONDecodeError:
-            logger.warning(
-                "Anthropic tool '%s' returned malformed JSON args (kept verbatim)",
-                block.get("name"),
-            )
-        tool_calls.append(
-            {
-                "id": block.get("id", ""),
-                "name": block.get("name", ""),
-                "arguments": args_json,
-            }
-        )
-
     yield {
         "type": "final",
-        "content": accumulated_content,
-        "tool_calls": tool_calls,
+        "content": state.accumulated_content,
+        "tool_calls": _collect_tool_calls(state.blocks),
         "error": None,
-        "usage": last_usage or None,
+        "usage": state.last_usage or None,
     }
 
 

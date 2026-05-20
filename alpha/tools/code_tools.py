@@ -6,6 +6,8 @@ exfiltration (httpx, aiohttp, requests, duckduckgo_search).
 The blocklist is best-effort — NOT a real sandbox. Single-user only.
 """
 
+from __future__ import annotations
+
 import ast
 import asyncio
 import logging
@@ -103,7 +105,38 @@ _BLOCKED_NAME_TOKENS = frozenset({
     "__import__",
 })
 
-_OPEN_WRITE_MODES = frozenset({"w", "wb", "a", "ab", "x", "xb", "w+", "r+", "rb+"})
+# DEEP_SECURITY V3.3 #D123 / #D124: o AST blocklist anterior cobria `os`,
+# `subprocess`, `posix`, e `open(path, "w")` em modo Constant — mas deixava
+# passar todo o cluster `pathlib.Path` + `io.FileIO` + `tempfile.*` que
+# expoe as mesmas primitivas via attribute access. Verificado em runtime
+# (audit DEEP_SECURITY V3.3 §"Verificacao em runtime"): `Path("/etc/passwd")
+# .read_text()`, `Path.home().joinpath(".bashrc").write_text(...)`,
+# `io.FileIO(p, "wb")` e `tempfile.NamedTemporaryFile(mode="w")` eram
+# ALLOWED. Combinado com `execute_python` estar em AUTO_APPROVE_TOOLS,
+# reabre o vetor plant+execute que V1.5 #006 fechou para write_file/edit_file.
+#
+# Bloqueamos por nome do atributo na ast.Call.func — pega tanto a forma
+# `Path(x).write_text(y)` (Attribute) quanto `io.FileIO(...)` / `tempfile.
+# NamedTemporaryFile(...)` que sao Attribute(module, fn).
+_BLOCKED_FS_METHODS = frozenset({
+    # pathlib.Path — destrutivo
+    "write_text", "write_bytes",
+    "unlink", "rename", "replace",
+    "symlink_to", "hardlink_to",
+    "chmod", "lchmod",
+    "rmdir", "mkdir", "touch",
+    # pathlib.Path — leitura (#D124: exfil arbitrario de /etc/passwd,
+    # ~/.ssh/id_rsa, .env, etc. via print(Path(x).read_text()) → tool_result
+    # → provider LLM)
+    "read_text", "read_bytes",
+    # pathlib.Path — traversal/info disclosure
+    "iterdir", "glob", "rglob",
+    # io module — file constructors que dribram o check de `open()`
+    "FileIO",
+    # tempfile module — escreve fora do workspace, plant+execute
+    "NamedTemporaryFile", "TemporaryFile", "SpooledTemporaryFile",
+    "TemporaryDirectory", "mkstemp", "mkdtemp",
+})
 
 
 def _validate_code_safety(code: str) -> str | None:
@@ -137,19 +170,23 @@ def _validate_code_safety(code: str) -> str | None:
                 fname = fn.attr
             if fname in _BLOCKED_CALL_NAMES:
                 return _format_block(f"{fname}(...)")
-            # open(path, "w") — block modos de escrita reais.
-            # AUDIT V1.2 #012: se o mode nao e Constant string (ex:
-            # `m = "w"; open(p, m)` com `mode_node` = ast.Name), o check
-            # antigo passava silenciosamente. Defense-in-depth: rejeitar
-            # qualquer open() com mode nao-Constant (forca o codigo a
-            # explicitar o modo, eliminando bypass via variavel/expressao).
-            if fname == "open" and len(node.args) >= 2:
-                mode_node = node.args[1]
-                if isinstance(mode_node, ast.Constant) and isinstance(mode_node.value, str):
-                    if mode_node.value in _OPEN_WRITE_MODES:
-                        return _format_block(f"open(..., {mode_node.value!r})")
-                elif not isinstance(mode_node, ast.Constant):
-                    return _format_block("open(..., <non-constant mode>)")
+            # DEEP_SECURITY V3.3 #D123 / #D124: bloquear FS-touching methods
+            # via attribute access (Path.write_text, io.FileIO, tempfile.
+            # NamedTemporaryFile, etc.). Compara so o nome do atributo —
+            # pega ambas as formas Call(Attribute(Name("Path"), "write_text"))
+            # e Call(Attribute(Name("io"), "FileIO")).
+            if fname in _BLOCKED_FS_METHODS:
+                return _format_block(f"{fname}(...)")
+            # DEEP_SECURITY V3.3 #D124: `open()` em qualquer modo expoe
+            # leitura arbitraria de arquivos sensiveis fora do workspace
+            # (/etc/passwd, ~/.ssh/id_rsa, .env). O sandbox AST nao tem
+            # como saber workspace em static analysis — forcamos uso de
+            # read_file/write_file tools que validam workspace boundary.
+            if fname == "open":
+                return _format_block(
+                    "open(...) — use as ferramentas read_file/write_file "
+                    "(que validam workspace boundary)"
+                )
         # __builtins__ / __loader__ / x.__subclasses__()
         elif isinstance(node, ast.Name) and node.id in _BLOCKED_NAME_TOKENS:
             return _format_block(node.id)

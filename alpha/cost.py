@@ -66,13 +66,17 @@ _PRICING_KEYS_BY_LEN = sorted(_PRICING, key=len, reverse=True)
 def _price_for(model: str) -> tuple[float, float]:
     """Best-effort price lookup. Returns (0.0, 0.0) if model is unknown.
 
-    Matches by substring so `gemini-3.1-pro-preview-customtools` resolves to
-    `gemini-3.1-pro`."""
+    Boundary-matches `<key>-<suffix>` so `gemini-3.1-pro-preview` resolves
+    to `gemini-3.1-pro` while `gpt-4.10` does NOT match `gpt-4.1`. Variants
+    with distinct pricing (e.g. `gpt-4.1-turbo`) must be registered
+    explicitly in `_PRICING` — string-matching cannot disambiguate them."""
     if not model:
         return (0.0, 0.0)
     m = model.lower()
+    if m in _PRICING:
+        return _PRICING[m]
     for key in _PRICING_KEYS_BY_LEN:
-        if key in m:
+        if m.startswith(key + "-"):
             return _PRICING[key]
     return (0.0, 0.0)
 
@@ -159,6 +163,14 @@ def record_usage(provider: str, model: str, usage: dict | None) -> None:
 def reset_session() -> None:
     """Reset the running totals — called on /clear."""
     _session.reset()
+
+
+def session_cost_usd() -> float:
+    """Lightweight cost-only accessor for hot-path callers (agent loop's
+    session cap check). Skips the sorted by_model materialization that
+    `session_summary` does — at zero entries the overhead is real
+    because we call this on every iteration."""
+    return _session.total_cost_usd
 
 
 def session_summary() -> dict:

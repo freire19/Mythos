@@ -1,5 +1,141 @@
 # Changelog
 
+## [1.22.0](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.21.10...alpha-code-v1.22.0) (2026-05-20)
+
+
+### Features
+
+* ※ recap line for end-of-task summaries ([6520ffc](https://github.com/freire19/Alpha_Code/commit/6520ffc6562c5f8ac650aa21ca6a6dc5cbe22822))
+
+## [1.21.10](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.21.9...alpha-code-v1.21.10) (2026-05-20)
+
+
+### Refactoring
+
+* /simplify pass on session 2026-05-20 commits (round 2) ([ac849b6](https://github.com/freire19/Alpha_Code/commit/ac849b60b35f9b6f34d6c5a3e37999036044855a))
+
+## [1.21.9](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.21.8...alpha-code-v1.21.9) (2026-05-20)
+
+
+### Refactoring
+
+* **browser:** extract tab management to _browser_tabs.py (closes #DM029) ([8343714](https://github.com/freire19/Alpha_Code/commit/834371442639390786e2c792f1b916506c536bb1))
+* extract _run_subagent helpers (closes #DM040 partial) ([165dad4](https://github.com/freire19/Alpha_Code/commit/165dad4fbda53f8675496e781fb15f24ccda1b9f))
+* extract run_repl helpers in main.py (closes #DM020) ([32c1734](https://github.com/freire19/Alpha_Code/commit/32c173413856a7e167709e12c1a4051f14fcb20f))
+* extract stream_anthropic helpers (closes #DM040 partial) ([ae65512](https://github.com/freire19/Alpha_Code/commit/ae655127281f987d3517b79dabd494b01752ec68))
+
+## [1.21.8](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.21.7...alpha-code-v1.21.8) (2026-05-20)
+
+
+### Bug Fixes
+
+* **repl:** bind Ctrl+C to clear input instead of exiting ([341970f](https://github.com/freire19/Alpha_Code/commit/341970f4a7f349759ea3ded48bebb28aebba7751))
+
+
+### Refactoring
+
+* **cli:** split commands.py into sub-package by domain (closes #DM041) ([3b0f0ba](https://github.com/freire19/Alpha_Code/commit/3b0f0ba85525bfe0962bce08dc1646222b1b016c))
+* extract run_agent helpers (closes #DM038) ([682a8a7](https://github.com/freire19/Alpha_Code/commit/682a8a721120ace7ff3746152225c31d5e230ef3))
+* extract stream_chat_with_tools helpers (closes #DM039) ([1f8ae35](https://github.com/freire19/Alpha_Code/commit/1f8ae3524a4c2cfbad04c8cdbab6e200c80a64c0))
+
+## [1.21.7](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.21.6...alpha-code-v1.21.7) (2026-05-20)
+
+
+### Refactoring
+
+* /simplify pass on session 2026-05-20 commits ([31f03f0](https://github.com/freire19/Alpha_Code/commit/31f03f0777076b1828eb82dc66386026b48d5ee5))
+
+## [1.21.6](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.21.5...alpha-code-v1.21.6) (2026-05-20)
+
+
+### Performance
+
+* lazy %s logger formatting in hot paths (closes #DM049) ([3f334c8](https://github.com/freire19/Alpha_Code/commit/3f334c82fd5670c398db9e653d6e87ddac203813))
+
+
+### Refactoring
+
+* triage broad except: pass — log instead of silent (closes #DM043) ([73da98f](https://github.com/freire19/Alpha_Code/commit/73da98fe9022ddd4c5421d69acf12acae7b20d71))
+
+
+### Documentation
+
+* expand module headers in large files (closes #DM047) ([5fd39cf](https://github.com/freire19/Alpha_Code/commit/5fd39cf6fbe303a560398f58036bdd7fd4c0e366))
+
+## [1.21.5](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.21.4...alpha-code-v1.21.5) (2026-05-20)
+
+
+### Bug Fixes
+
+* close DEEP_RESILIENCE V4.3 medium/low cluster (10 issues) ([2c814e4](https://github.com/freire19/Alpha_Code/commit/2c814e4d5016966a480e6666b21c982a71f15fbd))
+
+## [1.21.4](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.21.3...alpha-code-v1.21.4) (2026-05-20)
+
+
+### Bug Fixes
+
+* **display:** _print_result_body re-export + e2e test for delegation ([172ddc0](https://github.com/freire19/Alpha_Code/commit/172ddc0850bf002c7bd118b07c280cea8e257653))
+
+## [1.21.3](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.21.2...alpha-code-v1.21.3) (2026-05-20)
+
+
+### Performance
+
+* close DEEP_PERFORMANCE V5.1 (P001-P004) + simplify cleanup ([6792987](https://github.com/freire19/Alpha_Code/commit/679298773b341c5c2561e87ad9cc6fb66bd5e57f))
+
+## [1.21.2](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.21.1...alpha-code-v1.21.2) (2026-05-20)
+
+
+### Bug Fixes
+
+* lifecycle hooks, price_for boundary, cluster_answers, _format_tool_call_header import ([da438c4](https://github.com/freire19/Alpha_Code/commit/da438c458a3520a1bb05eaf0bfdbec4318059e5c))
+* **security:** close DEEP_SECURITY V3.3 — 13 findings (1 CRIT, 2 ALTO, 4 MED, 6 BAIXO) ([6b04259](https://github.com/freire19/Alpha_Code/commit/6b0425928e3da07919e1d4748985245ed2a2882a))
+
+
+### Refactoring
+
+* extract LoopAwareClient httpx singleton (closes #DM042, #DM032) ([56c15b3](https://github.com/freire19/Alpha_Code/commit/56c15b3c1baa4039ab27712b7504918f6debad28))
+* **git:** dict dispatch for _git_operation (closes #DM044) ([f6a1d47](https://github.com/freire19/Alpha_Code/commit/f6a1d47f84467f813db18c8790c6c7f1efb54b6a))
+* **tools:** extract _resolve_target helper for composites (closes #DM025) ([e982447](https://github.com/freire19/Alpha_Code/commit/e9824471e8d65ce1a048d93caaad885e367ac277))
+
+
+### Documentation
+
+* document missing env vars in .env.example (closes #DM045) ([31afcb4](https://github.com/freire19/Alpha_Code/commit/31afcb40df047b45c48f0e039fad3c1842ac3bee))
+
+## [1.21.1](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.21.0...alpha-code-v1.21.1) (2026-05-19)
+
+
+### Refactoring
+
+* /simplify pass on pre-flight feature (slices 1+2+2.5) ([6054e04](https://github.com/freire19/Alpha_Code/commit/6054e0452ae22bd539166a9c44c1c3642edc3df2))
+
+## [1.21.0](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.20.0...alpha-code-v1.21.0) (2026-05-19)
+
+
+### Features
+
+* /preflight REPL command — analytics on the feedback log ([658afdc](https://github.com/freire19/Alpha_Code/commit/658afdcc8edad690c10443907fcca99a516074ab))
+
+## [1.20.0](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.19.0...alpha-code-v1.20.0) (2026-05-19)
+
+
+### Features
+
+* pre_flight slice 2 — enforcement + session cap + feedback log ([cf0c034](https://github.com/freire19/Alpha_Code/commit/cf0c034b6ddc380d7425b2d40b9a1a53c01f7456))
+
+## [1.19.0](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.18.1...alpha-code-v1.19.0) (2026-05-19)
+
+
+### Features
+
+* pre_flight cards — strategy approval before tool batches (slice 1) ([1ce5697](https://github.com/freire19/Alpha_Code/commit/1ce5697f5490a702f6709e0aa43e7141012c10e4))
+
+
+### Documentation
+
+* RFC for pre-flight cards — strategy approval before execution ([0992056](https://github.com/freire19/Alpha_Code/commit/099205685ceb7a94dc1bb9844d01c55384dff117))
+
 ## [1.18.1](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.18.0...alpha-code-v1.18.1) (2026-05-19)
 
 

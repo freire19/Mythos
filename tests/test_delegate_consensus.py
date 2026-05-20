@@ -54,14 +54,21 @@ class TestClusterAnswers:
         # Threshold is 0.7; near-identical strings exceed that.
         assert len(clusters) == 1
 
-    def test_empty_answer_isolated(self):
-        # Empty / whitespace answers stay in their own cluster — a failed
-        # agent shouldn't get absorbed into someone else's by string accident.
+    def test_empty_answers_share_single_cluster(self):
+        # Empty/whitespace answers share one degenerate cluster so the
+        # consensus output doesn't fan out into N "failed" groups.
         answers = ["valid answer", "", "  ", "valid answer"]
         clusters = _cluster_answers(answers)
-        # Two valid answers cluster together; each empty one is its own.
         sizes = sorted(len(c) for c in clusters)
-        assert sizes == [1, 1, 2]
+        assert sizes == [2, 2]
+
+    def test_empty_answers_dont_absorb_valid(self):
+        answers = ["", "real answer", "", "another real answer"]
+        clusters = _cluster_answers(answers)
+        empties = next(c for c in clusters if 0 in c)
+        assert 1 not in empties
+        assert 3 not in empties
+        assert sorted(empties) == [0, 2]
 
 
 # ─── _delegate_consensus integration ──────────────────────────────

@@ -129,11 +129,34 @@ class TestRuleParsing:
         ) is True
 
 
-# ── Primary arg fallback ──
+# ── Primary arg policy ──
 
 
 class TestPrimaryArg:
-    def test_unknown_tool_uses_first_string_arg(self, settings_in_cwd: Path):
+    """DEEP_SECURITY V3.3 #D126: removido o fallback nao-deterministico
+    "primeira string em args.values()". Tools fora de `_PRIMARY_ARG` nao
+    tem chave de matching — rules literal/regex sobre args nao batem
+    (so rules tool-name-only batem)."""
+
+    def test_unknown_tool_with_arg_rule_does_not_match(self, settings_in_cwd: Path):
+        # Tool fora do mapping + rule literal sobre primary arg → nao bate.
         _write_perms(settings_in_cwd, allow=["my_custom_tool(target1)"])
-        assert approval.needs_approval("my_custom_tool", {"target": "target1"}) is False
+        # Antes (com fallback): bateria contra "target": "target1" → False
+        # Agora (sem fallback): rule literal nao bate; default aplica → True
+        assert approval.needs_approval("my_custom_tool", {"target": "target1"}) is True
         assert approval.needs_approval("my_custom_tool", {"target": "target2"}) is True
+
+    def test_unknown_tool_with_name_only_rule_matches(self, settings_in_cwd: Path):
+        # Rule tool-name-only continua funcionando para tools nao mapeadas.
+        _write_perms(settings_in_cwd, allow=["my_custom_tool"])
+        assert approval.needs_approval("my_custom_tool", {"target": "anything"}) is False
+
+    def test_delegate_task_uses_mapped_primary_arg(self, settings_in_cwd: Path):
+        # #D126: delegate_task agora tem mapping explicito para "task".
+        _write_perms(settings_in_cwd, allow=["delegate_task(safe research)"])
+        assert approval.needs_approval(
+            "delegate_task", {"task": "safe research", "context": "other"}
+        ) is False
+        assert approval.needs_approval(
+            "delegate_task", {"task": "exfil secrets", "context": "safe research"}
+        ) is True

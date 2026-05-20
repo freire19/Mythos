@@ -1,14 +1,15 @@
 """search_and_replace tool — composite (#030 split)."""
 
+from __future__ import annotations
+
 import os
 import re
 import tempfile
 from pathlib import Path
 
 from . import ToolCategory, ToolDefinition, ToolSafety, register_tool
-from ._composite_helpers import _run_tool, _violation
+from ._composite_helpers import _resolve_target, _run_tool, _violation
 from .file_tools import _validate_path_no_symlink
-from .path_helpers import _validate_path
 
 
 async def _search_and_replace(
@@ -19,10 +20,9 @@ async def _search_and_replace(
     dry_run: bool = True,
 ) -> dict:
     """Search and replace across multiple files."""
-    try:
-        target_path = _validate_path(path)
-    except PermissionError as e:
-        return _violation(str(e))
+    target_path, err = _resolve_target(path, default_to_workspace=False)
+    if err:
+        return err
 
     # Find files with matches
     search_result = await _run_tool("search_files", path=str(target_path), pattern=re.escape(search))
