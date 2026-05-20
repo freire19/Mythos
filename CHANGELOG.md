@@ -1,5 +1,22 @@
 # Changelog
 
+## [1.21.6](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.21.5...alpha-code-v1.21.6) (2026-05-20)
+
+
+### Performance
+
+* lazy %s logger formatting in hot paths (closes #DM049) ([3f334c8](https://github.com/freire19/Alpha_Code/commit/3f334c82fd5670c398db9e653d6e87ddac203813))
+
+
+### Refactoring
+
+* triage broad except: pass — log instead of silent (closes #DM043) ([73da98f](https://github.com/freire19/Alpha_Code/commit/73da98fe9022ddd4c5421d69acf12acae7b20d71))
+
+
+### Documentation
+
+* expand module headers in large files (closes #DM047) ([5fd39cf](https://github.com/freire19/Alpha_Code/commit/5fd39cf6fbe303a560398f58036bdd7fd4c0e366))
+
 ## [1.21.5](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.21.4...alpha-code-v1.21.5) (2026-05-20)
 
 
