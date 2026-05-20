@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.21.8](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.21.7...alpha-code-v1.21.8) (2026-05-20)
+
+
+### Bug Fixes
+
+* **repl:** bind Ctrl+C to clear input instead of exiting ([341970f](https://github.com/freire19/Alpha_Code/commit/341970f4a7f349759ea3ded48bebb28aebba7751))
+
+
+### Refactoring
+
+* **cli:** split commands.py into sub-package by domain (closes #DM041) ([3b0f0ba](https://github.com/freire19/Alpha_Code/commit/3b0f0ba85525bfe0962bce08dc1646222b1b016c))
+* extract run_agent helpers (closes #DM038) ([682a8a7](https://github.com/freire19/Alpha_Code/commit/682a8a721120ace7ff3746152225c31d5e230ef3))
+* extract stream_chat_with_tools helpers (closes #DM039) ([1f8ae35](https://github.com/freire19/Alpha_Code/commit/1f8ae3524a4c2cfbad04c8cdbab6e200c80a64c0))
+
 ## [1.21.7](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.21.6...alpha-code-v1.21.7) (2026-05-20)
 
 
