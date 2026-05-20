@@ -196,6 +196,113 @@ def _convert_messages(openai_messages: list[dict]) -> tuple[str, list[dict]]:
 # ── Streaming ──
 
 
+def _build_anthropic_request(
+    messages: list[dict],
+    tools: list[dict],
+    temperature: float,
+    model: str,
+    api_key: str,
+) -> tuple[dict, dict]:
+    """Build (headers, payload) for the Anthropic /v1/messages POST."""
+    system_text, anthropic_messages = _convert_messages(messages)
+    anthropic_tools = _convert_tools(tools)
+    payload: dict = {
+        "model": model,
+        "max_tokens": DEFAULT_MAX_TOKENS,
+        "messages": anthropic_messages,
+        "stream": True,
+        "temperature": temperature,
+    }
+    if system_text:
+        payload["system"] = system_text
+    if anthropic_tools:
+        payload["tools"] = anthropic_tools
+    headers = {
+        "x-api-key": api_key,
+        "anthropic-version": ANTHROPIC_VERSION,
+        "content-type": "application/json",
+    }
+    return headers, payload
+
+
+def _apply_anthropic_event(
+    event: dict, blocks: dict, dsml_stripper, last_usage: dict
+) -> tuple[str | None, bool]:
+    """Apply one streaming Anthropic event to ``blocks`` / ``last_usage``.
+
+    Returns ``(content_to_emit, is_message_stop)``. Caller yields the
+    content_token and breaks the line loop on message_stop.
+    """
+    etype = event.get("type")
+
+    if etype == "message_start":
+        msg_usage = (event.get("message") or {}).get("usage") or {}
+        if msg_usage:
+            last_usage.update(msg_usage)
+    elif etype == "message_delta":
+        delta_usage = event.get("usage") or {}
+        if delta_usage:
+            last_usage.update(delta_usage)
+
+    if etype == "content_block_start":
+        idx = event["index"]
+        block = event["content_block"]
+        if block["type"] == "text":
+            blocks[idx] = {"type": "text", "text": ""}
+        elif block["type"] == "tool_use":
+            blocks[idx] = {
+                "type": "tool_use",
+                "id": block.get("id", ""),
+                "name": block.get("name", ""),
+                "input_json": "",
+            }
+
+    elif etype == "content_block_delta":
+        idx = event["index"]
+        delta = event.get("delta", {})
+        block = blocks.get(idx)
+        if block is None:
+            return None, False
+        if delta.get("type") == "text_delta":
+            text = delta.get("text", "")
+            if text:
+                block["text"] = block.get("text", "") + text
+                safe = dsml_stripper.feed(text)
+                if safe:
+                    return safe, False
+        elif delta.get("type") == "input_json_delta":
+            block["input_json"] = block.get("input_json", "") + delta.get("partial_json", "")
+
+    elif etype == "message_stop":
+        return None, True
+
+    return None, False
+
+
+def _collect_tool_calls(blocks: dict[int, dict]) -> list[dict]:
+    """Pick tool_use blocks (sorted by index) into the final tool_calls
+    list. Logs a warning if any input_json is malformed but keeps the raw
+    string so callers see what arrived."""
+    tool_calls = []
+    for _, block in sorted(blocks.items()):
+        if block["type"] != "tool_use":
+            continue
+        args_json = block.get("input_json", "") or "{}"
+        try:
+            json.loads(args_json)
+        except json.JSONDecodeError:
+            logger.warning(
+                "Anthropic tool '%s' returned malformed JSON args (kept verbatim)",
+                block.get("name"),
+            )
+        tool_calls.append({
+            "id": block.get("id", ""),
+            "name": block.get("name", ""),
+            "arguments": args_json,
+        })
+    return tool_calls
+
+
 async def stream_anthropic(
     messages: list[dict],
     tools: list[dict],
@@ -208,26 +315,7 @@ async def stream_anthropic(
     """Stream from Anthropic's /v1/messages endpoint, yielding the same event
     shape as the OpenAI streaming path: `content_token` and a single `final`.
     """
-    system_text, anthropic_messages = _convert_messages(messages)
-    anthropic_tools = _convert_tools(tools)
-
-    payload: dict = {
-        "model": model,
-        "max_tokens": DEFAULT_MAX_TOKENS,
-        "messages": anthropic_messages,
-        "stream": True,
-        "temperature": temperature,
-    }
-    if system_text:
-        payload["system"] = system_text
-    if anthropic_tools:
-        payload["tools"] = anthropic_tools
-
-    headers = {
-        "x-api-key": api_key,
-        "anthropic-version": ANTHROPIC_VERSION,
-        "content-type": "application/json",
-    }
+    headers, payload = _build_anthropic_request(messages, tools, temperature, model, api_key)
 
     accumulated_content = ""
     blocks: dict[int, dict] = {}  # index → {"type": "text"|"tool_use", ...}
@@ -241,8 +329,9 @@ async def stream_anthropic(
 
     client = await _get_client(timeout)
     last_error: str | None = None
+    max_retries = RETRY["llm"]["max_retries"]
 
-    for attempt in range(RETRY["llm"]["max_retries"] + 1):
+    for attempt in range(max_retries + 1):
         try:
             await _rate_limit_acquire("anthropic")
             async with client.stream(
@@ -250,7 +339,7 @@ async def stream_anthropic(
             ) as response:
                 if response.status_code >= 400:
                     body = await response.aread()
-                    logger.error(f"Anthropic HTTP {response.status_code}: {body[:500]}")
+                    logger.error("Anthropic HTTP %d: %s", response.status_code, body[:500])
                     yield {
                         "type": "final",
                         "content": "",
@@ -262,55 +351,17 @@ async def stream_anthropic(
                 async for line in response.aiter_lines():
                     if not line.startswith("data: "):
                         continue
-                    data_str = line[6:]
                     try:
-                        event = json.loads(data_str)
+                        event = json.loads(line[6:])
                     except json.JSONDecodeError:
                         continue
 
-                    etype = event.get("type")
-
-                    if etype == "message_start":
-                        msg_usage = (event.get("message") or {}).get("usage") or {}
-                        if msg_usage:
-                            last_usage.update(msg_usage)
-                    elif etype == "message_delta":
-                        delta_usage = event.get("usage") or {}
-                        if delta_usage:
-                            last_usage.update(delta_usage)
-
-                    if etype == "content_block_start":
-                        idx = event["index"]
-                        block = event["content_block"]
-                        if block["type"] == "text":
-                            blocks[idx] = {"type": "text", "text": ""}
-                        elif block["type"] == "tool_use":
-                            blocks[idx] = {
-                                "type": "tool_use",
-                                "id": block.get("id", ""),
-                                "name": block.get("name", ""),
-                                "input_json": "",
-                            }
-
-                    elif etype == "content_block_delta":
-                        idx = event["index"]
-                        delta = event.get("delta", {})
-                        block = blocks.get(idx)
-                        if block is None:
-                            continue
-                        if delta.get("type") == "text_delta":
-                            text = delta.get("text", "")
-                            if text:
-                                block["text"] = block.get("text", "") + text
-                                safe = dsml_stripper.feed(text)
-                                if safe:
-                                    accumulated_content += safe
-                                    yielded_any = True
-                                    yield {"type": "content_token", "token": safe}
-                        elif delta.get("type") == "input_json_delta":
-                            block["input_json"] = block.get("input_json", "") + delta.get("partial_json", "")
-
-                    elif etype == "message_stop":
+                    emit, stop = _apply_anthropic_event(event, blocks, dsml_stripper, last_usage)
+                    if emit:
+                        accumulated_content += emit
+                        yielded_any = True
+                        yield {"type": "content_token", "token": emit}
+                    if stop:
                         break
 
             # Drain any unclosed `<…` tail held back during streaming.
@@ -328,12 +379,12 @@ async def stream_anthropic(
             last_error = f"{type(e).__name__}: {e}"
             # Once any token has been yielded to the caller the partial stream
             # is already committed downstream — replaying would duplicate it.
-            if yielded_any or attempt >= RETRY["llm"]["max_retries"]:
+            if yielded_any or attempt >= max_retries:
                 break
             backoff = _calc_backoff(attempt)
             logger.warning(
-                f"Anthropic transient error (attempt {attempt + 1}/{RETRY["llm"]["max_retries"] + 1}), "
-                f"retrying in {backoff:.1f}s: {e}"
+                "Anthropic transient error (attempt %d/%d), retrying in %.1fs: %s",
+                attempt + 1, max_retries + 1, backoff, e,
             )
             blocks = {}
             await asyncio.sleep(backoff)
@@ -341,7 +392,7 @@ async def stream_anthropic(
             raise
         except Exception as e:
             last_error = f"{type(e).__name__}: {e}"
-            logger.error(f"Anthropic non-transient error: {e}", exc_info=True)
+            logger.error("Anthropic non-transient error: %s", e, exc_info=True)
             break
 
     if last_error:
@@ -353,31 +404,10 @@ async def stream_anthropic(
         }
         return
 
-    tool_calls = []
-    for _, block in sorted(blocks.items()):
-        if block["type"] != "tool_use":
-            continue
-        args_json = block.get("input_json", "") or "{}"
-        # Validate the accumulated JSON; keep raw on failure so callers see what arrived.
-        try:
-            json.loads(args_json)
-        except json.JSONDecodeError:
-            logger.warning(
-                "Anthropic tool '%s' returned malformed JSON args (kept verbatim)",
-                block.get("name"),
-            )
-        tool_calls.append(
-            {
-                "id": block.get("id", ""),
-                "name": block.get("name", ""),
-                "arguments": args_json,
-            }
-        )
-
     yield {
         "type": "final",
         "content": accumulated_content,
-        "tool_calls": tool_calls,
+        "tool_calls": _collect_tool_calls(blocks),
         "error": None,
         "usage": last_usage or None,
     }
