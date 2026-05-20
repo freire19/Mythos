@@ -13,8 +13,6 @@ import shutil
 import sys
 import time
 
-logger = logging.getLogger(__name__)
-
 from .core import (
     C,
     _format_duration,
@@ -25,6 +23,8 @@ from .core import (
     is_auto_accept,
     supports_color,
 )
+
+logger = logging.getLogger(__name__)
 
 # ─── Thinking indicator (spinner) ───
 

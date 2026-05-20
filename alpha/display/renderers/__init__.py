@@ -4,6 +4,3 @@
 - prompts:  approval prompt + auto-accept state
 - tools:    tool call header, result body, delegate, diffs
 """
-
-from __future__ import annotations
-
