@@ -35,6 +35,7 @@ from .renderers.tools import (  # noqa: F401
     _CATEGORY_ICONS,
     _display_tool_name,
     _format_tool_call_header,
+    _print_result_body,
     _render_diff,
     _tool_args_preview,
     label_for_tool,
