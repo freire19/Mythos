@@ -25,6 +25,9 @@ _MD_BOLD_RE = re.compile(r"\*\*([^*\n]+?)\*\*")
 _MD_ITALIC_RE = re.compile(r"(?<![\w*])\*([^*\n]+?)\*(?![\w*])")
 _MD_HEADER_RE = re.compile(r"^(#{1,6})\s+(.+)$", re.MULTILINE)
 _MD_TABLE_SEP_RE = re.compile(r"^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)+\|?\s*$")
+# `※ recap:` is the session-end summary line documented in system.md.
+# Captured pre-wrap so the body can be reflowed with hanging indent.
+_MD_RECAP_RE = re.compile(r"^※ recap:\s*(.+?)\s*$", re.MULTILINE)
 
 
 _TABLE_MIN_COL_WIDTH = 6
@@ -103,6 +106,28 @@ def _render_md_table(lines: list[str]) -> list[str]:
     return out
 
 
+def _render_recap_line(body: str) -> str:
+    """Wrap + style a `※ recap:` body. Prefix is cyan bold, body is dim italic.
+
+    Hanging indent (2 chars) keeps the prefix visually anchored when the
+    terminal wraps the body across multiple visual rows.
+    """
+    term_w = shutil.get_terminal_size((80, 24)).columns
+    indent = "  "
+    wrapped = textwrap.fill(
+        body,
+        width=max(40, term_w - 4),
+        initial_indent="",
+        subsequent_indent=indent,
+        break_long_words=False,
+        break_on_hyphens=False,
+    )
+    return (
+        f"{C.CYAN}{C.BOLD}※ recap:{C.RESET} "
+        f"{C.DIM}{C.ITALIC}{wrapped}{C.RESET}"
+    )
+
+
 def render_markdown(text: str) -> str:
     # Apply ANSI styling (code, bold, italic, headers, tables) to a finished
     # Markdown block. Batched end-of-turn — streaming inline rendering would
@@ -142,4 +167,8 @@ def render_markdown(text: str) -> str:
     rendered = _MD_HEADER_RE.sub(
         lambda m: f"{C.VIOLET}{C.BOLD}{m.group(2)}{C.RESET}", rendered
     )
+    # Recap LAST: body may include `code` and **bold** spans that have already
+    # been styled by the rules above; we just wrap the prefix + body in the
+    # session-recap look (cyan/bold prefix, dim italic remainder).
+    rendered = _MD_RECAP_RE.sub(lambda m: _render_recap_line(m.group(1)), rendered)
     return rendered
