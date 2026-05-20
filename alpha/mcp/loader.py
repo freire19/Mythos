@@ -26,9 +26,17 @@ def _qualified_name(server: str, tool: str) -> str:
 
 
 def _format_tool_result(raw: dict) -> dict[str, Any]:
-    """Convert an MCP tools/call result to the alpha tool-result shape."""
+    """Convert an MCP tools/call result to the alpha tool-result shape.
+
+    DEEP_SECURITY V3.3 #D119: campos `uri` de items do tipo "resource"
+    eram concatenados crus em `f"[resource {uri}]\\n{text}"`. Um servidor
+    MCP comprometido (ou um resource retornado por servidor legitimo que
+    proxy-a conteudo de URL atacante) podia injetar `\\n\\n## SYSTEM: ...`
+    ou ANSI escapes via uri, escapando do `[resource ...]` que o LLM usa
+    como delimitador visual. Sanitizamos uri e text antes de concatenar.
+    """
     if not isinstance(raw, dict):
-        return {"output": str(raw)}
+        return {"output": _sanitize_mcp_text(str(raw))}
 
     parts: list[str] = []
     for item in raw.get("content", []) or []:
@@ -36,11 +44,11 @@ def _format_tool_result(raw: dict) -> dict[str, Any]:
             continue
         kind = item.get("type")
         if kind == "text":
-            parts.append(str(item.get("text", "")))
+            parts.append(_sanitize_mcp_text(str(item.get("text", ""))))
         elif kind == "resource":
             resource = item.get("resource", {})
-            uri = resource.get("uri", "")
-            text = resource.get("text", "")
+            uri = _sanitize_mcp_uri(str(resource.get("uri", "")))
+            text = _sanitize_mcp_text(str(resource.get("text", "")))
             parts.append(f"[resource {uri}]\n{text}" if text else f"[resource {uri}]")
         else:
             parts.append(f"[{kind} content omitted]")
@@ -49,6 +57,44 @@ def _format_tool_result(raw: dict) -> dict[str, Any]:
     if raw.get("isError"):
         return {"error": text or "MCP tool returned isError without content"}
     return {"output": text} if text else {"output": ""}
+
+
+# DEEP_SECURITY V3.3 #D119: stripping de bytes de controle e bidi-overrides.
+# Mesma policy usada em `delegate_tools._strip_control_chars` para subagent
+# prompts. NUL/ANSI/bidi sao os principais vetores de "esconder instrucoes
+# no meio do output" em texto que o LLM le como contexto.
+_MCP_CONTROL_CHARS = set(chr(c) for c in range(32) if c not in (9, 10, 13)) | {"\x7f"}
+_MCP_BIDI_OVERRIDES = {
+    "‪", "‫", "‬", "‭", "‮",  # LRE/RLE/PDF/LRO/RLO
+    "⁦", "⁧", "⁨", "⁩",            # LRI/RLI/FSI/PDI
+    "‎", "‏",                                # LRM/RLM
+}
+_MCP_FORBIDDEN_CHARS = _MCP_CONTROL_CHARS | _MCP_BIDI_OVERRIDES
+
+
+def _sanitize_mcp_text(text: str) -> str:
+    """Strip control chars + bidi overrides from MCP text content."""
+    if not text:
+        return text
+    if not any(c in _MCP_FORBIDDEN_CHARS for c in text):
+        return text  # hot-path: most content is clean
+    return "".join(c for c in text if c not in _MCP_FORBIDDEN_CHARS)
+
+
+def _sanitize_mcp_uri(uri: str) -> str:
+    """Strip control chars + newlines from MCP resource URIs.
+
+    URIs sao mais restritivos que texto livre — RFC 3986 limita a subset
+    ASCII com pontuacao definida. Newlines, tabs e qualquer non-printable
+    nao tem como aparecer em URI legitimo, entao bloqueamos integralmente.
+    Limitamos tambem a 512 chars para evitar uri gigante poluir tool_result.
+    """
+    if not uri:
+        return uri
+    cleaned = "".join(c for c in uri if c.isprintable() and c not in ("\n", "\r", "\t"))
+    if len(cleaned) > 512:
+        cleaned = cleaned[:512] + "...[uri-truncated]"
+    return cleaned
 
 
 def _make_executor(client: MCPClient, tool_name: str):

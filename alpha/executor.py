@@ -8,6 +8,7 @@ When multiple tools are called in the same turn, independent tools run in parall
 import asyncio
 import json
 import logging
+import os
 import time
 from collections.abc import AsyncGenerator, Callable
 
@@ -106,6 +107,26 @@ def _cheap_len(v) -> int:
     return len(str(v))
 
 
+# DEEP_SECURITY V3.3 #007: cache do home path para reescrita em tool results.
+# Se `expanduser("~")` falhar (sem HOME env, container minimal), `_HOME_PATH`
+# fica vazio e a sanitizacao vira no-op em vez de quebrar.
+_HOME_PATH = os.path.expanduser("~")
+if _HOME_PATH in ("~", "", "/"):
+    _HOME_PATH = ""
+
+
+def _sanitize_paths(text: str) -> str:
+    """Substituir $HOME absoluto por `~` antes de mandar tool result ao LLM.
+
+    Provider LLM nao precisa do username do usuario em todo path; `~`
+    preserva informacao topologica ("esta sob home") sem vazar identidade.
+    Hot-path: short-circuit quando home nao esta no texto.
+    """
+    if not _HOME_PATH or _HOME_PATH not in text:
+        return text
+    return text.replace(_HOME_PATH, "~")
+
+
 def _format_result(result: dict, tool_name: str) -> str:
     """Truncate and format a tool result for inclusion in messages.
 
@@ -121,7 +142,7 @@ def _format_result(result: dict, tool_name: str) -> str:
     result = {k: v for k, v in result.items() if not (isinstance(k, str) and k.startswith("_"))}
     estimated = sum(_cheap_len(v) for v in result.values()) + 100
     if estimated <= TOOL_RESULT_MAX_CHARS:
-        return json.dumps(result, ensure_ascii=False)
+        return _sanitize_paths(json.dumps(result, ensure_ascii=False))
 
     preview = {
         k: (v[:_PREVIEW_FIELD_MAX] if isinstance(v, str) else v)
@@ -152,7 +173,7 @@ def _format_result(result: dict, tool_name: str) -> str:
             ),
         }
         out = json.dumps(minimal, ensure_ascii=False)
-    return out
+    return _sanitize_paths(out)
 
 
 def _annotate_error(result: dict, category: str) -> dict:
@@ -178,13 +199,51 @@ def _append_tool_msg(messages: list[dict], tc_id: str, result: dict, tool_name: 
     e success paths usem o mesmo `_format_result` (truncamento, preview por
     campo). Sem este helper, error messages com paths absolutos longos
     podiam passar de TOOL_RESULT_MAX_CHARS (#D022).
+
+    DEEP_SECURITY V3.3 #D125: `json.dumps(ensure_ascii=False)` nao escapa `<`
+    ou `>` no conteudo — uma string adversarial vinda de web_search,
+    extract_page_content, MCP, ou query_database pode conter literalmente
+    `</tool_result>` e simular fim do wrapper para o LLM, abrindo vetor de
+    indirect prompt injection. Neutralizamos a tag de fechamento embedida
+    substituindo `<` por zero-width-non-joiner (U+200C) no token. O resultado
+    e visualmente identico mas a regex que o LLM usa para delimitar o
+    tool_result nao casa mais.
     """
     content = _format_result(result, tool_name)
+    # Escape any `</tool_result>` (case-insensitive) appearing inside the
+    # content so the wrapper boundary stays unambiguous.
+    if "</tool_result>" in content.lower():
+        content = _neutralize_close_tag(content)
     messages.append({
         "role": "tool",
         "tool_call_id": tc_id,
         "content": f"<tool_result>{content}</tool_result>",
     })
+
+
+def _neutralize_close_tag(content: str) -> str:
+    """Replace literal `</tool_result>` with a visually-identical but
+    structurally-different sequence (`</tool_result‌>`).
+
+    Case-insensitive scan: an attacker might inject `</TOOL_RESULT>` to
+    bypass a naive case-sensitive replace. We walk the string and re-emit
+    each match with a zero-width-non-joiner before the closing `>`.
+    """
+    out = []
+    i = 0
+    target = "</tool_result>"
+    n = len(target)
+    lc = content.lower()
+    while i < len(content):
+        if lc[i:i + n] == target:
+            # Preserve original case of the attacker's text; only break the lexical match.
+            out.append(content[i:i + n - 1])  # `</tool_result` without `>`
+            out.append("‌>")             # ZWNJ + `>` — invisible to LLM, no regex match
+            i += n
+        else:
+            out.append(content[i])
+            i += 1
+    return "".join(out)
 
 
 def _record_skip(tc: dict, tool_name: str, result: dict, messages: list[dict]) -> dict:

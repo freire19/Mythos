@@ -19,8 +19,33 @@ import queue
 import subprocess
 import threading
 import time
+from collections import deque
 
 from ..tools.safe_env import get_safe_env
+
+# DEEP_SECURITY V3.3 #D122: vars de ambiente que NUNCA devem vir de
+# `extra_env` em mcp.json. Mesmo que o usuario controle o mcp.json
+# (trust model "settings sao do usuario"), um repositorio clonado com
+# `.alpha/mcp.json` malicioso poderia injetar:
+#   - LD_PRELOAD / LD_LIBRARY_PATH / DYLD_INSERT_LIBRARIES: carrega .so
+#     arbitrario no subprocess MCP (RCE)
+#   - PATH: redireciona binarios chamados pelo MCP (RCE indireto)
+#   - PYTHONPATH / PYTHONHOME / PYTHONSTARTUP: idem para servidores MCP
+#     escritos em Python
+#   - HOME: pode mover ~/.config de outros tools que o MCP server use
+_MCP_ENV_BLOCKLIST = frozenset({
+    "LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT", "LD_DEBUG",
+    "DYLD_INSERT_LIBRARIES", "DYLD_LIBRARY_PATH", "DYLD_FALLBACK_LIBRARY_PATH",
+    "PATH", "PATHEXT",
+    "PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP", "PYTHONUSERBASE",
+    "HOME", "USERPROFILE",
+})
+
+# DEEP_SECURITY V3.3 #D121: cap em notifications buffered. Servidor MCP
+# que emita notification stream indefinidamente (ou bug em outro server
+# do mesmo client) acumulava ate OOM. 100 e o suficiente para qualquer
+# protocolo legitimo + sliding window via deque(maxlen) sem custo extra.
+_NOTIFICATIONS_CAP = 100
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +75,9 @@ class MCPClient:
         self.proc: subprocess.Popen | None = None
         self.tools: list[dict] = []
         self._inbox: queue.Queue = queue.Queue()
-        self._notifications: list[dict] = []  # buffered server-initiated msgs (#007)
+        # DEEP_SECURITY V3.3 #D121: deque(maxlen) faz eviction FIFO automatico,
+        # mantendo as 100 notifications mais recentes sem crescimento ilimitado.
+        self._notifications: deque[dict] = deque(maxlen=_NOTIFICATIONS_CAP)
         self._notifications_lock = threading.Lock()
         self._reader: threading.Thread | None = None
         self._stderr_reader: threading.Thread | None = None
@@ -61,7 +88,20 @@ class MCPClient:
 
     def start(self) -> None:
         base_env = get_safe_env()
-        merged_env = {**base_env, **self.extra_env}
+        # DEEP_SECURITY V3.3 #D122: filtrar vars perigosas do extra_env
+        # antes do merge. Se mcp.json tenta injetar LD_PRELOAD/PATH/etc,
+        # logamos warning e descartamos a entrada (nao falhamos o start —
+        # o resto do extra_env pode ser legitimo).
+        filtered_extra: dict[str, str] = {}
+        for k, v in self.extra_env.items():
+            if k.upper() in _MCP_ENV_BLOCKLIST:
+                logger.warning(
+                    "MCP '%s': env var %r ignored (in security blocklist)",
+                    self.name, k,
+                )
+                continue
+            filtered_extra[k] = v
+        merged_env = {**base_env, **filtered_extra}
         try:
             self.proc = subprocess.Popen(
                 [self.command, *self.args],

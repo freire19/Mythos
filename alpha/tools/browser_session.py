@@ -112,10 +112,52 @@ class BrowserSession:
             self.pages = [page]
             self.active_idx = 0
             self.context.on("page", self._on_new_page)
+            self._wire_navigation_guard(page)
 
     def _on_new_page(self, page) -> None:
         if page not in self.pages:
             self.pages.append(page)
+            self._wire_navigation_guard(page)
+
+    def _wire_navigation_guard(self, page) -> None:
+        """DEEP_SECURITY V3.3 #D120: re-validar URL pos-navegacao.
+
+        `browser_navigate` valida URL inicial (scheme + allowlist + SSRF),
+        mas paginas podem navegar via window.location, meta-refresh, ou
+        redirect HTTP que o Playwright segue automaticamente. Sem listener
+        `framenavigated`, o browser pode terminar em dominio fora da
+        allowlist sem o agente saber.
+
+        Fail-safe: ao detectar navegacao para URL nao-permitida, navegamos
+        para about:blank descartando a pagina maliciosa. Logamos para
+        diagnostico.
+        """
+        def _on_frame_nav(frame):
+            try:
+                # So validamos main frame — iframes sao isolados por origin.
+                if frame != page.main_frame:
+                    return
+                url = frame.url
+                if not url or url.startswith(("about:", "chrome:", "data:")):
+                    return
+                err = validate_browser_url(url)
+                if err:
+                    logger.warning(
+                        "browser navigation blocked post-load: %s (%s)", url, err
+                    )
+                    import asyncio as _aio
+                    try:
+                        loop = _aio.get_event_loop()
+                        loop.create_task(page.goto("about:blank"))
+                    except Exception as e:
+                        logger.warning("Failed to rescue page from bad URL: %s", e)
+            except Exception as e:
+                logger.debug("framenavigated guard error: %s", e)
+
+        try:
+            page.on("framenavigated", _on_frame_nav)
+        except Exception as e:
+            logger.warning("Could not wire framenavigated listener: %s", e)
 
     async def close(self) -> None:
         async with self._get_lock():
@@ -172,8 +214,13 @@ def validate_browser_url(url: str) -> str | None:
         from ..net_utils import validate_url as _validate
 
         return _validate(url)
-    except Exception:
-        return None
+    except Exception as e:
+        # Fail-closed: previously returned None, which let metadata-service
+        # IPs (169.254.169.254 / GCP) through whenever the SSRF validator
+        # itself crashed. Truncate the URL in the log to avoid leaking
+        # query-string secrets.
+        logger.warning("SSRF validator failed for %s: %s", url[:80], e)
+        return "Validação de URL indisponível — tente novamente"
 
 
 async def shutdown_browser() -> None:

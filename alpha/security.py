@@ -22,9 +22,11 @@ _HARD_BLOCKED_PATTERNS = [
     r"\bmke2fs\b",
     r"\bwipefs\b",
     r"\bshred\b",
-    # Raw disk writes
-    r"\bdd\s+[^\n]*of=/dev/(sd|nvme|hd|xvd|vd|mmcblk)",
-    r">\s*/dev/(sd|nvme|hd|xvd|vd|mmcblk)",
+    # Raw disk writes — DEEP_SECURITY V3.3 #D127: cobrir tambem
+    # /dev/disk/by-id, /dev/loop*, /dev/dm-* (device-mapper / LVM),
+    # /dev/zd* (ZFS volumes), /dev/mapper/* (crypt/LVM).
+    r"\bdd\s+[^\n]*of=/dev/(sd|nvme|hd|xvd|vd|mmcblk|loop|dm-|zd|disk/|mapper/)",
+    r">\s*/dev/(sd|nvme|hd|xvd|vd|mmcblk|loop|dm-|zd|disk/|mapper/)",
     # Fork bomb (case-sensitive — `:` literal)
     r":\(\)\s*\{\s*:\|:\s*&\s*\}\s*;?\s*:",
     # su (sudo is handled via pattern matches, not blanket-blocked)
@@ -34,9 +36,15 @@ _HARD_BLOCKED_PATTERNS = [
     r"\binit\s+[0-6]\b",
     r"\btelinit\b",
     r"\bsystemctl\s+(poweroff|reboot|halt|kexec|rescue|emergency|suspend|hibernate)\b",
-    # Writes to critical system files
-    r">\s*/etc/(passwd|shadow|sudoers|fstab|hosts(\s|$))",
-    r"\b(tee|dd)\s+[^|;]*\s/etc/(passwd|shadow|sudoers|fstab)",
+    # Writes to critical system files — DEEP_SECURITY V3.3 #D128: estendido
+    # para cobrir diretorios `.d/` que aceitam plant de scripts auxiliares
+    # com privilegio (cron/sudoers/profile/init/systemd/ld.so.conf/polkit).
+    r">\s*/etc/(passwd|shadow|sudoers|fstab|hosts(\s|$)"
+    r"|cron\.d/|sudoers\.d/|profile\.d/|init\.d/"
+    r"|systemd/system/|ld\.so\.conf\.d/|polkit-1/)",
+    r"\b(tee|dd)\s+[^|;]*\s/etc/(passwd|shadow|sudoers|fstab"
+    r"|cron\.d/|sudoers\.d/|profile\.d/|init\.d/"
+    r"|systemd/system/|ld\.so\.conf\.d/|polkit-1/)",
     r"\bvisudo\b",
     # chmod on critical system dirs
     r"\bchmod\s+\S+\s+/(etc|usr|boot|bin|sbin|lib|lib64|sys|proc)(\s|/|$)",

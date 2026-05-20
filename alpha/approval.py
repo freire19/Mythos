@@ -346,7 +346,13 @@ def _is_safe_pipeline(pipeline: str) -> bool:
 _RULE_PARSE = re.compile(r"^([a-zA-Z_][\w]*)(?:\(([^)]*)\)|:(.+))?$")
 
 # Per-tool primary arg name (used to match args against rule patterns).
-# Falls back to the first string value if the tool isn't listed here.
+#
+# DEEP_SECURITY V3.3 #D126: a versao anterior tinha um fallback "primeira
+# string em args.values()" para tools fora desta tabela. Isso era nao-
+# deterministico (depende de dict-order do JSON do modelo) e podia fazer
+# uma rule literal bater contra o arg errado — ex: `delegate_task(task)`
+# matching contra `context="task"` por acidente. Removido o fallback;
+# adicionamos aqui tools que precisam ser regulaveis.
 _PRIMARY_ARG = {
     "execute_shell": "command",
     "execute_pipeline": "pipeline",
@@ -360,6 +366,15 @@ _PRIMARY_ARG = {
     "git_operation": "action",
     "query_database": "query",
     "search_and_replace": "path",
+    # Adicionados em V3.3 (#D126) — antes caiam no fallback nao-deterministico
+    "delegate_task": "task",
+    "delegate_parallel": "tasks",
+    "delegate_consensus": "question",
+    "browser_navigate": "url",
+    "browser_new_tab": "url",
+    "apify_run_actor": "actor_id",
+    "install_package": "package",
+    "execute_python": "code",
 }
 
 
@@ -384,15 +399,25 @@ class PermissionRule:
 
 
 def _primary_arg_value(tool_name: str, args: dict) -> str | None:
+    """Retorna o valor do "primary arg" para matching de allow/deny rules.
+
+    DEEP_SECURITY V3.3 #D126: removido o fallback "primeira string em
+    args.values()". A previsibilidade do approval system depende de
+    rules baterem contra o campo *explicitamente* mapeado em _PRIMARY_ARG.
+    Tools fora do mapping retornam None — rules literal/regex sobre args
+    nao batem (apenas rules tool-name-only, comportamento esperado).
+    """
     if not isinstance(args, dict):
         return None
     key = _PRIMARY_ARG.get(tool_name)
-    if key and key in args:
+    if key is None:
+        # Tool sem mapping — sem heuristica de adivinhacao. Rules
+        # tool-name-only continuam funcionando (PermissionRule.matches
+        # retorna True quando literal e pattern sao None).
+        return None
+    if key in args:
         val = args[key]
         return str(val) if val is not None else None
-    for v in args.values():
-        if isinstance(v, str):
-            return v
     return None
 
 
