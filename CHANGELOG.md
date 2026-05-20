@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.21.5](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.21.4...alpha-code-v1.21.5) (2026-05-20)
+
+
+### Bug Fixes
+
+* close DEEP_RESILIENCE V4.3 medium/low cluster (10 issues) ([2c814e4](https://github.com/freire19/Alpha_Code/commit/2c814e4d5016966a480e6666b21c982a71f15fbd))
+
 ## [1.21.4](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.21.3...alpha-code-v1.21.4) (2026-05-20)
 
 
