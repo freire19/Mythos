@@ -4,6 +4,8 @@ Extracted from shell_tools, code_tools, pipeline_tools, git_tools (#D001).
 ~120 linhas duplicadas em 8+ sites reduzidas para ~1 chamada por site.
 """
 
+from __future__ import annotations
+
 import asyncio
 import logging
 

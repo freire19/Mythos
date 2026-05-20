@@ -6,6 +6,8 @@ optimization. Instead of crude truncation, uses the LLM itself to summarize
 old messages when context grows too large.
 """
 
+from __future__ import annotations
+
 import json
 import logging
 import os

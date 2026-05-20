@@ -5,6 +5,8 @@ Holds a single Playwright browser instance shared across all browser_* tools
 so cookies, login state, and tab history survive between tool calls.
 """
 
+from __future__ import annotations
+
 import asyncio
 import logging
 import sys

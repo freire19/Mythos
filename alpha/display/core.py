@@ -5,6 +5,8 @@ Kali Linux-inspired color scheme with priority-based visual indicators.
 Green/red dominant palette, safety-aware tool display, hacker aesthetic.
 """
 
+from __future__ import annotations
+
 import os
 
 # Theme primitives — colors, display constants, safety icons, _truncate.

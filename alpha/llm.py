@@ -6,6 +6,8 @@ Streams SSE responses from providers (DeepSeek, OpenAI, Grok, Ollama).
 Includes retry with exponential backoff, jitter, and rate-limit handling.
 """
 
+from __future__ import annotations
+
 import asyncio
 import hashlib
 import json

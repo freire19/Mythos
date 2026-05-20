@@ -6,6 +6,8 @@ SECURITY: Read-only mode by default. Write operations require explicit flag.
 Only local databases allowed (SSRF protection on connection strings).
 """
 
+from __future__ import annotations
+
 import asyncio
 import logging
 import re

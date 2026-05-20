@@ -2,6 +2,8 @@
 Configuration for Alpha Code — provider settings, environment, system prompt.
 """
 
+from __future__ import annotations
+
 import os
 from pathlib import Path
 

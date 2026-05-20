@@ -18,6 +18,8 @@ Switch in the REPL:
   /agents                   — list all agents
 """
 
+from __future__ import annotations
+
 from .loader import load_agent_file
 from .registry import get_agent, list_agents, load_all_agents
 from .scope import AgentScope

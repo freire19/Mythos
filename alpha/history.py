@@ -6,6 +6,8 @@ Sessions are stored in ~/.alpha_code/history/ with timestamps.
 Supports session summaries for quick resume and context continuity.
 """
 
+from __future__ import annotations
+
 import json
 import logging
 import os

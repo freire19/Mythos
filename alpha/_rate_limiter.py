@@ -9,6 +9,8 @@ Configurable via env vars:
   Default: 60 req/min, burst=10 (generous — doesn't affect single-agent use).
 """
 
+from __future__ import annotations
+
 import asyncio
 import logging
 import os

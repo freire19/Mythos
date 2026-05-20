@@ -1,5 +1,7 @@
 """deploy_check tool — composite (#030 split)."""
 
+from __future__ import annotations
+
 import asyncio
 
 from . import ToolCategory, ToolDefinition, ToolSafety, register_tool

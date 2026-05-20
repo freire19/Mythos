@@ -6,6 +6,8 @@ SECURITY: Only operates within AGENT_WORKSPACE. Destructive operations
 (push, reset, clean) require approval. Read operations are safe.
 """
 
+from __future__ import annotations
+
 import asyncio
 import logging
 import re

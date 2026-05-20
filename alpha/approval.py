@@ -8,6 +8,8 @@ User-defined `allow` / `deny` rules from `.alpha/settings.json` override the
 built-in defaults — see `_load_permission_rules` for the schema.
 """
 
+from __future__ import annotations
+
 import logging
 import os
 import re

@@ -5,6 +5,8 @@ Provider: DuckDuckGo (free, default).
 Extraction: trafilatura (primary), HTML strip (fallback).
 """
 
+from __future__ import annotations
+
 import asyncio
 import logging
 import re

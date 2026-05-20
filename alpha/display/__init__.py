@@ -5,6 +5,8 @@ Re-exports from submodules for backward compatibility:
 - thinking: ThinkingIndicator spinner + module-level singletons
 """
 
+from __future__ import annotations
+
 from .core import (
     C,
     DISPLAY_LINE_TRUNCATE,

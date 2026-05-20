@@ -8,6 +8,8 @@ Usage:
     python main.py --provider grok "fix the bug in main.py"
 """
 
+from __future__ import annotations
+
 import argparse
 import asyncio
 import os

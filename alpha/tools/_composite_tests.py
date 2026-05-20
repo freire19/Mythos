@@ -1,5 +1,7 @@
 """run_tests tool — composite (#030 split)."""
 
+from __future__ import annotations
+
 import shlex
 
 from ..executor import _annotate_error

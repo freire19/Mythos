@@ -6,6 +6,8 @@ exfiltration (httpx, aiohttp, requests, duckduckgo_search).
 The blocklist is best-effort — NOT a real sandbox. Single-user only.
 """
 
+from __future__ import annotations
+
 import ast
 import asyncio
 import logging

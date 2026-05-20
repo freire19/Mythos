@@ -1,5 +1,7 @@
 """search_and_replace tool — composite (#030 split)."""
 
+from __future__ import annotations
+
 import os
 import re
 import tempfile

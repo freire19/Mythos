@@ -5,6 +5,8 @@ auto-registers their tools into the global alpha TOOL_REGISTRY under the
 prefix `mcp__<server>__<tool>`.
 """
 
+from __future__ import annotations
+
 from .client import MCPClient, MCPError
 from .config import MCPServerConfig, find_config_file, load_mcp_config
 from .loader import (

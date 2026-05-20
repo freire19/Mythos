@@ -8,6 +8,8 @@ LLM. Skills that previously rendered a markdown table and asked the
 user to type a category should call this tool instead.
 """
 
+from __future__ import annotations
+
 import asyncio
 import json
 import logging

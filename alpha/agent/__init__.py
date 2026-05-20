@@ -5,6 +5,8 @@ Simplified autonomous engine: LLM call -> tool detection -> approval -> executio
 Includes intelligent context compression, token tracking, and smart loop detection.
 """
 
+from __future__ import annotations
+
 import json
 import logging
 from collections.abc import AsyncGenerator

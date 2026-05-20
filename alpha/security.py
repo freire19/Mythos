@@ -7,6 +7,8 @@ Unifies command/pipeline validation previously scattered across:
 Also provides the shared denylist constants both modules need (#D002).
 """
 
+from __future__ import annotations
+
 import re
 import shlex
 

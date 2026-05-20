@@ -4,6 +4,8 @@ Uses ANSI scroll regions (DECSTBM) to reserve the bottom terminal rows
 for a persistent spinner, so streaming output flows above without erasing it.
 """
 
+from __future__ import annotations
+
 import asyncio
 import logging
 import os

@@ -4,6 +4,8 @@ Strips API keys, secrets, and credentials from os.environ
 to prevent exfiltration by user-submitted code.
 """
 
+from __future__ import annotations
+
 import os
 import re
 import time

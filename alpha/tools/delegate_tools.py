@@ -6,6 +6,8 @@ Supports single delegation (delegate_task) and parallel delegation
 Apos #082 split: helpers extraidos para _delegate_core.py.
 """
 
+from __future__ import annotations
+
 import asyncio
 import difflib
 import json

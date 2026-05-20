@@ -1,5 +1,7 @@
 """File operation tools for ALPHA agent."""
 
+from __future__ import annotations
+
 import asyncio
 import json
 import logging

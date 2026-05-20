@@ -5,6 +5,8 @@ Executes tool calls with parallel support, handles approval flow, formats result
 When multiple tools are called in the same turn, independent tools run in parallel.
 """
 
+from __future__ import annotations
+
 import asyncio
 import json
 import logging

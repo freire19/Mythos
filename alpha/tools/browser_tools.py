@@ -5,6 +5,8 @@ Persistent browser session shared across calls. Read-only operations
 execute_js) is DESTRUCTIVE and requires user approval.
 """
 
+from __future__ import annotations
+
 import logging
 import time
 from pathlib import Path

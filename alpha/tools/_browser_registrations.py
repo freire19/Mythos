@@ -3,6 +3,8 @@
 Auto-generated from browser_tools.py split (#081).
 """
 
+from __future__ import annotations
+
 from . import ToolCategory, ToolDefinition, ToolSafety, register_tool
 from .browser_tools import (
     _browser_open, _browser_close, _browser_status,

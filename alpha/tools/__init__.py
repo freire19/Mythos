@@ -28,6 +28,8 @@ Tool module index (where each tool lives, see #096):
 - apify_tools.py   — apify_run_actor, apify_search_actors
 """
 
+from __future__ import annotations
+
 import importlib
 import logging
 import pkgutil

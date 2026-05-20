@@ -6,6 +6,8 @@ SECURITY: Private/internal IPs are blocked by default to prevent SSRF.
 Request size and timeout are limited. No credential forwarding.
 """
 
+from __future__ import annotations
+
 import asyncio
 import logging
 import random

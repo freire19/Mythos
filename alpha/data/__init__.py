@@ -5,3 +5,6 @@ namespace to attach non-code files (agent YAML profiles today, possibly
 curated skill defaults later). Without an `__init__.py` here, setuptools
 wouldn't include `alpha/data/**/*` in the wheel.
 """
+
+from __future__ import annotations
+

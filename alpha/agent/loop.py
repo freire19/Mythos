@@ -4,6 +4,8 @@ Detects: exact repeats, similar calls, N-step cycles, stale progress.
 Extracted from agent.py (#DM037).
 """
 
+from __future__ import annotations
+
 import json
 from collections import Counter
 from difflib import SequenceMatcher

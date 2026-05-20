@@ -1,5 +1,7 @@
 """Apify integration — run any Actor and collect results."""
 
+from __future__ import annotations
+
 import json
 import logging
 import os

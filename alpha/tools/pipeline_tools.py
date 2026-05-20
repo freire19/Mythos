@@ -6,6 +6,8 @@ Each command in the pipeline is validated against the allowlist individually.
 SECURITY: Each pipeline stage is validated. Hard-blocked patterns checked on full pipeline.
 """
 
+from __future__ import annotations
+
 import asyncio
 import logging
 import os
