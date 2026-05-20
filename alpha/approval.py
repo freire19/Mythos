@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ._platform import IS_WINDOWS
+from .security import PIPELINE_REDIRECT_SPLIT_RE, PIPELINE_SPLIT_RE
 from .settings import find_config_file, read_json
 
 logger = logging.getLogger(__name__)
@@ -152,6 +153,10 @@ _SAFE_SHELL_COMMANDS_WIN_LOWER = frozenset(c.lower() for c in SAFE_SHELL_COMMAND
 # Dangerous operators (subshells, redirection, variable expansion)
 # Pipes (|) are allowed if all commands in the pipeline are safe
 _DANGEROUS_OPS = re.compile(r"[;&`<>\n\r]|\$\(|&&|\|\||\$\{")
+
+# #P001: shell-expansion/injection vectors checked by _is_safe_pipeline
+# (allows &&, ||, ; — these are decomposed into per-command safety checks).
+_PIPELINE_DANGEROUS_RE = re.compile(r"[`<>]|\$\(|\$\{|\n|\r")
 
 # Dangerous args per command (exfiltration / destructive writes)
 # V-001 FIX: validate individual args (not joined string)
@@ -318,18 +323,17 @@ def _is_safe_pipeline(pipeline: str) -> bool:
     Still blocks dangerous operators like backticks, $(), redirects.
     """
     # Block shell expansion / injection vectors (but NOT &&, ||, ;)
-    _PIPELINE_DANGEROUS = re.compile(r"[`<>]|\$\(|\$\{|\n|\r")
-    if _PIPELINE_DANGEROUS.search(pipeline):
+    if _PIPELINE_DANGEROUS_RE.search(pipeline):
         return False
 
     # Split by logical operators and pipes, validate each command
-    segments = re.split(r"\s*(?:&&|\|\||;|\|)\s*", pipeline)
+    segments = PIPELINE_SPLIT_RE.split(pipeline)
     for seg in segments:
         seg = seg.strip()
         if not seg:
             continue
         # Strip redirects for validation
-        cmd_part = re.split(r"\s*(?:>>?|2>>?|<)\s*", seg)[0].strip()
+        cmd_part = PIPELINE_REDIRECT_SPLIT_RE.split(seg)[0].strip()
         if not cmd_part:
             continue
         if not _is_single_command_safe(cmd_part):

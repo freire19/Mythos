@@ -99,6 +99,11 @@ _SHELL_EXPANSION_RE = re.compile(
     r"|\$\(\(\("  # arithmetic expansion: $(((...)))
 )
 
+# #P001: split patterns compartilhados por approval.py e validate_pipeline()
+# abaixo. Mantidos como modulo-level para evitar drift entre os callers.
+PIPELINE_SPLIT_RE = re.compile(r"\s*(?:\|\||&&|;|\|)\s*")
+PIPELINE_REDIRECT_SPLIT_RE = re.compile(r"\s*(?:>>?|2>>?|<)\s*")
+
 
 # ─── Validation functions ────────────────────────────────────────────
 
@@ -149,12 +154,12 @@ def validate_pipeline(pipeline: str) -> str | None:
         return "Pipeline bloqueado por segurança (padrão destrutivo detectado)"
 
     # Syntactic check per segment (no allowlist; HARD_BLOCKED already gated)
-    segments = re.split(r"\s*(?:\|\||&&|;|\|)\s*", pipeline)
+    segments = PIPELINE_SPLIT_RE.split(pipeline)
     for segment in segments:
         segment = segment.strip()
         if not segment:
             continue
-        cmd_part = re.split(r"\s*(?:>>?|2>>?|<)\s*", segment)[0].strip()
+        cmd_part = PIPELINE_REDIRECT_SPLIT_RE.split(segment)[0].strip()
         if not cmd_part:
             continue
         try:

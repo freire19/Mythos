@@ -26,7 +26,7 @@ import httpx
 from ._http_singleton import LoopAwareClient
 from ._rate_limiter import acquire_llm_token as _rate_limit_acquire
 
-from .config import LLM_TIMEOUT, RETRY
+from .config import HTTPX_LIMITS_LLM, LLM_TIMEOUT, RETRY
 from .llm import DsmlStripper, _calc_backoff
 
 logger = logging.getLogger(__name__)
@@ -50,7 +50,7 @@ _client = LoopAwareClient(
     name="llm_anthropic",
     build=lambda: httpx.AsyncClient(
         timeout=httpx.Timeout(LLM_TIMEOUT, connect=10.0),
-        limits=httpx.Limits(max_keepalive_connections=5, max_connections=20),
+        limits=httpx.Limits(**HTTPX_LIMITS_LLM),
     ),
 )
 

@@ -11,6 +11,7 @@ import logging
 import os
 import time
 from collections.abc import AsyncGenerator, Callable
+from itertools import islice
 
 from . import hooks
 from .stats import record_approval, record_tool
@@ -89,7 +90,8 @@ def _cheap_len(v) -> int:
 
     DEEP_PERFORMANCE #D030: `len(str(v))` em dicts/listas aninhados
     materializa a representação inteira só para medir. Para coleções,
-    amostramos os primeiros 50 itens e extrapolamos.
+    amostramos os primeiros 50 itens e extrapolamos. Em dicts usamos
+    `islice` para nao alocar O(N) tuplas (#P003).
     """
     if isinstance(v, str):
         return len(v)
@@ -99,11 +101,14 @@ def _cheap_len(v) -> int:
         sample = sum(_cheap_len(x) for x in v[:50])
         return sample * (len(v) // 50) + 100  # margem de segurança
     if isinstance(v, dict):
-        items = list(v.items())
-        if len(items) <= 50:
-            return sum(_cheap_len(k) + _cheap_len(val) + 4 for k, val in items)
-        sample = sum(_cheap_len(k) + _cheap_len(val) + 4 for k, val in items[:50])
-        return sample * (len(items) // 50) + 100
+        n = len(v)
+        if n <= 50:
+            return sum(_cheap_len(k) + _cheap_len(val) + 4 for k, val in v.items())
+        sample = sum(
+            _cheap_len(k) + _cheap_len(val) + 4
+            for k, val in islice(v.items(), 50)
+        )
+        return sample * (n // 50) + 100
     return len(str(v))
 
 

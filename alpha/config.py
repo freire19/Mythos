@@ -55,6 +55,15 @@ MAX_ITERATIONS = LIMITS["max_iterations"]
 TOOL_RESULT_MAX_CHARS = LIMITS["tool_result_max_chars"]
 LLM_TIMEOUT = LIMITS["llm_timeout"]
 
+# #P004: connection pool limits compartilhados por todos os clientes
+# HTTP do LLM. Conservador: agent loop tipico nao paraleliza alem de
+# 3-5 LLM calls (delegate_parallel), e providers upstream rate-limitam
+# bem antes de 20 keepalive.
+HTTPX_LIMITS_LLM = {
+    "max_keepalive_connections": 5,
+    "max_connections": 20,
+}
+
 # Retry config centralizado (#DM036). LLM e HTTP usam backoff exponencial
 # com jitter, mas com parametros diferentes (LLM calls sao mais caras e
 # toleram retry mais agressivo; HTTP safe-methods podem retentar erros

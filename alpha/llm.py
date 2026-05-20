@@ -18,7 +18,7 @@ import httpx
 
 from ._rate_limiter import acquire_llm_token as _rate_limit_acquire
 from ._security_log import sanitize_for_log
-from .config import LLM_TIMEOUT, RETRY, get_provider_config
+from .config import HTTPX_LIMITS_LLM, LLM_TIMEOUT, RETRY, get_provider_config
 
 logger = logging.getLogger(__name__)
 
@@ -102,7 +102,10 @@ from ._http_singleton import LoopAwareClient
 
 _shared_llm_client = LoopAwareClient(
     name="llm",
-    build=lambda: httpx.AsyncClient(timeout=httpx.Timeout(LLM_TIMEOUT, connect=10.0)),
+    build=lambda: httpx.AsyncClient(
+        timeout=httpx.Timeout(LLM_TIMEOUT, connect=10.0),
+        limits=httpx.Limits(**HTTPX_LIMITS_LLM),
+    ),
 )
 
 
