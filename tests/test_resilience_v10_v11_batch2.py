@@ -24,11 +24,13 @@ class TestCompressContextErrorHandling:
     def test_distinguishes_timeout_from_bug(self):
         import inspect
 
-        from alpha.agent import run_agent
+        # #DM038: compression error handling moveu de run_agent para o
+        # helper extraido `_maybe_compress`. O caminho separado continua:
+        # TimeoutError -> warning + continue, outros Exception ->
+        # logger.exception (preserva traceback).
+        from alpha.agent import _maybe_compress
 
-        src = inspect.getsource(run_agent)
-        # Caminhos separados: TimeoutError -> warning + continue,
-        # outros Exception -> logger.exception (preserva traceback)
+        src = inspect.getsource(_maybe_compress)
         assert "TimeoutError" in src or "asyncio.TimeoutError" in src
         assert "logger.exception" in src
 

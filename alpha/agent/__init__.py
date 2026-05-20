@@ -7,6 +7,7 @@ Includes intelligent context compression, token tracking, and smart loop detecti
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from collections.abc import AsyncGenerator
@@ -76,6 +77,267 @@ def _count_destructive_non_planning(
         if td.safety == ToolSafety.DESTRUCTIVE:
             n += 1
     return n
+
+
+# ─── run_agent helpers (#DM038 split) ───
+#
+# run_agent was 431L; broke off four async-generator helpers so the main
+# loop reads as: compress → stream → react to loop/preflight → execute.
+
+
+async def _maybe_compress(messages: list[dict], provider: str) -> AsyncGenerator[dict, None]:
+    """Pre-call adaptive compression. Yields context_compressed event when
+    tokens actually shrank. Failure logged but never raised — agent keeps
+    going with inflated context; the overflow retry path will handle
+    blowups."""
+    if not needs_compression(messages, provider):
+        return
+    tokens_before = estimate_messages_tokens(messages)
+    try:
+        _, tokens_after = await compress_until_under_budget(
+            messages, provider, stream_chat_with_tools
+        )
+        if tokens_after != tokens_before:
+            yield {
+                "type": "context_compressed",
+                "before": tokens_before,
+                "after": tokens_after,
+            }
+    except TimeoutError as e:
+        # Compression chamou um LLM que estourou. Em Python 3.11+
+        # `asyncio.TimeoutError` e alias de TimeoutError — um handler cobre
+        # os dois. Continua com contexto inflado.
+        logger.warning("Context compression timeout: %s — continuing without compression", e)
+    except Exception:
+        # #053: bugs reais em context.py virariam silenciosos com
+        # `except Exception as e: logger.warning(...)`. exc_info preserva
+        # o frame para diagnostico sem derrubar o agent loop.
+        logger.exception("Context compression failed unexpectedly — continuing")
+
+
+async def _handle_overflow_retry(
+    messages: list[dict], provider: str
+) -> AsyncGenerator[dict, None]:
+    """Aggressive re-compression after the provider rejected the request
+    with a context-overflow error. Targets 40% of the limit and runs up
+    to 3 passes. Falls back to hard-truncate if compression itself fails.
+    Yields the context_compressed event when shrinkage happened."""
+    try:
+        limit = get_context_limit(provider)
+        tokens_before = estimate_messages_tokens(messages)
+        _, tokens_after = await compress_until_under_budget(
+            messages,
+            provider,
+            stream_chat_with_tools,
+            target_tokens=int(limit * 0.4),
+            max_passes=3,
+        )
+        yield {
+            "type": "context_compressed",
+            "before": tokens_before,
+            "after": tokens_after,
+        }
+    except Exception as ce:
+        logger.exception("Aggressive compression failed: %s", ce)
+        from ..context import _find_compressible_range, _hard_truncate
+        start, end = _find_compressible_range(messages)
+        if start < end:
+            messages[:] = _hard_truncate(messages, start, end)
+
+
+async def _stream_one_turn(
+    messages: list[dict],
+    tools: list[dict],
+    temperature: float,
+    provider: str,
+    provider_model: str,
+) -> AsyncGenerator[dict, None]:
+    """One LLM call with the in-band overflow retry.
+
+    Yields user-visible events (`token`, `stream_reset`, `context_compressed`)
+    and, on completion, exactly one ``{"type": "_final", "event": ...}``
+    marker carrying the provider's final event for the caller to react to.
+    Marker shape isn't part of the public event vocabulary — it's an
+    internal handoff.
+    """
+    overflow_retried = False
+    while True:
+        final_event = None
+        record_path = _record_session_path()
+        # Buffer the turn's events when ALPHA_RECORD_SESSION_PATH is set
+        # so we can append a complete turn (tokens + final) to the
+        # session fixture on `final`. No-op otherwise.
+        turn_buffer: list[dict] | None = [] if record_path else None
+        async for event in stream_chat_with_tools(
+            messages, tools, temperature, provider=provider
+        ):
+            if turn_buffer is not None:
+                turn_buffer.append(event)
+            if event["type"] == "content_token":
+                yield {"type": "token", "text": event["token"]}
+            elif event["type"] == "stream_reset":
+                # llm.py vai retentar; tokens ja yieldados sao da
+                # tentativa abortada. Caller (REPL/main) pode limpar UI.
+                yield event
+            elif event["type"] == "final":
+                final_event = event
+
+        if turn_buffer is not None and record_path:
+            try:
+                from ..llm_fixtures import append_turn
+                append_turn(
+                    record_path,
+                    turn_buffer,
+                    scenario="session-record",
+                    provider=provider,
+                    model=provider_model,
+                )
+            except Exception as e:
+                logger.debug("session recording failed (non-fatal): %s", e)
+
+        if final_event is None:
+            yield {"type": "_final", "event": None}
+            return
+
+        try:
+            record_usage(
+                provider=provider,
+                model=provider_model,
+                usage=final_event.get("usage"),
+            )
+        except Exception as e:
+            logger.debug("cost tracking failed (non-fatal): %s", e)
+
+        err = final_event.get("error")
+        if err and is_context_overflow_error(err) and not overflow_retried:
+            overflow_retried = True
+            logger.warning(
+                "Context overflow from provider — re-compressing aggressively: %s", err
+            )
+            async for evt in _handle_overflow_retry(messages, provider):
+                yield evt
+            continue  # retry the LLM call once
+
+        yield {"type": "_final", "event": final_event}
+        return
+
+
+async def _produce_forced_response(
+    messages: list[dict],
+    temperature: float,
+    provider: str,
+    provider_model: str,
+    loop_reason: str,
+    final_event: dict,
+    full_response: str,
+) -> AsyncGenerator[dict, None]:
+    """Loop-detected path: drop the assistant's tool_calls, append a
+    user-role nudge, stream one more LLM turn with no tools, and yield
+    `done` or `error`. ``full_response`` is the accumulated text so far —
+    we append the forced turn's content before emitting done."""
+    # Preserve the assistant's content from this turn so the forced
+    # final has continuity, but DROP the unfulfilled tool_calls. If we
+    # appended tool_calls without matching `tool` responses, the provider
+    # would reject the next request (HTTP 400). And without any assistant
+    # trace, the model often dumps the tool calls it wanted as raw text
+    # (XML/JSON) — visible as `<invoke>` blocks leaking to the terminal.
+    if final_event.get("content"):
+        forced_msg: dict = {
+            "role": "assistant",
+            "content": final_event["content"],
+        }
+        if final_event.get("reasoning_content"):
+            forced_msg["reasoning_content"] = final_event["reasoning_content"]
+        messages.append(forced_msg)
+    # Usar role=user em vez de system: providers como OpenAI strict mode
+    # e alguns Ollama models rejeitam/ignoram system message tardia, alem
+    # de competir com a system message original em messages[0]. (#DL020)
+    messages.append(
+        {
+            "role": "user",
+            "content": (
+                f"[ALPHA SYSTEM NOTE] Loop detected ({loop_reason}). "
+                "STOP calling tools and produce your final response now "
+                "based on the data already collected. Synthesize ALL information from "
+                "previous calls into a complete response. "
+                "Do NOT emit tool calls in any format — not as JSON, "
+                "not as XML, not as <invoke> tags. Reply in plain prose."
+            ),
+        }
+    )
+    forced_final = None
+    async for event in stream_chat_with_tools(
+        messages, [], temperature, provider=provider
+    ):
+        if event["type"] == "content_token":
+            yield {"type": "token", "text": event["token"]}
+        elif event["type"] == "stream_reset":
+            yield event
+        elif event["type"] == "final":
+            forced_final = event
+            if event.get("content"):
+                full_response += event["content"]
+
+    if forced_final is not None:
+        try:
+            record_usage(
+                provider=provider,
+                model=provider_model,
+                usage=forced_final.get("usage"),
+            )
+        except Exception as e:
+            logger.debug("cost tracking failed (non-fatal): %s", e)
+
+    # Force-text path nao pode sumir com erro do LLM em silencio: o
+    # usuario veria reply vazio sem motivo. Propagar.
+    # DL031: forced_final pode ser None se o LLM nunca emitir 'final'
+    # (provider timeout, conexao dropada). Evitar yield de done vazio.
+    if forced_final is None:
+        yield {
+            "type": "error",
+            "message": (
+                "Loop detection forced-text response: "
+                "no final event from LLM (provider may be down)"
+            ),
+        }
+        return
+    if forced_final.get("error"):
+        yield {
+            "type": "error",
+            "message": (
+                "Loop detection forced-text response also failed: "
+                f"{forced_final['error']}"
+            ),
+        }
+        return
+
+    yield {"type": "done", "reply": full_response}
+
+
+def _backfill_interrupted_tool_responses(messages: list[dict]) -> None:
+    """Cleanup after CancelledError mid-tool: ensure each assistant
+    tool_call has a matching tool response, otherwise the provider rejects
+    the next request with HTTP 400. Appends synthetic `{"error":
+    "interrupted"}` for any unmatched tc."""
+    last_assistant = None
+    for msg in reversed(messages):
+        if msg.get("role") == "assistant" and msg.get("tool_calls"):
+            last_assistant = msg
+            break
+    if last_assistant is None:
+        return
+    responded = {
+        m.get("tool_call_id")
+        for m in messages
+        if m.get("role") == "tool"
+    }
+    for tc in last_assistant["tool_calls"]:
+        if tc["id"] not in responded:
+            messages.append({
+                "role": "tool",
+                "tool_call_id": tc["id"],
+                "content": json.dumps({"error": "interrupted"}),
+            })
 
 
 async def run_agent(
@@ -170,116 +432,22 @@ async def run_agent(
                 return
 
         # ── Pre-call adaptive compression ──
-        if needs_compression(messages, provider):
-            tokens_before = estimate_messages_tokens(messages)
-            try:
-                _, tokens_after = await compress_until_under_budget(
-                    messages, provider, stream_chat_with_tools
-                )
-                if tokens_after != tokens_before:
-                    yield {
-                        "type": "context_compressed",
-                        "before": tokens_before,
-                        "after": tokens_after,
-                    }
-            except TimeoutError as e:
-                # Compression chamou um LLM que estourou. Continua com
-                # contexto inflado — o hard truncate fallback (#062) cobre
-                # o caso onde isso vira loop. Em Python 3.11+ `asyncio.
-                # TimeoutError` e alias de TimeoutError, entao um unico
-                # handler ja cobre os dois caminhos sem precisar importar
-                # asyncio (que nao e usado em mais nada neste modulo).
-                logger.warning(
-                    f"Context compression timeout: {e} — continuing without compression"
-                )
-            except Exception:
-                # #053: bugs reais em context.py virariam silenciosos com
-                # `except Exception as e: logger.warning(...)`. exc_info=True
-                # preserva o frame onde o bug aconteceu para diagnostico,
-                # sem derrubar o agent loop.
-                logger.exception("Context compression failed unexpectedly — continuing")
+        async for evt in _maybe_compress(messages, provider):
+            yield evt
 
-        # ── Stream LLM call (with one overflow retry) ──
+        # ── Stream LLM call (with one in-band overflow retry) ──
         final_event = None
-        overflow_retried = False
+        async for event in _stream_one_turn(
+            messages, tools, temperature, provider, _provider_model
+        ):
+            if event["type"] == "_final":
+                final_event = event["event"]
+            else:
+                yield event
 
-        while True:
-            final_event = None
-            # Buffer the turn's events when ALPHA_RECORD_SESSION_PATH is set
-            # so we can append a complete turn (tokens + final) to the
-            # session fixture on `final`. No-op otherwise.
-            record_path = _record_session_path()
-            turn_buffer: list[dict] = [] if record_path else None
-            async for event in stream_chat_with_tools(
-                messages, tools, temperature, provider=provider
-            ):
-                if turn_buffer is not None:
-                    turn_buffer.append(event)
-                if event["type"] == "content_token":
-                    yield {"type": "token", "text": event["token"]}
-                elif event["type"] == "stream_reset":
-                    # llm.py vai retentar; tokens ja yieldados sao da
-                    # tentativa abortada. Caller (REPL/main) pode limpar UI.
-                    yield event
-                elif event["type"] == "final":
-                    final_event = event
-
-            if turn_buffer is not None and record_path:
-                try:
-                    from ..llm_fixtures import append_turn
-                    append_turn(
-                        record_path,
-                        turn_buffer,
-                        scenario="session-record",
-                        provider=provider,
-                        model=_provider_model,
-                    )
-                except Exception as e:
-                    logger.debug("session recording failed (non-fatal): %s", e)
-
-            if final_event is None:
-                yield {"type": "error", "message": "No response from LLM"}
-                return
-
-            try:
-                record_usage(
-                    provider=provider,
-                    model=_provider_model,
-                    usage=final_event.get("usage"),
-                )
-            except Exception as e:
-                logger.debug("cost tracking failed (non-fatal): %s", e)
-
-            err = final_event.get("error")
-            if err and is_context_overflow_error(err) and not overflow_retried:
-                overflow_retried = True
-                logger.warning(
-                    f"Context overflow from provider — re-compressing aggressively: {err}"
-                )
-                try:
-                    limit = get_context_limit(provider)
-                    tokens_before = estimate_messages_tokens(messages)
-                    _, tokens_after = await compress_until_under_budget(
-                        messages,
-                        provider,
-                        stream_chat_with_tools,
-                        target_tokens=int(limit * 0.4),
-                        max_passes=3,
-                    )
-                    yield {
-                        "type": "context_compressed",
-                        "before": tokens_before,
-                        "after": tokens_after,
-                    }
-                except Exception as ce:
-                    logger.exception("Aggressive compression failed: %s", ce)
-                    from ..context import _find_compressible_range, _hard_truncate
-                    start, end = _find_compressible_range(messages)
-                    if start < end:
-                        messages[:] = _hard_truncate(messages, start, end)
-                continue  # retry the LLM call once
-
-            break
+        if final_event is None:
+            yield {"type": "error", "message": "No response from LLM"}
+            return
 
         # LLM error (non-overflow, or overflow that survived the retry)
         if final_event.get("error"):
@@ -313,89 +481,14 @@ async def run_agent(
 
         if loop_reason:
             logger.warning(
-                f"Loop detected ({loop_reason}) at iteration {iteration + 1} "
-                f"— forcing final response"
+                "Loop detected (%s) at iteration %d — forcing final response",
+                loop_reason, iteration + 1,
             )
-            # Preserve the assistant's content from this turn so the forced
-            # final has continuity, but DROP the unfulfilled tool_calls. If
-            # we appended tool_calls without matching `tool` responses, the
-            # provider would reject the next request (HTTP 400). And without
-            # any assistant trace, the model often dumps the tool calls it
-            # wanted as raw text (XML/JSON) — visible as `<invoke>` blocks
-            # leaking to the terminal.
-            if final_event.get("content"):
-                forced_msg: dict = {
-                    "role": "assistant",
-                    "content": final_event["content"],
-                }
-                if final_event.get("reasoning_content"):
-                    forced_msg["reasoning_content"] = final_event["reasoning_content"]
-                messages.append(forced_msg)
-            # Usar role=user em vez de system: providers como OpenAI strict
-            # mode e alguns Ollama models rejeitam/ignoram system message
-            # tardia, alem de competir com a system message original em
-            # messages[0]. Como mensagem do "user", a instrucao e tratada
-            # como prompt regular pelo modelo. (#DL020)
-            messages.append(
-                {
-                    "role": "user",
-                    "content": (
-                        f"[ALPHA SYSTEM NOTE] Loop detected ({loop_reason}). "
-                        "STOP calling tools and produce your final response now "
-                        "based on the data already collected. Synthesize ALL information from "
-                        "previous calls into a complete response. "
-                        "Do NOT emit tool calls in any format — not as JSON, "
-                        "not as XML, not as <invoke> tags. Reply in plain prose."
-                    ),
-                }
-            )
-            forced_final = None
-            async for event in stream_chat_with_tools(
-                messages, [], temperature, provider=provider
+            async for event in _produce_forced_response(
+                messages, temperature, provider, _provider_model,
+                loop_reason, final_event, full_response,
             ):
-                if event["type"] == "content_token":
-                    yield {"type": "token", "text": event["token"]}
-                elif event["type"] == "stream_reset":
-                    yield event
-                elif event["type"] == "final":
-                    forced_final = event
-                    if event.get("content"):
-                        full_response += event["content"]
-
-            if forced_final is not None:
-                try:
-                    record_usage(
-                        provider=provider,
-                        model=_provider_model,
-                        usage=forced_final.get("usage"),
-                    )
-                except Exception as e:
-                    logger.debug("cost tracking failed (non-fatal): %s", e)
-
-            # Force-text path nao pode sumir com erro do LLM em silencio:
-            # o usuario veria reply vazio sem motivo. Propagar.
-            # DL031: forced_final pode ser None se o LLM nunca emitir 'final'
-            # (provider timeout, conexao dropada). Evitar yield de done vazio.
-            if forced_final is None:
-                yield {
-                    "type": "error",
-                    "message": (
-                        "Loop detection forced-text response: "
-                        "no final event from LLM (provider may be down)"
-                    ),
-                }
-                return
-            if forced_final and forced_final.get("error"):
-                yield {
-                    "type": "error",
-                    "message": (
-                        "Loop detection forced-text response also failed: "
-                        f"{forced_final['error']}"
-                    ),
-                }
-                return
-
-            yield {"type": "done", "reply": full_response}
+                yield event
             return
 
         # ── Pre-flight enforcement (Plano-v3 RFC slice 2) ──
@@ -480,28 +573,10 @@ async def run_agent(
             yield {"type": "error", "message": f"Tool execution failed: {e}"}
             return
         finally:
-            # If interrupted (Ctrl+C / CancelledError) mid-tool, the assistant
-            # tool_calls may have no matching tool responses, which makes the
-            # provider reject the next request with HTTP 400. Backfill missing
-            # tool messages so the conversation stays well-formed.
-            last_assistant = None
-            for msg in reversed(messages):
-                if msg.get("role") == "assistant" and msg.get("tool_calls"):
-                    last_assistant = msg
-                    break
-            if last_assistant:
-                responded = {
-                    m.get("tool_call_id")
-                    for m in messages
-                    if m.get("role") == "tool"
-                }
-                for tc in last_assistant["tool_calls"]:
-                    if tc["id"] not in responded:
-                        messages.append({
-                            "role": "tool",
-                            "tool_call_id": tc["id"],
-                            "content": json.dumps({"error": "interrupted"}),
-                        })
+            # If interrupted (Ctrl+C / CancelledError) mid-tool, ensure the
+            # last assistant's tool_calls all have matching tool responses
+            # so the provider doesn't reject the next request with HTTP 400.
+            _backfill_interrupted_tool_responses(messages)
 
     # Max iterations reached
     yield {
