@@ -351,8 +351,13 @@ async def _browser_list_tabs() -> dict:
                 "title": await p.title(),
                 "active": i == session.active_idx,
             })
-        except Exception:
-            continue
+        except Exception as e:
+            tabs.append({
+                "index": i,
+                "url": getattr(p, "url", "?"),
+                "active": i == session.active_idx,
+                "error": f"{type(e).__name__}: {e}",
+            })
     return {"tabs": tabs, "count": len(tabs)}
 
 
@@ -410,19 +415,26 @@ async def _browser_close_tab(index: int | None = None) -> dict:
     if index < 0 or index >= len(session.pages):
         return {"error": f"Índice inválido {index}"}
     page = session.pages[index]
+    close_error: str | None = None
     try:
         await page.close()
-    except Exception:
-        pass
+    except Exception as e:
+        # pop() runs even on failure — session state must advance.
+        close_error = f"{type(e).__name__}: {e}"
+        logger.warning("browser_close_tab: page.close() failed: %s", close_error)
     session.pages.pop(index)
     if not session.pages:
         await session.close()
-        return {"closed": index, "session_closed": True}
-    # Aba fechada antes da ativa desloca o índice ativo uma posição à esquerda
-    if index < session.active_idx:
-        session.active_idx -= 1
-    session.active_idx = max(0, min(session.active_idx, len(session.pages) - 1))
-    return {"closed": index, "tab_count": len(session.pages), "active_tab": session.active_idx}
+        result: dict = {"closed": index, "session_closed": True}
+    else:
+        # Aba fechada antes da ativa desloca o índice ativo uma posição à esquerda
+        if index < session.active_idx:
+            session.active_idx -= 1
+        session.active_idx = max(0, min(session.active_idx, len(session.pages) - 1))
+        result = {"closed": index, "tab_count": len(session.pages), "active_tab": session.active_idx}
+    if close_error:
+        result["close_error"] = close_error
+    return result
 
 
 # ─── Interaction (DESTRUCTIVE) ───────────────────────────────────

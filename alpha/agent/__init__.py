@@ -471,6 +471,8 @@ async def run_agent(
                     # `_recent_calls` ja faz isso, `_recent_results` nao fazia.
                     if len(_recent_results) > _CYCLE_WINDOW * 3:
                         _recent_results[:] = _recent_results[-_CYCLE_WINDOW * 3:]
+        except asyncio.CancelledError:
+            raise  # don't let the generic Exception handler below yield an error event
         except Exception as e:
             logger.exception(f"Tool execution failed: {e}")
             yield {"type": "error", "message": f"Tool execution failed: {e}"}

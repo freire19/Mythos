@@ -80,14 +80,14 @@ async def run_subprocess_safe(
         try:
             await asyncio.wait_for(proc.wait(), timeout=5)
         except TimeoutError:
-            logger.error(f"Process {proc.pid} didn't die after kill — may be in D state")
+            logger.exception(f"Process {proc.pid} didn't die after kill — may be in D state")
         raise SubprocessTimeoutError(timeout) from None
     except (asyncio.CancelledError, KeyboardInterrupt):
         proc.kill()
         try:
             await asyncio.wait_for(proc.wait(), timeout=5)
         except TimeoutError:
-            logger.error(f"Process {proc.pid} didn't die after kill during cancellation")
+            logger.exception(f"Process {proc.pid} didn't die after kill during cancellation")
         raise
 
     return SubprocessResult(

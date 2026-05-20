@@ -252,9 +252,9 @@ async def _execute_pipe_chain(
                 try:
                     await asyncio.wait_for(proc.wait(), timeout=5)
                 except TimeoutError:
-                    logger.error(f"Pipeline process {proc.pid} didn't die after kill — may be in D state")
+                    logger.exception(f"Pipeline process {proc.pid} didn't die after kill — may be in D state")
                 except Exception:
-                    pass
+                    logger.exception(f"Pipeline process {proc.pid}: unexpected error after kill")
                 raise
             return (
                 proc.returncode,
@@ -296,9 +296,9 @@ async def _execute_pipe_chain(
                 try:
                     await asyncio.wait_for(proc.wait(), timeout=5)
                 except TimeoutError:
-                    logger.error(f"Pipeline process {proc.pid} didn't die after kill — may be in D state")
+                    logger.exception(f"Pipeline process {proc.pid} didn't die after kill — may be in D state")
                 except Exception:
-                    pass
+                    logger.exception(f"Pipeline process {proc.pid}: unexpected error after kill")
                 raise
             prev_output = stdout_bytes
             last_exit_code = proc.returncode

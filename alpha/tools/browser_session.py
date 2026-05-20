@@ -7,6 +7,7 @@ so cookies, login state, and tab history survive between tool calls.
 
 import asyncio
 import logging
+import sys
 from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
@@ -168,10 +169,11 @@ class BrowserSession:
             if self.context is not None:
                 try:
                     self.context.remove_listener("page", self._on_new_page)
-                except Exception:
+                except Exception as e:
                     # Playwright pode levantar se o context ja foi descartado
-                    # — nao impede o close.
-                    pass
+                    # — nao impede o close, mas registramos para diagnostico
+                    # em cenarios de stress (DR013).
+                    logger.debug("browser close: remove_listener failed (non-fatal): %s", e)
             if self.browser:
                 try:
                     await self.browser.close()
@@ -223,7 +225,26 @@ def validate_browser_url(url: str) -> str | None:
         return "Validação de URL indisponível — tente novamente"
 
 
+def _atexit_say(msg: str) -> None:
+    # See alpha/cli/lifecycle.py:_stderr for atexit-safe print rationale.
+    try:
+        print(msg, file=sys.stderr)
+    except Exception:
+        pass
+
+
 async def shutdown_browser() -> None:
-    """Cleanup hook called on application shutdown."""
-    if BrowserSession._instance is not None and BrowserSession._instance.is_open():
-        await BrowserSession._instance.close()
+    """Cleanup hook called on application shutdown.
+
+    DR012/#015-V1.7: `browser.close()` pode travar em problemas de
+    WebSocket/rede; sem o `wait_for`, atexit pendura o processo ate
+    SIGKILL (em containers Docker, o timeout default de 10s).
+    """
+    if BrowserSession._instance is None or not BrowserSession._instance.is_open():
+        return
+    try:
+        await asyncio.wait_for(BrowserSession._instance.close(), timeout=10)
+    except asyncio.TimeoutError:
+        _atexit_say("shutdown_browser: timeout after 10s — forcing")
+    except Exception as e:
+        _atexit_say(f"shutdown_browser: {type(e).__name__}: {e}")

@@ -92,14 +92,26 @@ def _cheap_len(v) -> int:
     materializa a representação inteira só para medir. Para coleções,
     amostramos os primeiros 50 itens e extrapolamos. Em dicts usamos
     `islice` para nao alocar O(N) tuplas (#P003).
+
+    DR007: a margem absoluta `+100` era irrelevante em coleções grandes
+    (lista de 10k itens com sample de 50KB ficaria com erro >> 100 chars
+    de margem). Substituido por margem proporcional 5% do extrapolado +
+    100 absoluto. Cobre viés de amostragem onde os primeiros 50 itens
+    são menores que a média da coleção; ainda subestima em distribuições
+    fortemente skewed, mas o consumidor (_format_result) corta strings
+    por campo depois de detectar excesso — qualquer subestima vira corte
+    extra, nao corrupção.
     """
+    def _with_margin(extrapolated: int) -> int:
+        return extrapolated + (extrapolated // 20) + 100  # 5% + 100
+
     if isinstance(v, str):
         return len(v)
     if isinstance(v, (list, tuple)):
         if len(v) <= 50:
             return sum(_cheap_len(x) for x in v)
         sample = sum(_cheap_len(x) for x in v[:50])
-        return sample * (len(v) // 50) + 100  # margem de segurança
+        return _with_margin(sample * (len(v) // 50))
     if isinstance(v, dict):
         n = len(v)
         if n <= 50:
@@ -108,7 +120,7 @@ def _cheap_len(v) -> int:
             _cheap_len(k) + _cheap_len(val) + 4
             for k, val in islice(v.items(), 50)
         )
-        return sample * (n // 50) + 100
+        return _with_margin(sample * (n // 50))
     return len(str(v))
 
 
