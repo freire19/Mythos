@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.21.7](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.21.6...alpha-code-v1.21.7) (2026-05-20)
+
+
+### Refactoring
+
+* /simplify pass on session 2026-05-20 commits ([31f03f0](https://github.com/freire19/Alpha_Code/commit/31f03f0777076b1828eb82dc66386026b48d5ee5))
+
 ## [1.21.6](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.21.5...alpha-code-v1.21.6) (2026-05-20)
 
 
