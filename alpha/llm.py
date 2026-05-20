@@ -253,6 +253,274 @@ def _calc_backoff(attempt: int, retry_after: float | None = None) -> float:
     return min(jittered, RETRY["llm"]["max_backoff"])
 
 
+# ─── stream_chat_with_tools helpers (#DM039 split) ───
+#
+# stream_chat_with_tools was 408L; extracted these pure helpers so the
+# main coroutine focuses on the I/O orchestration (HTTP request, retry
+# loop, yield events) while parsing/recovery logic lives in testable
+# units that don't touch the network.
+
+
+class _StreamState:
+    """Per-attempt accumulators for one streaming call.
+
+    Held outside `stream_chat_with_tools` so the chunk processor and
+    final-event builder are pure functions of state (no closures over
+    the coroutine's locals).
+    """
+
+    __slots__ = (
+        "accumulated_content",
+        "raw_content_for_recovery",
+        "accumulated_reasoning",
+        "tool_calls_acc",
+        "last_finish_reason",
+        "last_usage",
+        "dsml_stripper",
+    )
+
+    def __init__(self) -> None:
+        self.accumulated_content = ""
+        self.raw_content_for_recovery = ""
+        # `reasoning_content` e o canal de "thinking" do DeepSeek-reasoner
+        # (e tambem dos `gpt-oss` no Ollama). A API exige que o campo
+        # acumulado da resposta seja devolvido na turn seguinte, ou
+        # responde HTTP 400. Provedores que nao usam thinking nunca emitem
+        # o campo, entao guardamos None e nao adicionamos ao message dict.
+        self.accumulated_reasoning = ""
+        self.tool_calls_acc: dict[int, dict] = {}
+        # Capture the last non-empty finish_reason. Gemini emits diagnostic
+        # values (e.g. "function_call_filter: MALFORMED_FUNCTION_CALL")
+        # that surface to the user instead of an opaque "(turno encerrado)".
+        self.last_finish_reason = ""
+        # From the trailing `include_usage` chunk — forwarded to the agent
+        # loop so it can pass to alpha.cost.record_usage.
+        self.last_usage: dict | None = None
+        self.dsml_stripper = DsmlStripper()
+
+
+def _build_request(
+    *,
+    messages: list[dict],
+    tools: list[dict],
+    temperature: float,
+    api_key: str,
+    model: str,
+    supports_tools: bool,
+) -> tuple[dict, dict]:
+    """Build (headers, payload) for the chat completions POST."""
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": model,
+        "messages": messages,
+        "stream": True,
+        "temperature": temperature,
+        # Ask the provider to emit a final SSE chunk with token usage.
+        # OpenAI-compatible providers honor this; Anthropic uses its own
+        # adapter (`llm_anthropic.py`) and has its own usage path.
+        "stream_options": {"include_usage": True},
+    }
+    if tools and supports_tools:
+        payload["tools"] = tools
+    return headers, payload
+
+
+def _accumulate_tool_call_delta(tool_calls_acc: dict[int, dict], tc_delta: dict) -> None:
+    """Apply one streaming tool_call delta to the accumulator.
+
+    Google's OpenAI-compat layer omits the per-delta `index` field that
+    OpenAI's own spec requires, so default to the next available slot
+    when missing. Without this, every Gemini tool call raised KeyError
+    and got dropped silently — the user saw a "(turno encerrado)" with
+    no hint of why.
+    """
+    idx = tc_delta.get("index")
+    if idx is None:
+        idx = len(tool_calls_acc)
+    if idx not in tool_calls_acc:
+        tool_calls_acc[idx] = {
+            "id": tc_delta.get("id", ""),
+            "name": tc_delta.get("function", {}).get("name", ""),
+            "arguments": "",
+            "extra_content": None,
+        }
+    entry = tool_calls_acc[idx]
+    if tc_delta.get("id"):
+        entry["id"] = tc_delta["id"]
+    fn = tc_delta.get("function", {})
+    if fn.get("name"):
+        entry["name"] = fn["name"]
+    if fn.get("arguments"):
+        entry["arguments"] += fn["arguments"]
+    # Gemini's OpenAI-compat returns a `thought_signature` under
+    # extra_content that MUST be echoed back on the next turn or the
+    # API replies HTTP 400 INVALID_ARGUMENT.
+    ec = tc_delta.get("extra_content")
+    if ec:
+        entry["extra_content"] = ec
+
+
+def _process_chunk(data: dict, state: _StreamState) -> str | None:
+    """Apply one parsed SSE chunk to `state`. Return any user-visible text
+    to yield as a content_token, or None.
+    """
+    # OpenAI's `include_usage` mode emits a trailing chunk where `choices`
+    # is empty and `usage` carries the token totals. Capture it and skip.
+    if data.get("usage") and not data.get("choices"):
+        state.last_usage = data["usage"]
+        return None
+    choices = data.get("choices") or []
+    if not choices:
+        return None
+    choice = choices[0]
+    # Some providers attach usage to the same chunk as the final choice
+    # instead of a separate trailer.
+    if data.get("usage"):
+        state.last_usage = data["usage"]
+    fr = choice.get("finish_reason")
+    if fr:
+        state.last_finish_reason = str(fr)
+    delta = choice.get("delta", {})
+
+    emit: str | None = None
+    # `dsml_stripper` buffers any unclosed `<…` tail so a tag split across
+    # SSE chunks is still removed cleanly. raw_content_for_recovery is a
+    # rolling 8KB tail kept only so end-of-stream DSML recovery has
+    # something to parse — DSML blocks always land at the end and
+    # accumulating the full stream would double memory on long responses
+    # for a path that fires <1% of turns.
+    content = delta.get("content", "")
+    if content:
+        if not state.tool_calls_acc:
+            state.raw_content_for_recovery += content
+            if len(state.raw_content_for_recovery) > _RAW_RECOVERY_CAP:
+                state.raw_content_for_recovery = state.raw_content_for_recovery[-_RAW_RECOVERY_CAP:]
+        safe = state.dsml_stripper.feed(content)
+        if safe:
+            state.accumulated_content += safe
+            emit = safe
+
+    # Thinking tokens (DeepSeek-reasoner). Acumulados silenciosamente
+    # — nao streamamos para o usuario porque o formato e ruidoso, mas
+    # precisam voltar pro provider. AUDIT_V1.2 #022: cap at 50KB per
+    # turn — reasoning can reach 100KB+ and bloats context invisibly.
+    reasoning = delta.get("reasoning_content", "")
+    if reasoning:
+        state.accumulated_reasoning += reasoning
+        if len(state.accumulated_reasoning) > 50_000:
+            state.accumulated_reasoning = state.accumulated_reasoning[-50_000:]
+
+    if delta.get("tool_calls"):
+        for tc_delta in delta["tool_calls"]:
+            _accumulate_tool_call_delta(state.tool_calls_acc, tc_delta)
+
+    return emit
+
+
+def _build_final_with_tool_calls(state: _StreamState) -> dict:
+    """Build the success final event when the structured tool_calls field
+    was populated during streaming.
+    """
+    tool_calls = [
+        {
+            "id": tc["id"],
+            "name": tc["name"],
+            "arguments": tc["arguments"],
+            **({"extra_content": tc["extra_content"]} if tc.get("extra_content") else {}),
+        }
+        for _, tc in sorted(state.tool_calls_acc.items())
+    ]
+    return {
+        "type": "final",
+        "content": state.accumulated_content,
+        "tool_calls": tool_calls,
+        "reasoning_content": state.accumulated_reasoning or None,
+        "error": None,
+        "usage": state.last_usage,
+    }
+
+
+def _build_final_with_recovery(state: _StreamState, provider: str, model_name: str) -> dict:
+    """Build the final event when tool_calls_acc stayed empty.
+
+    Fallback chain: first try DSML/XML invoke blocks (DeepSeek-V4-pro),
+    then fenced JSON (Ollama qwen-coder). DSML uses the raw un-stripped
+    buffer because the live sanitizer already erased the markup from
+    accumulated_content. If nothing recovers AND the provider gave a
+    diagnostic finish_reason, surface that as an error so the user sees
+    why the turn went silent.
+    """
+    reasoning_out = state.accumulated_reasoning or None
+    recovered = (
+        _recover_tool_call_from_dsml(state.raw_content_for_recovery)
+        or _recover_tool_call_from_content(state.accumulated_content)
+    )
+    if recovered is not None:
+        logger.info(
+            "Recovered tool call '%s' from content (provider=%s)",
+            recovered["name"], provider,
+        )
+        return {
+            "type": "final",
+            "content": "",
+            "tool_calls": [recovered],
+            "reasoning_content": reasoning_out,
+            "error": None,
+            "usage": state.last_usage,
+        }
+
+    # If the raw buffer carried DSML markup but neither recoverer could
+    # turn it into a real tool_call, log a warning. Otherwise the turn
+    # ends silently and the user sees a blank prompt without knowing the
+    # model emitted un-parseable markup.
+    if state.raw_content_for_recovery and "invoke" in state.raw_content_for_recovery.lower():
+        logger.warning(
+            "DSML/invoke markup detected in content but recovery failed "
+            "(provider=%s, len=%d) — turn will end silent",
+            provider, len(state.raw_content_for_recovery),
+        )
+
+    # If the stream produced nothing visible AND the provider gave a
+    # diagnostic finish_reason (anything other than the normal
+    # "stop"/"length"), surface it as an error. Gemini's
+    # "function_call_filter: MALFORMED_FUNCTION_CALL" is canonical.
+    fr_lower = state.last_finish_reason.lower()
+    benign = fr_lower in ("", "stop", "length", "end_turn")
+    if not state.accumulated_content and not benign:
+        logger.warning(
+            "Empty stream with diagnostic finish_reason (provider=%s, model=%s): %s",
+            provider, model_name, state.last_finish_reason,
+        )
+        return {
+            "type": "final",
+            "content": "",
+            "tool_calls": [],
+            "reasoning_content": reasoning_out,
+            "error": f"empty response (finish_reason: {state.last_finish_reason})",
+        }
+    return {
+        "type": "final",
+        "content": state.accumulated_content,
+        "tool_calls": [],
+        "reasoning_content": reasoning_out,
+        "error": None,
+        "usage": state.last_usage,
+    }
+
+
+def _parse_retry_after(header_value: str | None) -> float | None:
+    """Parse the Retry-After header value (seconds form only)."""
+    if not header_value:
+        return None
+    try:
+        return float(header_value)
+    except ValueError:
+        return None
+
+
 async def stream_chat_with_tools(
     messages: list[dict],
     tools: list[dict],
@@ -302,49 +570,20 @@ async def stream_chat_with_tools(
         # Grok, Ollama, Gemini's compat layer), so this is the right
         # default rather than a hard error.
 
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-    }
-    payload = {
-        "model": model,
-        "messages": messages,
-        "stream": True,
-        "temperature": temperature,
-        # Ask the provider to emit a final SSE chunk with token usage.
-        # OpenAI-compatible providers honor this; Anthropic uses its own
-        # adapter (`llm_anthropic.py`) and has its own usage path.
-        "stream_options": {"include_usage": True},
-    }
-    if tools and supports_tools:
-        payload["tools"] = tools
+    headers, payload = _build_request(
+        messages=messages,
+        tools=tools,
+        temperature=temperature,
+        api_key=api_key,
+        model=model,
+        supports_tools=supports_tools,
+    )
 
     last_error = None
+    max_retries = RETRY["llm"]["max_retries"]
 
-    for attempt in range(RETRY["llm"]["max_retries"] + 1):
-        accumulated_content = ""
-        raw_content_for_recovery = ""
-        dsml_stripper = DsmlStripper()
-        # `reasoning_content` e o canal de "thinking" do DeepSeek-reasoner
-        # (e tambem dos `gpt-oss` no Ollama). A API exige que o campo
-        # acumulado da resposta seja devolvido na turn seguinte, ou
-        # responde HTTP 400 "The `reasoning_content` in the thinking mode
-        # must be passed back to the API." Sem isso, qualquer iteracao
-        # com tool_call quebra. Provedores que nao usam thinking simplesmente
-        # nunca emitem o campo, entao guardamos None e nao adicionamos
-        # ao message dict.
-        accumulated_reasoning = ""
-        tool_calls_acc: dict[int, dict] = {}
-        # Capture the last non-empty finish_reason. Gemini and similar
-        # providers sometimes return an empty stream with a diagnostic
-        # finish_reason (e.g. "function_call_filter: MALFORMED_FUNCTION_CALL")
-        # — without this, the agent loop sees an empty turn and prints
-        # "(turno encerrado)" with no hint of what went wrong.
-        last_finish_reason = ""
-        # Captured from the trailing usage chunk when stream_options.include_usage
-        # is set. Forwarded in the final event so the agent loop can pass it
-        # to alpha.cost.record_usage.
-        last_usage: dict | None = None
+    for attempt in range(max_retries + 1):
+        state = _StreamState()
 
         try:
             client = await _get_shared_llm_client()
@@ -357,36 +596,28 @@ async def stream_chat_with_tools(
             ) as response:
                 # Handle retryable HTTP errors
                 if response.status_code in RETRY["llm"]["retryable_status_codes"]:
-                    error_body = await response.aread()
+                    await response.aread()  # drain so the connection can be reused
                     last_error = f"HTTP {response.status_code}"
 
-                    if attempt < RETRY["llm"]["max_retries"]:
-                        # Parse Retry-After header for rate limits
-                        retry_after = None
-                        ra_header = response.headers.get("retry-after")
-                        if ra_header:
-                            try:
-                                retry_after = float(ra_header)
-                            except ValueError:
-                                pass
-
+                    if attempt < max_retries:
+                        retry_after = _parse_retry_after(response.headers.get("retry-after"))
                         delay = _calc_backoff(attempt, retry_after)
                         logger.warning(
-                            f"LLM {last_error} (attempt {attempt + 1}/{RETRY["llm"]["max_retries"] + 1}), "
-                            f"retrying in {delay:.1f}s"
+                            "LLM %s (attempt %d/%d), retrying in %.1fs",
+                            last_error, attempt + 1, max_retries + 1, delay,
                         )
-                        if accumulated_content:
+                        if state.accumulated_content:
                             yield {"type": "stream_reset", "reason": last_error}
                         await asyncio.sleep(delay)
                         continue
 
                     # Max retries exhausted
-                    logger.error("LLM %s after %d attempts", last_error, RETRY["llm"]["max_retries"] + 1)
+                    logger.error("LLM %s after %d attempts", last_error, max_retries + 1)
                     yield {
                         "type": "final",
                         "content": "",
                         "tool_calls": [],
-                        "error": f"{last_error} after {RETRY["llm"]["max_retries"] + 1} attempts",
+                        "error": f"{last_error} after {max_retries + 1} attempts",
                     }
                     return
 
@@ -397,8 +628,8 @@ async def stream_chat_with_tools(
                     # header) in error responses — sanitize before logging.
                     body_str = error_body.decode("utf-8", errors="replace")
                     logger.error(
-                        f"LLM HTTP {response.status_code}: "
-                        f"{sanitize_for_log(body_str, max_chars=500)}"
+                        "LLM HTTP %d: %s",
+                        response.status_code, sanitize_for_log(body_str, max_chars=500),
                     )
                     yield {
                         "type": "final",
@@ -415,238 +646,75 @@ async def stream_chat_with_tools(
                     data_str = line[6:]
                     if data_str.strip() == "[DONE]":
                         break
-
                     try:
                         data = json.loads(data_str)
-                        # OpenAI's `include_usage` mode emits a trailing chunk
-                        # where `choices` is empty and `usage` carries the
-                        # token totals. Capture it and skip the choice path.
-                        if data.get("usage") and not data.get("choices"):
-                            last_usage = data["usage"]
-                            continue
-                        choices = data.get("choices") or []
-                        if not choices:
-                            continue
-                        choice = choices[0]
-                        # Some providers attach usage to the same chunk as
-                        # the final choice instead of a separate trailer.
-                        if data.get("usage"):
-                            last_usage = data["usage"]
-                        fr = choice.get("finish_reason")
-                        if fr:
-                            last_finish_reason = str(fr)
-                        delta = choice.get("delta", {})
-
-                        # `dsml_stripper` buffers any unclosed `<…` tail so a
-                        # tag split across SSE chunks is still removed cleanly.
-                        # raw_content_for_recovery is a rolling 8KB tail kept
-                        # only so end-of-stream DSML recovery has something
-                        # to parse — DSML blocks always land at the end and
-                        # accumulating the full stream would double memory
-                        # on long responses for a path that fires <1% of turns.
-                        content = delta.get("content", "")
-                        if content:
-                            if not tool_calls_acc:
-                                raw_content_for_recovery += content
-                                if len(raw_content_for_recovery) > _RAW_RECOVERY_CAP:
-                                    raw_content_for_recovery = raw_content_for_recovery[-_RAW_RECOVERY_CAP:]
-                            safe = dsml_stripper.feed(content)
-                            if safe:
-                                accumulated_content += safe
-                                yield {"type": "content_token", "token": safe}
-
-                        # Thinking tokens (DeepSeek-reasoner). Acumulados
-                        # silenciosamente — nao streamamos para o usuario
-                        # porque o formato e ruidoso e nao reflete a
-                        # resposta final, mas precisam voltar pro provider.
-                        # AUDIT_V1.2 #022: cap at 50KB per turn — reasoning
-                        # can reach 100KB+ and bloats context invisibly.
-                        reasoning = delta.get("reasoning_content", "")
-                        if reasoning:
-                            accumulated_reasoning += reasoning
-                            if len(accumulated_reasoning) > 50_000:
-                                accumulated_reasoning = accumulated_reasoning[-50_000:]
-
-                        # Tool calls (streamed incrementally). Google's
-                        # OpenAI-compat layer omits the per-delta `index`
-                        # field that OpenAI's own spec requires, so default
-                        # to the next available slot when missing. Without
-                        # this, every Gemini tool call raised KeyError and
-                        # got dropped silently — the user saw a "(turno
-                        # encerrado)" with no hint of why.
-                        if delta.get("tool_calls"):
-                            for tc_delta in delta["tool_calls"]:
-                                idx = tc_delta.get("index")
-                                if idx is None:
-                                    idx = len(tool_calls_acc)
-                                if idx not in tool_calls_acc:
-                                    tool_calls_acc[idx] = {
-                                        "id": tc_delta.get("id", ""),
-                                        "name": tc_delta.get("function", {}).get(
-                                            "name", ""
-                                        ),
-                                        "arguments": "",
-                                        "extra_content": None,
-                                    }
-                                entry = tool_calls_acc[idx]
-                                if tc_delta.get("id"):
-                                    entry["id"] = tc_delta["id"]
-                                fn = tc_delta.get("function", {})
-                                if fn.get("name"):
-                                    entry["name"] = fn["name"]
-                                if fn.get("arguments"):
-                                    entry["arguments"] += fn["arguments"]
-                                # Gemini's OpenAI-compat returns a
-                                # `thought_signature` under extra_content
-                                # that MUST be echoed back on the next turn
-                                # or the API replies HTTP 400 INVALID_ARGUMENT.
-                                ec = tc_delta.get("extra_content")
-                                if ec:
-                                    entry["extra_content"] = ec
-
                     except json.JSONDecodeError:
                         continue  # Expected for non-JSON SSE lines
+                    try:
+                        emit = _process_chunk(data, state)
                     except (KeyError, IndexError) as e:
                         logger.debug("Unexpected SSE chunk format: %s | data: %s", e, data_str[:200])
                         continue
+                    if emit:
+                        yield {"type": "content_token", "token": emit}
 
             # Drain any unclosed `<…` tail held back during streaming.
-            tail = dsml_stripper.flush()
+            tail = state.dsml_stripper.flush()
             if tail:
-                accumulated_content += tail
+                state.accumulated_content += tail
                 yield {"type": "content_token", "token": tail}
 
-            # Success — build final event and return
-            reasoning_out = accumulated_reasoning or None
-            if tool_calls_acc:
-                tool_calls = [
-                    {
-                        "id": tc["id"],
-                        "name": tc["name"],
-                        "arguments": tc["arguments"],
-                        **({"extra_content": tc["extra_content"]} if tc.get("extra_content") else {}),
-                    }
-                    for _, tc in sorted(tool_calls_acc.items())
-                ]
-                yield {
-                    "type": "final",
-                    "content": accumulated_content,
-                    "tool_calls": tool_calls,
-                    "reasoning_content": reasoning_out,
-                    "error": None,
-                    "usage": last_usage,
-                }
+            # Success — build final event and return.
+            if state.tool_calls_acc:
+                yield _build_final_with_tool_calls(state)
             else:
-                # Fallback chain when the structured tool_calls field stayed
-                # empty: first try DSML/XML invoke blocks (DeepSeek-V4-pro),
-                # then fenced JSON (Ollama qwen-coder). DSML uses the raw
-                # un-stripped buffer because the live sanitizer already
-                # erased the markup from accumulated_content.
-                recovered = (
-                    _recover_tool_call_from_dsml(raw_content_for_recovery)
-                    or _recover_tool_call_from_content(accumulated_content)
-                )
-                if recovered is not None:
-                    logger.info(
-                        f"Recovered tool call '{recovered['name']}' from content "
-                        f"(provider={provider})"
-                    )
-                    yield {
-                        "type": "final",
-                        "content": "",
-                        "tool_calls": [recovered],
-                        "reasoning_content": reasoning_out,
-                        "error": None,
-                        "usage": last_usage,
-                    }
-                else:
-                    # If the raw buffer carried DSML markup but neither
-                    # recoverer could turn it into a real tool_call, log a
-                    # warning. Otherwise the turn ends silently and the user
-                    # sees a blank prompt without knowing the model emitted
-                    # un-parseable markup.
-                    if raw_content_for_recovery and "invoke" in raw_content_for_recovery.lower():
-                        logger.warning(
-                            "DSML/invoke markup detected in content but recovery "
-                            "failed (provider=%s, len=%d) — turn will end silent",
-                            provider, len(raw_content_for_recovery),
-                        )
-                    # If the stream produced nothing visible AND the
-                    # provider gave us a diagnostic finish_reason (anything
-                    # other than the normal "stop"/"length"), surface it as
-                    # an error so the user sees why the turn went silent.
-                    # Gemini's "function_call_filter: MALFORMED_FUNCTION_CALL"
-                    # is the canonical example.
-                    fr_lower = last_finish_reason.lower()
-                    benign = fr_lower in ("", "stop", "length", "end_turn")
-                    if (not accumulated_content and not benign):
-                        logger.warning(
-                            "Empty stream with diagnostic finish_reason "
-                            "(provider=%s, model=%s): %s",
-                            provider, cfg.get("model", ""), last_finish_reason,
-                        )
-                        yield {
-                            "type": "final",
-                            "content": "",
-                            "tool_calls": [],
-                            "reasoning_content": reasoning_out,
-                            "error": f"empty response (finish_reason: {last_finish_reason})",
-                        }
-                    else:
-                        yield {
-                            "type": "final",
-                            "content": accumulated_content,
-                            "tool_calls": [],
-                            "reasoning_content": reasoning_out,
-                            "error": None,
-                            "usage": last_usage,
-                        }
+                yield _build_final_with_recovery(state, provider, cfg.get("model", ""))
             return  # success, no retry
 
         except httpx.TimeoutException:
             last_error = f"LLM timeout ({LLM_TIMEOUT}s)"
-            if attempt < RETRY["llm"]["max_retries"]:
+            if attempt < max_retries:
                 delay = _calc_backoff(attempt)
                 logger.warning(
-                    f"{last_error} (attempt {attempt + 1}/{RETRY["llm"]["max_retries"] + 1}), "
-                    f"retrying in {delay:.1f}s"
+                    "%s (attempt %d/%d), retrying in %.1fs",
+                    last_error, attempt + 1, max_retries + 1, delay,
                 )
-                if accumulated_content:
+                if state.accumulated_content:
                     yield {"type": "stream_reset", "reason": last_error}
                 await asyncio.sleep(delay)
                 continue
 
-            logger.error("%s after %d attempts", last_error, RETRY["llm"]["max_retries"] + 1)
+            logger.error("%s after %d attempts", last_error, max_retries + 1)
             yield {
                 "type": "final",
-                "content": accumulated_content,
+                "content": state.accumulated_content,
                 "tool_calls": [],
-                "error": f"{last_error} after {RETRY["llm"]["max_retries"] + 1} attempts",
+                "error": f"{last_error} after {max_retries + 1} attempts",
             }
             return
 
         # Nota: httpx.HTTPStatusError nao e capturado porque `client.stream`
         # NAO chama `raise_for_status()` automaticamente — o status_code
-        # >= 400 e tratado inline no caminho principal (linhas ~190 e
-        # ~226). Manter um handler aqui era codigo morto (#052).
+        # >= 400 e tratado inline acima. Manter um handler aqui era codigo
+        # morto (#052).
 
         except (ConnectionError, OSError) as e:
             last_error = f"Connection error: {e}"
-            if attempt < RETRY["llm"]["max_retries"]:
+            if attempt < max_retries:
                 delay = _calc_backoff(attempt)
                 logger.warning(
-                    f"{last_error} (attempt {attempt + 1}/{RETRY["llm"]["max_retries"] + 1}), "
-                    f"retrying in {delay:.1f}s"
+                    "%s (attempt %d/%d), retrying in %.1fs",
+                    last_error, attempt + 1, max_retries + 1, delay,
                 )
-                if accumulated_content:
+                if state.accumulated_content:
                     yield {"type": "stream_reset", "reason": last_error}
                 await asyncio.sleep(delay)
                 continue
 
-            logger.error("%s after %d attempts", last_error, RETRY["llm"]["max_retries"] + 1)
+            logger.error("%s after %d attempts", last_error, max_retries + 1)
             yield {
                 "type": "final",
-                "content": accumulated_content,
+                "content": state.accumulated_content,
                 "tool_calls": [],
                 "error": last_error,
             }
@@ -656,7 +724,7 @@ async def stream_chat_with_tools(
             logger.error("LLM error: %s", e)
             yield {
                 "type": "final",
-                "content": accumulated_content,
+                "content": state.accumulated_content,
                 "tool_calls": [],
                 "error": str(e),
             }
