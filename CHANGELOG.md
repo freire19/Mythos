@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.21.3](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.21.2...alpha-code-v1.21.3) (2026-05-20)
+
+
+### Performance
+
+* close DEEP_PERFORMANCE V5.1 (P001-P004) + simplify cleanup ([6792987](https://github.com/freire19/Alpha_Code/commit/679298773b341c5c2561e87ad9cc6fb66bd5e57f))
+
 ## [1.21.2](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.21.1...alpha-code-v1.21.2) (2026-05-20)
 
 
