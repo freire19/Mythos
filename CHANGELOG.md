@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.21.4](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.21.3...alpha-code-v1.21.4) (2026-05-20)
+
+
+### Bug Fixes
+
+* **display:** _print_result_body re-export + e2e test for delegation ([172ddc0](https://github.com/freire19/Alpha_Code/commit/172ddc0850bf002c7bd118b07c280cea8e257653))
+
 ## [1.21.3](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.21.2...alpha-code-v1.21.3) (2026-05-20)
 
 
