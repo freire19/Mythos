@@ -1,5 +1,25 @@
 # Changelog
 
+## [1.21.2](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.21.1...alpha-code-v1.21.2) (2026-05-20)
+
+
+### Bug Fixes
+
+* lifecycle hooks, price_for boundary, cluster_answers, _format_tool_call_header import ([da438c4](https://github.com/freire19/Alpha_Code/commit/da438c458a3520a1bb05eaf0bfdbec4318059e5c))
+* **security:** close DEEP_SECURITY V3.3 — 13 findings (1 CRIT, 2 ALTO, 4 MED, 6 BAIXO) ([6b04259](https://github.com/freire19/Alpha_Code/commit/6b0425928e3da07919e1d4748985245ed2a2882a))
+
+
+### Refactoring
+
+* extract LoopAwareClient httpx singleton (closes #DM042, #DM032) ([56c15b3](https://github.com/freire19/Alpha_Code/commit/56c15b3c1baa4039ab27712b7504918f6debad28))
+* **git:** dict dispatch for _git_operation (closes #DM044) ([f6a1d47](https://github.com/freire19/Alpha_Code/commit/f6a1d47f84467f813db18c8790c6c7f1efb54b6a))
+* **tools:** extract _resolve_target helper for composites (closes #DM025) ([e982447](https://github.com/freire19/Alpha_Code/commit/e9824471e8d65ce1a048d93caaad885e367ac277))
+
+
+### Documentation
+
+* document missing env vars in .env.example (closes #DM045) ([31afcb4](https://github.com/freire19/Alpha_Code/commit/31afcb40df047b45c48f0e039fad3c1842ac3bee))
+
 ## [1.21.1](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.21.0...alpha-code-v1.21.1) (2026-05-19)
 
 
