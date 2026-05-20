@@ -34,6 +34,84 @@ logger = logging.getLogger(__name__)
 
 
 
+def _build_subagent_messages(task: str, context: str, agent_id: str, scratch_rel) -> list[dict]:
+    """System + user messages with the SCRATCH_DIR preamble and stripped
+    control chars. Paths relativos no contexto do sub-agent (#022): o
+    workspace absoluto nao precisa estar no prompt — vazar o absoluto
+    deixava ele acessivel via tool results e logs."""
+    task_content = (
+        f"[AGENT_ID: {agent_id}]\n"
+        f"[SCRATCH_DIR: {scratch_rel}]  (relative to workspace)\n"
+        "Write any artifacts, logs, or intermediate files to SCRATCH_DIR. "
+        "You may read anything under the workspace using relative paths.\n\n"
+    )
+    if context:
+        task_content += f"Context: {_strip_control_chars(context)}\n\n"
+    task_content += _strip_control_chars(task)
+    return [
+        {"role": "system", "content": _load_subagent_prompt()},
+        {"role": "user", "content": task_content},
+    ]
+
+
+def _resolve_subagent_blocklist(parent_approval_callback) -> set[str]:
+    """Compose the runtime blocklist from policy + extra_block + allow.
+
+    `delegate_*` is in the blocklist twice on purpose — once from the
+    fixed anti-recursion set (so it can't slip into `subagent_allow`),
+    and once after subtracting `subagent_allow` so even an explicit user
+    override can't enable cross-agent recursion.
+
+    #D007: policy/extra_block/allow vem de env via getters
+    (AUDIT_V1.2 #014: cache de import-time perdia mudancas runtime).
+    """
+    from ..config import (
+        get_subagent_allow,
+        get_subagent_extra_block,
+        get_subagent_policy,
+    )
+    blocked: set[str] = {"delegate_task", "delegate_parallel", "delegate_consensus"}
+    policy = get_subagent_policy()
+    if parent_approval_callback is None and policy != "relaxed":
+        blocked = blocked | SUBAGENT_DESTRUCTIVE_BLOCKLIST
+    blocked = (blocked | get_subagent_extra_block()) - get_subagent_allow()
+    blocked = blocked | {"delegate_task", "delegate_parallel", "delegate_consensus"}
+    return blocked
+
+
+def _build_subagent_tools(tools_filter: str, blocked: set[str]):
+    """Pick the OpenAI-format tool list for this sub-agent.
+
+    Returns (tools list, allowed-name set or None). When `tools_filter`
+    is empty, `allowed` is None — `_make_safe_get_tool` interprets that
+    as "no name-set restriction beyond the blocklist".
+    """
+    from . import get_openai_tools
+    all_tools = get_openai_tools()
+    tools = [t for t in all_tools if t["function"]["name"] not in blocked]
+
+    allowed: set[str] | None = None
+    if tools_filter:
+        allowed = {s.strip() for s in tools_filter.split(",")}
+        tools = [t for t in tools if t["function"]["name"] in allowed]
+    return tools, allowed
+
+
+def _make_safe_get_tool(blocked: set[str], allowed: set[str] | None, original_get_tool):
+    """Closure that gates tool lookup by blocklist + optional allow-filter.
+
+    Centralizes the gate (#091) so a sub-agent can't reach into
+    TOOL_REGISTRY directly to bypass blocked/filtered tools.
+    """
+    def _safe_get_tool(name: str):
+        if name in blocked:
+            return None
+        if allowed is not None and name not in allowed:
+            return None
+        return original_get_tool(name)
+    return _safe_get_tool
+
+
 async def _run_subagent(
     task: str,
     context: str = "",
@@ -55,13 +133,8 @@ async def _run_subagent(
 
     # Lazy imports to avoid circular dependencies
     from ..agent import run_agent
-    from ..config import (
-        DEFAULT_PROVIDER,
-        get_subagent_allow,
-        get_subagent_extra_block,
-        get_subagent_policy,
-    )
-    from . import get_openai_tools, get_tool
+    from ..config import DEFAULT_PROVIDER
+    from . import get_tool
 
     max_iterations = FEATURES.get("subagent_max_iterations", 15)
     agent_provider = provider or DEFAULT_PROVIDER
@@ -73,74 +146,12 @@ async def _run_subagent(
     except OSError as e:
         return {"ok": False, "category": "io_error", "error": f"Cannot create scratch dir for sub-agent: {e}"}
 
-    # Build isolated context for the sub-agent
-    system_prompt = _load_subagent_prompt()
-
-    # Paths relativos no contexto do sub-agent (#022): o workspace absoluto
-    # nao precisa estar no prompt — `validate_workspace_args` ja resolve
-    # paths relativos contra o workspace real. Vazar o absoluto no
-    # `task_content` deixava ele acessivel via tool results e logs, e
-    # convidava o modelo a hard-codar paths em vez de manter portabilidade.
-    scratch_rel = scratch_dir.relative_to(workspace_root)
-    task_content = (
-        f"[AGENT_ID: {agent_id}]\n"
-        f"[SCRATCH_DIR: {scratch_rel}]  (relative to workspace)\n"
-        "Write any artifacts, logs, or intermediate files to SCRATCH_DIR. "
-        "You may read anything under the workspace using relative paths.\n\n"
+    messages = _build_subagent_messages(
+        task, context, agent_id, scratch_dir.relative_to(workspace_root)
     )
-    if context:
-        task_content += f"Context: {_strip_control_chars(context)}\n\n"
-    task_content += _strip_control_chars(task)
-
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": task_content},
-    ]
-
-    # Get tools — filter out delegate tools to prevent recursion
-    # Also block destructive tools that could bypass approval if no callback.
-    # Policy lives in SUBAGENT_DESTRUCTIVE_BLOCKLIST (module level) so tests
-    # can validate the surface independently of an actual run.
-    #
-    # #D007 (V1.0): policy + extra_block + allow vem de env via getters
-    # (AUDIT_V1.2 #014: cache de import-time perdia mudancas runtime).
-    # - "strict" (default): bloqueia destructive em modo no-callback (comportamento antigo)
-    # - "relaxed": confia no sub-agent, so anti-recursao
-    # - extra_block: usuario pode fortalecer
-    # - allow: usuario pode aliviar (sobrepoe blocklist)
-    _blocked = {"delegate_task", "delegate_parallel", "delegate_consensus"}
-    all_tools = get_openai_tools()
-    policy = get_subagent_policy()
-    if parent_approval_callback is None and policy != "relaxed":
-        _blocked = _blocked | SUBAGENT_DESTRUCTIVE_BLOCKLIST
-    _blocked = _blocked | get_subagent_extra_block()
-    _blocked = _blocked - get_subagent_allow()
-    # `delegate_*` continua bloqueado mesmo se usuario incluir em
-    # subagent_allow — anti-recursao e invariante, nao policy.
-    _blocked = _blocked | {"delegate_task", "delegate_parallel", "delegate_consensus"}
-    tools = [t for t in all_tools if t["function"]["name"] not in _blocked]
-
-    if tools_filter:
-        allowed = {s.strip() for s in tools_filter.split(",")}
-        tools = [t for t in tools if t["function"]["name"] in allowed]
-    else:
-        allowed = None
-
-    # Safe get_tool wrapper: aplica a politica de blocklist montada acima
-    # (delegate_* anti-recursao + SUBAGENT_DESTRUCTIVE_BLOCKLIST quando
-    # nao ha approval callback do parent + filtro tools_filter quando
-    # explicito). Centraliza o gate para que `run_agent` interno nao
-    # consiga "burlar" via lookup direto no TOOL_REGISTRY (#091).
-    original_get_tool = get_tool
-    _all_blocked = _blocked
-    allowed_filter = allowed
-
-    def _safe_get_tool(name: str):
-        if name in _all_blocked:
-            return None
-        if allowed_filter is not None and name not in allowed_filter:
-            return None
-        return original_get_tool(name)
+    blocked = _resolve_subagent_blocklist(parent_approval_callback)
+    tools, allowed = _build_subagent_tools(tools_filter, blocked)
+    safe_get_tool = _make_safe_get_tool(blocked, allowed, get_tool)
 
     # Run sub-agent loop
     collected_text = ""
@@ -158,7 +169,7 @@ async def _run_subagent(
             user_message=task,
             temperature=0.3,
             provider=agent_provider,
-            get_tool_fn=_safe_get_tool,
+            get_tool_fn=safe_get_tool,
             tools=tools,
             approval_callback=effective_approval,
             max_iterations=max_iterations,
