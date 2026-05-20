@@ -12,6 +12,7 @@ from urllib.parse import urlparse
 
 import httpx
 
+from ._http_singleton import LoopAwareClient
 from .net_utils import (
     is_private_ip as _is_private_ip,
     resolve_and_validate as _resolve_and_validate,
@@ -103,43 +104,18 @@ _REQ_HEADERS = {
     "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 }
 
-# Reusable httpx client (avoids TCP+TLS handshake per URL)
-_shared_client: httpx.AsyncClient | None = None
-_client_loop: object | None = None
+# Reusable httpx client (avoids TCP+TLS handshake per URL).
+# #DM042: migrado para LoopAwareClient — ganha lock anti-race (web_search
+# nao tinha) sem custo em hot path. Build callable captura _TIMEOUT por
+# closure; rebuild so dispara em loop trocado ou client fechado.
+_shared_client = LoopAwareClient(
+    name="web_search",
+    build=lambda: httpx.AsyncClient(follow_redirects=False, timeout=_TIMEOUT),
+)
 
 
 async def _get_shared_client() -> httpx.AsyncClient:
-    """Get or create the shared httpx client.
-
-    httpx.AsyncClient amarra o transport ao loop em que foi criado. Quando
-    o CLI roda em modo single-shot, cada `python main.py "task"` cria um
-    loop novo via `asyncio.run()` mas o modulo persiste se a CLI for
-    re-importada (testes, daemon mode). Detectar `is_closed` nao basta —
-    o client pode estar `not closed` mas amarrado a um loop morto, gerando
-    `RuntimeError: Event loop is closed` na proxima request.
-    """
-    global _shared_client, _client_loop
-    import asyncio
-
-    loop = asyncio.get_running_loop()
-    if (
-        _shared_client is None
-        or _shared_client.is_closed
-        or _client_loop is not loop
-    ):
-        # Loop diferente: tenta fechar o client antigo se ainda esta vivo.
-        # Aclose no loop errado pode falhar — engolimos.
-        if _shared_client is not None and not _shared_client.is_closed:
-            try:
-                await _shared_client.aclose()
-            except Exception:
-                pass
-        _shared_client = httpx.AsyncClient(
-            follow_redirects=False,
-            timeout=_TIMEOUT,
-        )
-        _client_loop = loop
-    return _shared_client
+    return await _shared_client.get()
 
 
 def _build_pinned_url(parsed, resolved_ip: str) -> str:

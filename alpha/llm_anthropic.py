@@ -23,9 +23,10 @@ from collections.abc import AsyncGenerator
 
 import httpx
 
+from ._http_singleton import LoopAwareClient
 from ._rate_limiter import acquire_llm_token as _rate_limit_acquire
 
-from .config import RETRY
+from .config import LLM_TIMEOUT, RETRY
 from .llm import DsmlStripper, _calc_backoff
 
 logger = logging.getLogger(__name__)
@@ -40,44 +41,26 @@ _TRANSIENT_HTTPX_ERRORS = (
     httpx.PoolTimeout,
 )
 
-# Loop-aware shared client; mirrors llm.py. Single-shot CLI (`asyncio.run`)
-# creates a new loop per invocation but the module stays import-cached, so we
-# rebuild when the loop or client is stale.
-_client: httpx.AsyncClient | None = None
-_client_loop: object | None = None
-_client_lock = asyncio.Lock()
+# Loop-aware shared client; #DM042 migrou para LoopAwareClient
+# (alpha/_http_singleton.py) — mesmo padrao usado por llm.py e web_search.py.
+# `timeout` deixou de ser parametro: stream_anthropic so passa LLM_TIMEOUT
+# (visto no unico call site em _stream_anthropic_provider). Per-request
+# timeout override iria via client.request(timeout=...) — nao usado aqui.
+_client = LoopAwareClient(
+    name="llm_anthropic",
+    build=lambda: httpx.AsyncClient(
+        timeout=httpx.Timeout(LLM_TIMEOUT, connect=10.0),
+        limits=httpx.Limits(max_keepalive_connections=5, max_connections=20),
+    ),
+)
 
 
-async def _get_client(timeout: float) -> httpx.AsyncClient:
-    """Return a loop-aware shared httpx.AsyncClient for Anthropic."""
-    global _client, _client_loop
-    loop = asyncio.get_running_loop()
-    if (
-        _client is not None
-        and not _client.is_closed
-        and _client_loop is loop
-    ):
-        return _client
-    # Lock protects the aclose() + reassign window from concurrent coroutines
-    # creating duplicate clients (mirrors the same guard in llm.py).
-    async with _client_lock:
-        if (
-            _client is not None
-            and not _client.is_closed
-            and _client_loop is loop
-        ):
-            return _client
-        if _client is not None and not _client.is_closed:
-            try:
-                await _client.aclose()
-            except Exception:
-                pass
-        _client = httpx.AsyncClient(
-            timeout=httpx.Timeout(timeout, connect=10.0),
-            limits=httpx.Limits(max_keepalive_connections=5, max_connections=20),
-        )
-        _client_loop = loop
-    return _client
+async def _get_client(timeout: float | None = None) -> httpx.AsyncClient:
+    """Return the loop-aware shared httpx.AsyncClient for Anthropic.
+
+    `timeout` parameter kept for back-compat; ignored (build callable usa
+    LLM_TIMEOUT). Per-request override deve ir via client.request(timeout=)."""
+    return await _client.get()
 
 
 # ── OpenAI → Anthropic conversion ──

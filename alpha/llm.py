@@ -96,46 +96,18 @@ _RAW_RECOVERY_CAP = 8192
 # criava `AsyncClient(...)` e fechava no fim, gastando 1 TLS handshake +
 # nova conexao TCP por iteracao do agent loop (40+ por sessao tipica). O
 # cliente persistido reusa keep-alive ate o servidor fechar a conexao.
-# Loop-aware (mesma logica do _shared_client em web_search.py): single-shot
-# CLI (`asyncio.run`) cria loop novo a cada invocacao mas o modulo pode
-# permanecer em cache de imports — entao detectamos loop trocado e
-# substituimos.
-_shared_llm_client: httpx.AsyncClient | None = None
-_llm_client_loop: object | None = None
-_llm_client_lock = asyncio.Lock()
+# #DM042: migrado para LoopAwareClient (alpha/_http_singleton.py) — fonte
+# unica de verdade compartilhada com llm_anthropic.py e web_search.py.
+from ._http_singleton import LoopAwareClient
+
+_shared_llm_client = LoopAwareClient(
+    name="llm",
+    build=lambda: httpx.AsyncClient(timeout=httpx.Timeout(LLM_TIMEOUT, connect=10.0)),
+)
 
 
 async def _get_shared_llm_client() -> httpx.AsyncClient:
-    global _shared_llm_client, _llm_client_loop
-    loop = asyncio.get_running_loop()
-    # Fast path: no lock needed when client is healthy and loop matches.
-    if (
-        _shared_llm_client is not None
-        and not _shared_llm_client.is_closed
-        and _llm_client_loop is loop
-    ):
-        return _shared_llm_client
-    # AUDIT_V1.2 #006: lock protects the aclose() + reassign window against
-    # concurrent coroutines creating duplicate clients.
-    async with _llm_client_lock:
-        # Double-check after acquiring lock — another coroutine may have
-        # already rebuilt while we waited.
-        if (
-            _shared_llm_client is not None
-            and not _shared_llm_client.is_closed
-            and _llm_client_loop is loop
-        ):
-            return _shared_llm_client
-        if _shared_llm_client is not None and not _shared_llm_client.is_closed:
-            try:
-                await _shared_llm_client.aclose()
-            except Exception:
-                pass
-        _shared_llm_client = httpx.AsyncClient(
-            timeout=httpx.Timeout(LLM_TIMEOUT, connect=10.0)
-        )
-        _llm_client_loop = loop
-    return _shared_llm_client
+    return await _shared_llm_client.get()
 
 
 _DSML_INVOKE_RE = re.compile(

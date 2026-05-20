@@ -143,11 +143,13 @@ class TestEnvWritePerms:
 class TestSharedLLMClient:
     def test_get_shared_client_function_exists(self):
         from alpha import llm
+        from alpha._http_singleton import LoopAwareClient
 
         assert callable(llm._get_shared_llm_client)
-        # Globals iniciam zerados; o Lazy faz init.
+        # #DM042: singleton state agora encapsulado em LoopAwareClient
+        # (substituiu os antigos globals _shared_llm_client/_llm_client_loop).
         assert hasattr(llm, "_shared_llm_client")
-        assert hasattr(llm, "_llm_client_loop")
+        assert isinstance(llm._shared_llm_client, LoopAwareClient)
 
     def test_no_per_call_AsyncClient_in_stream(self):
         """A funcao stream_chat_with_tools NAO deve mais criar AsyncClient
