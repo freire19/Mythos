@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.21.9](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.21.8...alpha-code-v1.21.9) (2026-05-20)
+
+
+### Refactoring
+
+* **browser:** extract tab management to _browser_tabs.py (closes #DM029) ([8343714](https://github.com/freire19/Alpha_Code/commit/834371442639390786e2c792f1b916506c536bb1))
+* extract _run_subagent helpers (closes #DM040 partial) ([165dad4](https://github.com/freire19/Alpha_Code/commit/165dad4fbda53f8675496e781fb15f24ccda1b9f))
+* extract run_repl helpers in main.py (closes #DM020) ([32c1734](https://github.com/freire19/Alpha_Code/commit/32c173413856a7e167709e12c1a4051f14fcb20f))
+* extract stream_anthropic helpers (closes #DM040 partial) ([ae65512](https://github.com/freire19/Alpha_Code/commit/ae655127281f987d3517b79dabd494b01752ec68))
+
 ## [1.21.8](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.21.7...alpha-code-v1.21.8) (2026-05-20)
 
 
