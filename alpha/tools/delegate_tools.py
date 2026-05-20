@@ -13,8 +13,13 @@ import difflib
 import json
 import logging
 
-from . import ToolCategory, ToolDefinition, ToolSafety, register_tool
-from ..config import FEATURES
+from . import ToolCategory, ToolDefinition, ToolSafety, get_openai_tools, get_tool, register_tool
+from ..config import (
+    FEATURES,
+    get_subagent_allow,
+    get_subagent_extra_block,
+    get_subagent_policy,
+)
 from ..display import print_subagent_event
 from ..display.core import flush_subagent_dup, _tool_args_preview
 from .workspace import AGENT_WORKSPACE
@@ -65,11 +70,6 @@ def _resolve_subagent_blocklist(parent_approval_callback) -> set[str]:
     #D007: policy/extra_block/allow vem de env via getters
     (AUDIT_V1.2 #014: cache de import-time perdia mudancas runtime).
     """
-    from ..config import (
-        get_subagent_allow,
-        get_subagent_extra_block,
-        get_subagent_policy,
-    )
     blocked: set[str] = {"delegate_task", "delegate_parallel", "delegate_consensus"}
     policy = get_subagent_policy()
     if parent_approval_callback is None and policy != "relaxed":
@@ -86,7 +86,6 @@ def _build_subagent_tools(tools_filter: str, blocked: set[str]):
     is empty, `allowed` is None — `_make_safe_get_tool` interprets that
     as "no name-set restriction beyond the blocklist".
     """
-    from . import get_openai_tools
     all_tools = get_openai_tools()
     tools = [t for t in all_tools if t["function"]["name"] not in blocked]
 
@@ -131,10 +130,9 @@ async def _run_subagent(
     sub-agent vira vetor de prompt-injection cross-agent.
     """
 
-    # Lazy imports to avoid circular dependencies
+    # Lazy import only for agent loop (circular with this module via tool calls).
     from ..agent import run_agent
     from ..config import DEFAULT_PROVIDER
-    from . import get_tool
 
     max_iterations = FEATURES.get("subagent_max_iterations", 15)
     agent_provider = provider or DEFAULT_PROVIDER

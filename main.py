@@ -70,7 +70,7 @@ from alpha.jsonlogs import maybe_install as _maybe_install_jsonlogs  # noqa: E40
 _maybe_install_jsonlogs()
 
 
-# ─── run_repl helpers (#DM020 extraction) ───
+# ─── run_repl helpers ───
 
 
 def _print_startup_status(provider: str, cfg: dict, tools: list, active_agent) -> None:

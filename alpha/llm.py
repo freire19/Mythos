@@ -253,12 +253,11 @@ def _calc_backoff(attempt: int, retry_after: float | None = None) -> float:
     return min(jittered, RETRY["llm"]["max_backoff"])
 
 
-# ─── stream_chat_with_tools helpers (#DM039 split) ───
+# ─── stream_chat_with_tools helpers ───
 #
-# stream_chat_with_tools was 408L; extracted these pure helpers so the
-# main coroutine focuses on the I/O orchestration (HTTP request, retry
-# loop, yield events) while parsing/recovery logic lives in testable
-# units that don't touch the network.
+# Pure helpers so the main coroutine focuses on I/O orchestration (HTTP
+# request, retry loop, yield events) while parsing/recovery logic lives
+# in units that don't touch the network and can be unit-tested directly.
 
 
 class _StreamState:

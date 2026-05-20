@@ -1,23 +1,22 @@
-"""Browser tab management (#DM029 split).
+"""Browser tab management — list, open, switch, close.
 
-Tab CRUD operations extracted from `browser_tools.py`. The session
-singleton and validation helpers (`_check_available`, `_domain_allowed`,
-`_ensure_session`) stay in browser_tools.py because most other tools use
-them too — they're re-imported here so the tab handlers don't grow a
-parallel set of shims.
+Session singleton and validation helpers live in `browser_tools.py`;
+re-imported here. The back-import works because `browser_tools.py` only
+loads this module *after* those helpers are defined, so the top-level
+import below resolves against the partial module without circularity.
 """
 
 from __future__ import annotations
 
 import logging
 
+from .browser_session import BrowserSession, validate_browser_url
+from .browser_tools import _check_available, _domain_allowed, _ensure_session
+
 logger = logging.getLogger(__name__)
 
 
 async def _browser_list_tabs() -> dict:
-    from .browser_tools import _check_available
-    from .browser_session import BrowserSession
-
     err = _check_available()
     if err:
         return err
@@ -44,9 +43,6 @@ async def _browser_list_tabs() -> dict:
 
 
 async def _browser_new_tab(url: str | None = None) -> dict:
-    from .browser_tools import _check_available, _domain_allowed, _ensure_session
-    from .browser_session import validate_browser_url
-
     err = _check_available()
     if err:
         return err
@@ -71,9 +67,6 @@ async def _browser_new_tab(url: str | None = None) -> dict:
 
 
 async def _browser_switch_tab(index: int) -> dict:
-    from .browser_tools import _check_available
-    from .browser_session import BrowserSession
-
     err = _check_available()
     if err:
         return err
@@ -92,9 +85,6 @@ async def _browser_switch_tab(index: int) -> dict:
 
 
 async def _browser_close_tab(index: int | None = None) -> dict:
-    from .browser_tools import _check_available
-    from .browser_session import BrowserSession
-
     err = _check_available()
     if err:
         return err

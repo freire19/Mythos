@@ -196,6 +196,39 @@ def _convert_messages(openai_messages: list[dict]) -> tuple[str, list[dict]]:
 # ── Streaming ──
 
 
+class _AnthropicStreamState:
+    """Per-attempt accumulators for one Anthropic streaming call.
+
+    Mirrors `_StreamState` in `llm.py`: held outside `stream_anthropic`
+    so the event applier is a pure function of state. `blocks` maps
+    Anthropic's `index` → `{type, text|input_json, id?, name?}`.
+    `stopped` is set when the SSE loop sees `message_stop` so the caller
+    can break the line loop with a single flag instead of branching on
+    a dual return value.
+    """
+
+    __slots__ = (
+        "accumulated_content",
+        "blocks",
+        "dsml_stripper",
+        "last_usage",
+        "yielded_any",
+        "stopped",
+    )
+
+    def __init__(self) -> None:
+        self.accumulated_content = ""
+        self.blocks: dict[int, dict] = {}
+        self.dsml_stripper = DsmlStripper()
+        # Anthropic emits input_tokens in `message_start` and final
+        # output_tokens in `message_delta`. Both stay in the same dict
+        # shape so alpha.cost.record_usage handles both providers
+        # without per-provider branches.
+        self.last_usage: dict = {}
+        self.yielded_any = False
+        self.stopped = False
+
+
 def _build_anthropic_request(
     messages: list[dict],
     tools: list[dict],
@@ -225,32 +258,28 @@ def _build_anthropic_request(
     return headers, payload
 
 
-def _apply_anthropic_event(
-    event: dict, blocks: dict, dsml_stripper, last_usage: dict
-) -> tuple[str | None, bool]:
-    """Apply one streaming Anthropic event to ``blocks`` / ``last_usage``.
-
-    Returns ``(content_to_emit, is_message_stop)``. Caller yields the
-    content_token and breaks the line loop on message_stop.
-    """
+def _apply_anthropic_event(event: dict, state: _AnthropicStreamState) -> str | None:
+    """Apply one streaming Anthropic event to ``state``. Returns any
+    user-visible text to yield as a ``content_token``, or None. Sets
+    ``state.stopped = True`` on ``message_stop``."""
     etype = event.get("type")
 
     if etype == "message_start":
         msg_usage = (event.get("message") or {}).get("usage") or {}
         if msg_usage:
-            last_usage.update(msg_usage)
+            state.last_usage.update(msg_usage)
     elif etype == "message_delta":
         delta_usage = event.get("usage") or {}
         if delta_usage:
-            last_usage.update(delta_usage)
+            state.last_usage.update(delta_usage)
 
     if etype == "content_block_start":
         idx = event["index"]
         block = event["content_block"]
         if block["type"] == "text":
-            blocks[idx] = {"type": "text", "text": ""}
+            state.blocks[idx] = {"type": "text", "text": ""}
         elif block["type"] == "tool_use":
-            blocks[idx] = {
+            state.blocks[idx] = {
                 "type": "tool_use",
                 "id": block.get("id", ""),
                 "name": block.get("name", ""),
@@ -260,31 +289,37 @@ def _apply_anthropic_event(
     elif etype == "content_block_delta":
         idx = event["index"]
         delta = event.get("delta", {})
-        block = blocks.get(idx)
+        block = state.blocks.get(idx)
         if block is None:
-            return None, False
+            return None
         if delta.get("type") == "text_delta":
             text = delta.get("text", "")
             if text:
                 block["text"] = block.get("text", "") + text
-                safe = dsml_stripper.feed(text)
+                safe = state.dsml_stripper.feed(text)
                 if safe:
-                    return safe, False
+                    return safe
         elif delta.get("type") == "input_json_delta":
             block["input_json"] = block.get("input_json", "") + delta.get("partial_json", "")
 
     elif etype == "message_stop":
-        return None, True
+        state.stopped = True
 
-    return None, False
+    return None
 
 
 def _collect_tool_calls(blocks: dict[int, dict]) -> list[dict]:
-    """Pick tool_use blocks (sorted by index) into the final tool_calls
-    list. Logs a warning if any input_json is malformed but keeps the raw
-    string so callers see what arrived."""
+    """Pick tool_use blocks into the final tool_calls list.
+
+    Anthropic emits `content_block_start` events with monotonically
+    increasing indices and CPython 3.7+ preserves dict insertion order,
+    so iterating `blocks.values()` produces them in original order.
+
+    Logs a warning if any input_json is malformed but keeps the raw
+    string so callers see what arrived.
+    """
     tool_calls = []
-    for _, block in sorted(blocks.items()):
+    for block in blocks.values():
         if block["type"] != "tool_use":
             continue
         args_json = block.get("input_json", "") or "{}"
@@ -317,16 +352,7 @@ async def stream_anthropic(
     """
     headers, payload = _build_anthropic_request(messages, tools, temperature, model, api_key)
 
-    accumulated_content = ""
-    blocks: dict[int, dict] = {}  # index → {"type": "text"|"tool_use", ...}
-    yielded_any = False
-    dsml_stripper = DsmlStripper()
-    # Aggregated usage across the stream. Anthropic emits input_tokens in
-    # `message_start` and final output_tokens in `message_delta`. Both stay
-    # in the same dict shape so alpha.cost.record_usage handles both
-    # Anthropic and OpenAI without per-provider branches.
-    last_usage: dict = {}
-
+    state = _AnthropicStreamState()
     client = await _get_client(timeout)
     last_error: str | None = None
     max_retries = RETRY["llm"]["max_retries"]
@@ -356,19 +382,19 @@ async def stream_anthropic(
                     except json.JSONDecodeError:
                         continue
 
-                    emit, stop = _apply_anthropic_event(event, blocks, dsml_stripper, last_usage)
+                    emit = _apply_anthropic_event(event, state)
                     if emit:
-                        accumulated_content += emit
-                        yielded_any = True
+                        state.accumulated_content += emit
+                        state.yielded_any = True
                         yield {"type": "content_token", "token": emit}
-                    if stop:
+                    if state.stopped:
                         break
 
             # Drain any unclosed `<…` tail held back during streaming.
-            tail = dsml_stripper.flush()
+            tail = state.dsml_stripper.flush()
             if tail:
-                accumulated_content += tail
-                yielded_any = True
+                state.accumulated_content += tail
+                state.yielded_any = True
                 yield {"type": "content_token", "token": tail}
 
             # Success — break out of retry loop
@@ -379,14 +405,18 @@ async def stream_anthropic(
             last_error = f"{type(e).__name__}: {e}"
             # Once any token has been yielded to the caller the partial stream
             # is already committed downstream — replaying would duplicate it.
-            if yielded_any or attempt >= max_retries:
+            if state.yielded_any or attempt >= max_retries:
                 break
             backoff = _calc_backoff(attempt)
             logger.warning(
                 "Anthropic transient error (attempt %d/%d), retrying in %.1fs: %s",
                 attempt + 1, max_retries + 1, backoff, e,
             )
-            blocks = {}
+            # Reset block accumulator + stopped flag for the next attempt;
+            # the already-yielded tokens are committed, accumulated_content
+            # carries forward so the final event reflects what reached the user.
+            state.blocks = {}
+            state.stopped = False
             await asyncio.sleep(backoff)
         except (asyncio.CancelledError, KeyboardInterrupt):
             raise
@@ -406,10 +436,10 @@ async def stream_anthropic(
 
     yield {
         "type": "final",
-        "content": accumulated_content,
-        "tool_calls": _collect_tool_calls(blocks),
+        "content": state.accumulated_content,
+        "tool_calls": _collect_tool_calls(state.blocks),
         "error": None,
-        "usage": last_usage or None,
+        "usage": state.last_usage or None,
     }
 
 

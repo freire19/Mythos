@@ -79,10 +79,10 @@ def _count_destructive_non_planning(
     return n
 
 
-# ─── run_agent helpers (#DM038 split) ───
+# ─── run_agent helpers ───
 #
-# run_agent was 431L; broke off four async-generator helpers so the main
-# loop reads as: compress → stream → react to loop/preflight → execute.
+# Four async-generator helpers so the main loop reads as:
+# compress → stream → react to loop/preflight → execute.
 
 
 async def _maybe_compress(messages: list[dict], provider: str) -> AsyncGenerator[dict, None]:
