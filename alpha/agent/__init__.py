@@ -147,7 +147,7 @@ async def run_agent(
     _session_cap_usd = env_float("ALPHA_MAX_SESSION_COST_USD")
 
     for iteration in range(iteration_limit):
-        logger.info(f"Agent iteration {iteration + 1}/{iteration_limit}")
+        logger.info("Agent iteration %d/%d", iteration + 1, iteration_limit)
         record_iteration()
 
         # ── Session-wide budget cap (Plano-v3 pre-flight slice 2) ──
@@ -272,7 +272,7 @@ async def run_agent(
                         "after": tokens_after,
                     }
                 except Exception as ce:
-                    logger.exception(f"Aggressive compression failed: {ce}")
+                    logger.exception("Aggressive compression failed: %s", ce)
                     from ..context import _find_compressible_range, _hard_truncate
                     start, end = _find_compressible_range(messages)
                     if start < end:
@@ -476,7 +476,7 @@ async def run_agent(
         except asyncio.CancelledError:
             raise  # don't let the generic Exception handler below yield an error event
         except Exception as e:
-            logger.exception(f"Tool execution failed: {e}")
+            logger.exception("Tool execution failed: %s", e)
             yield {"type": "error", "message": f"Tool execution failed: {e}"}
             return
         finally:

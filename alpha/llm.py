@@ -381,7 +381,7 @@ async def stream_chat_with_tools(
                         continue
 
                     # Max retries exhausted
-                    logger.error(f"LLM {last_error} after {RETRY["llm"]["max_retries"] + 1} attempts")
+                    logger.error("LLM %s after %d attempts", last_error, RETRY["llm"]["max_retries"] + 1)
                     yield {
                         "type": "final",
                         "content": "",
@@ -507,7 +507,7 @@ async def stream_chat_with_tools(
                     except json.JSONDecodeError:
                         continue  # Expected for non-JSON SSE lines
                     except (KeyError, IndexError) as e:
-                        logger.debug(f"Unexpected SSE chunk format: {e} | data: {data_str[:200]}")
+                        logger.debug("Unexpected SSE chunk format: %s | data: %s", e, data_str[:200])
                         continue
 
             # Drain any unclosed `<…` tail held back during streaming.
@@ -616,7 +616,7 @@ async def stream_chat_with_tools(
                 await asyncio.sleep(delay)
                 continue
 
-            logger.error(f"{last_error} after {RETRY["llm"]["max_retries"] + 1} attempts")
+            logger.error("%s after %d attempts", last_error, RETRY["llm"]["max_retries"] + 1)
             yield {
                 "type": "final",
                 "content": accumulated_content,
@@ -643,7 +643,7 @@ async def stream_chat_with_tools(
                 await asyncio.sleep(delay)
                 continue
 
-            logger.error(f"{last_error} after {RETRY["llm"]["max_retries"] + 1} attempts")
+            logger.error("%s after %d attempts", last_error, RETRY["llm"]["max_retries"] + 1)
             yield {
                 "type": "final",
                 "content": accumulated_content,
@@ -653,7 +653,7 @@ async def stream_chat_with_tools(
             return
 
         except (json.JSONDecodeError, KeyError, ValueError, RuntimeError) as e:
-            logger.error(f"LLM error: {e}")
+            logger.error("LLM error: %s", e)
             yield {
                 "type": "final",
                 "content": accumulated_content,

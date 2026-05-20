@@ -293,12 +293,12 @@ async def _execute_single_tool(tool_def, tool_name: str, args: dict) -> dict:
             timeout=tool_timeout,
         )
     except TimeoutError:
-        logger.exception(f"Tool timeout ({tool_name}): {tool_timeout}s")
+        logger.exception("Tool timeout (%s): %ss", tool_name, tool_timeout)
         result = _annotate_error(
             {"error": f"Execution timed out ({tool_timeout}s)"}, "timeout"
         )
     except Exception as e:
-        logger.exception(f"Tool error ({tool_name}): {type(e).__name__}: {e}")
+        logger.exception("Tool error (%s): %s: %s", tool_name, type(e).__name__, e)
         result = _annotate_error(
             {"error": f"{type(e).__name__}: {e}"}, "runtime"
         )
@@ -552,7 +552,7 @@ async def execute_tool_calls(
     for i, r in enumerate(results):
         if isinstance(r, Exception):
             tc, tool_name, args, _ = runnable[i]
-            logger.exception(f"Parallel tool execution error ({tool_name}): {type(r).__name__}: {r}")
+            logger.exception("Parallel tool execution error (%s): %s: %s", tool_name, type(r).__name__, r)
             result = _annotate_error(
                 {"error": f"{type(r).__name__}: {r}"}, "runtime"
             )
