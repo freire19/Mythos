@@ -187,8 +187,10 @@ def shutdown_mcp_servers() -> None:
     for client in _active_clients:
         try:
             client.stop()
-        except Exception:
-            pass
+        except Exception as e:
+            # #DM043: shutdown best-effort but log to diagnose zombie
+            # subprocess leaks (was silent — could mask process-kill failures).
+            logger.warning("MCP %s stop failed: %s", client.name, e)
     _active_clients.clear()
     _loaded = False
 

@@ -5,10 +5,13 @@ for a persistent spinner, so streaming output flows above without erasing it.
 """
 
 import asyncio
+import logging
 import os
 import shutil
 import sys
 import time
+
+logger = logging.getLogger(__name__)
 
 from .core import (
     C,
@@ -174,8 +177,10 @@ class ThinkingIndicator:
         try:
             sys.stdout.write(out)
             sys.stdout.flush()
-        except Exception:
-            pass
+        except Exception as e:
+            # #DM043: stdout fechado (terminal redirecionado/encerrado) — animacao
+            # silenciosamente vira no-op em vez de crashar o agent loop.
+            logger.debug("thinking indicator: scroll-clear write failed: %s", e)
         self._scroll_active = False
         self._panel_capacity = 0
 
@@ -335,8 +340,9 @@ class ThinkingIndicator:
         try:
             sys.stdout.write("".join(out_parts))
             sys.stdout.flush()
-        except Exception:
-            pass
+        except Exception as e:
+            # #DM043: stdout indisponivel mid-animacao — no-op silencioso.
+            logger.debug("thinking indicator: frame write failed: %s", e)
 
     # ── Public API ──────────────────────────────────────────────
 
@@ -407,8 +413,9 @@ class ThinkingIndicator:
             try:
                 sys.stdout.write(f"\033[s{clears}\033[u")
                 sys.stdout.flush()
-            except Exception:
-                pass
+            except Exception as e:
+                # #DM043: pause animacao quando stdout indisponivel — no-op.
+                logger.debug("thinking indicator: pause-clear failed: %s", e)
 
     def resume(self) -> None:
         self._paused = False
@@ -474,5 +481,7 @@ def cleanup_indicator() -> None:
         return
     try:
         ind.stop()
-    except Exception:
-        pass
+    except Exception as e:
+        # #DM043: atexit path — terminal pode estar half-closed. Debug log
+        # via logger (nao print) porque atexit pode ter stderr fechado tambem.
+        logger.debug("indicator cleanup failed: %s", e)

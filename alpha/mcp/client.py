@@ -130,16 +130,20 @@ class MCPClient:
         try:
             if self.proc.stdin and not self.proc.stdin.closed:
                 self.proc.stdin.close()
-        except Exception:
-            pass
+        except Exception as e:
+            # #DM043: stdin already broken — proceeding to terminate is more
+            # important than the close error. Debug log preserves diagnose.
+            logger.debug("MCP %s stdin close failed: %s", self.name, e)
         if self.proc.poll() is None:
             try:
                 self.proc.terminate()
                 self.proc.wait(timeout=3)
             except subprocess.TimeoutExpired:
                 self.proc.kill()
-            except Exception:
-                pass
+            except Exception as e:
+                # #DM043: terminate failed (PermissionError, OSError) —
+                # log to diagnose zombies but continue shutdown.
+                logger.debug("MCP %s terminate failed: %s", self.name, e)
         if self._reader is not None:
             self._reader.join(timeout=2)
         if self._stderr_reader is not None:

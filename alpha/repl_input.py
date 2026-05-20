@@ -210,8 +210,10 @@ class _SlashCompleter(Completer):
                 for s in list_skills():
                     meta = (s.description or "").strip().split("\n", 1)[0]
                     entries.append((f"/{s.name}", meta[:80] or "skill"))
-            except Exception:
-                pass
+            except Exception as e:
+                # #DM043: silencioso engole skill listing — debug log preserva
+                # diagnostico sem poluir terminal (skills sao opcionais).
+                logger.debug("skill list failed for slash completer: %s", e)
             _SlashCompleter._entries_cache = entries
         else:
             entries = _SlashCompleter._entries_cache

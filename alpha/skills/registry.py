@@ -29,8 +29,11 @@ def load_all_skills(force: bool = False) -> dict[str, Skill]:
     try:
         from ..repl_input import _SlashCompleter
         _SlashCompleter.invalidate_cache()
-    except Exception:
-        pass
+    except Exception as e:
+        # #DM043: import circular ou repl_input nao carregado (e.g. modo
+        # daemon sem REPL) — silencioso era OK, mas debug log ajuda diagnose.
+        import logging
+        logging.getLogger(__name__).debug("SlashCompleter cache invalidate skipped: %s", e)
     return result
 
 
