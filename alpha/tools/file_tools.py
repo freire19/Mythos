@@ -74,6 +74,36 @@ _EDIT_MAX_BYTES = 10_000_000
 # ─── Safe Tools ───
 
 
+def _read_file_sync(p: Path, offset: int, limit: int) -> tuple[list[str], int]:
+    """Sync helper para `_read_file` — move o I/O bloqueante para `to_thread`.
+
+    AUDIT_V1.8 #041: este corpo era inline em `_read_file` (async), bloqueando
+    o event loop em read de arquivos grandes (5MB streaming = 30-100ms).
+    Separado para wrap com `asyncio.to_thread` no caller — mantemos a logica
+    intacta, apenas movendo de coroutine para thread.
+    """
+    # DEEP_PERFORMANCE #D027: streaming read para arquivos grandes.
+    # read_text() + splitlines() materializa o arquivo inteiro em RAM
+    # mesmo com offset/limit pequenos. Para arquivos >= 100KB, fazemos
+    # streaming com open() — conta total de linhas e só guarda as do range.
+    # Custo: O(n) CPU (contar \n), O(limit) RAM (só as linhas visíveis).
+    fsize = p.stat().st_size
+    if fsize < 100_000:
+        text = p.read_text(errors="replace")
+        lines = text.splitlines()
+        selected = lines[offset : offset + limit]
+        total_lines = len(lines)
+    else:
+        selected = []
+        total_lines = 0
+        with open(p, "r", errors="replace", buffering=65536) as f:
+            for i, line in enumerate(f):
+                total_lines = i + 1
+                if offset <= i < offset + limit:
+                    selected.append(line.rstrip("\n"))
+    return selected, total_lines
+
+
 async def _read_file(path: str, offset: int = 0, limit: int = 500) -> dict:
     """Read file contents with optional line range."""
     try:
@@ -89,25 +119,12 @@ async def _read_file(path: str, offset: int = 0, limit: int = 500) -> dict:
     if not p.is_file():
         return {"error": f"Não é um arquivo: {path}"}
     try:
-        # DEEP_PERFORMANCE #D027: streaming read para arquivos grandes.
-        # read_text() + splitlines() materializa o arquivo inteiro em RAM
-        # mesmo com offset/limit pequenos. Para arquivos >= 100KB, fazemos
-        # streaming com open() — conta total de linhas e só guarda as do range.
-        # Custo: O(n) CPU (contar \n), O(limit) RAM (só as linhas visíveis).
-        fsize = p.stat().st_size
-        if fsize < 100_000:
-            text = p.read_text(errors="replace")
-            lines = text.splitlines()
-            selected = lines[offset : offset + limit]
-            total_lines = len(lines)
-        else:
-            selected: list[str] = []
-            total_lines = 0
-            with open(p, "r", errors="replace", buffering=65536) as f:
-                for i, line in enumerate(f):
-                    total_lines = i + 1
-                    if offset <= i < offset + limit:
-                        selected.append(line.rstrip("\n"))
+        # AUDIT_V1.8 #041: I/O bloqueante (read_text / stream open) wrapper
+        # em `to_thread` para nao serializar `delegate_parallel` de file
+        # operations. `_search_with_python` ja seguia o padrao desde V1.6.
+        selected, total_lines = await asyncio.to_thread(
+            _read_file_sync, p, offset, limit
+        )
         numbered = "\n".join(f"{i + offset + 1}: {line}" for i, line in enumerate(selected))
         return {
             "path": str(p),
@@ -485,6 +502,41 @@ async def _glob_files(pattern: str, path: str = ".") -> dict:
 # ─── Destructive Tools ───
 
 
+def _write_file_sync(p: Path, original_path: str, content: str) -> dict:
+    """Sync helper para `_write_file` (AUDIT_V1.8 #041).
+
+    Move snapshot + mkdir + os.open + write para thread pool. A validacao
+    de workspace continua sendo refeita pos-mkdir para fechar o TOCTOU
+    (mesmo invariante que o codigo inline anterior).
+    """
+    previous_content = ""
+    existed = p.exists()
+    if existed and p.is_file():
+        try:
+            previous_content = p.read_text(errors="replace")
+        except Exception:
+            previous_content = ""
+
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p_resolved = Path(original_path).expanduser().resolve()
+    err = assert_within_workspace(p_resolved)
+    if err:
+        raise PermissionError(err)
+    data = content.encode("utf-8")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW
+    fd = os.open(str(p), flags, 0o644)
+    try:
+        os.write(fd, data)
+    finally:
+        os.close(fd)
+    return {
+        "path": str(p),
+        "bytes_written": len(data),
+        "_previous_content": previous_content,
+        "_created": not existed,
+    }
+
+
 async def _write_file(path: str, content: str) -> dict:
     """Write content to a file (creates parent directories if needed).
 
@@ -496,36 +548,10 @@ async def _write_file(path: str, content: str) -> dict:
     except PermissionError as e:
         return {"error": str(e)}
     try:
-        # Snapshot prior contents (best-effort, only used for the UI diff —
-        # never returned to the LLM since the executor strips _-prefixed keys).
-        previous_content = ""
-        existed = p.exists()
-        if existed and p.is_file():
-            try:
-                previous_content = p.read_text(errors="replace")
-            except Exception:
-                previous_content = ""
-
-        p.parent.mkdir(parents=True, exist_ok=True)
-        # Re-validate resolved path after mkdir (directory could have been swapped)
-        p_resolved = Path(path).expanduser().resolve()
-        err = assert_within_workspace(p_resolved)
-        if err:
-            raise PermissionError(err)
-        # Atomic write: O_NOFOLLOW prevents symlink race between validate and open
-        data = content.encode("utf-8")
-        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW
-        fd = os.open(str(p), flags, 0o644)
-        try:
-            os.write(fd, data)
-        finally:
-            os.close(fd)
-        return {
-            "path": str(p),
-            "bytes_written": len(data),
-            "_previous_content": previous_content,
-            "_created": not existed,
-        }
+        # AUDIT_V1.8 #041: write bloqueante (snapshot read + mkdir +
+        # os.open/write) movido para thread pool. Sem isso, `delegate_parallel`
+        # com 5 writes serializa o event loop em 100-500ms cada.
+        return await asyncio.to_thread(_write_file_sync, p, path, content)
     except OSError as e:
         if e.errno == 40:  # ELOOP — path is a symlink
             return {"error": "Acesso negado: operação de escrita em symlinks não é permitida"}
@@ -534,6 +560,42 @@ async def _write_file(path: str, content: str) -> dict:
         return {"error": f"Acesso negado: {e}"}
     except Exception as e:
         return {"error": str(e)}
+
+
+def _edit_file_sync(p: Path, original_path: str, old_text: str, new_text: str) -> dict:
+    """Sync helper para `_edit_file` (AUDIT_V1.8 #041)."""
+    fd = os.open(str(p), os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        size = os.fstat(fd).st_size
+        if size > _EDIT_MAX_BYTES:
+            return {
+                "error": f"Arquivo > {_EDIT_MAX_BYTES // 1_000_000}MB; "
+                f"edição inline não suportada para arquivos desse tamanho"
+            }
+        raw = os.read(fd, size) if size > 0 else b""
+        original = raw.decode("utf-8", errors="replace")
+    finally:
+        os.close(fd)
+    if old_text not in original:
+        return {"error": "Texto não encontrado no arquivo. Verifique indentação e espaços."}
+    count = original.count(old_text)
+    updated = original.replace(old_text, new_text, 1)
+    p_resolved = Path(original_path).expanduser().resolve()
+    err = assert_within_workspace(p_resolved)
+    if err:
+        raise PermissionError(err)
+    data = updated.encode("utf-8")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW
+    fd = os.open(str(p), flags, 0o644)
+    try:
+        os.write(fd, data)
+    finally:
+        os.close(fd)
+    return {
+        "path": str(p),
+        "occurrences_found": count,
+        "replaced": 1,
+    }
 
 
 async def _edit_file(path: str, old_text: str, new_text: str) -> dict:
@@ -545,41 +607,17 @@ async def _edit_file(path: str, old_text: str, new_text: str) -> dict:
     if not p.exists():
         return {"error": f"Arquivo não encontrado: {path}"}
     try:
-        # O_NOFOLLOW closes the TOCTOU race where a symlink could be created
-        # between the path validation above and this read.
-        fd = os.open(str(p), os.O_RDONLY | os.O_NOFOLLOW)
-        try:
-            size = os.fstat(fd).st_size
-            if size > _EDIT_MAX_BYTES:
-                return {
-                    "error": f"Arquivo > {_EDIT_MAX_BYTES // 1_000_000}MB; "
-                    f"edição inline não suportada para arquivos desse tamanho"
-                }
-            raw = os.read(fd, size) if size > 0 else b""
-            original = raw.decode("utf-8", errors="replace")
-        finally:
-            os.close(fd)
-        if old_text not in original:
-            return {"error": "Texto não encontrado no arquivo. Verifique indentação e espaços."}
-        count = original.count(old_text)
-        updated = original.replace(old_text, new_text, 1)
-        # Re-validate before write (defense against TOCTOU race)
-        p_resolved = Path(path).expanduser().resolve()
-        err = assert_within_workspace(p_resolved)
-        if err:
-            raise PermissionError(err)
-        # Atomic write with O_NOFOLLOW to prevent symlink race
-        data = updated.encode("utf-8")
-        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW
-        fd = os.open(str(p), flags, 0o644)
-        try:
-            os.write(fd, data)
-        finally:
-            os.close(fd)
+        # AUDIT_V1.8 #041: read+replace+write bloqueantes em thread pool.
+        result = await asyncio.to_thread(
+            _edit_file_sync, p, path, old_text, new_text
+        )
+        # Edit-not-found path retorna dict com error sem levantar — repassa.
+        if "error" in result:
+            return result
         return {
-            "path": str(p),
-            "occurrences_found": count,
-            "replaced": 1,
+            "path": result["path"],
+            "occurrences_found": result["occurrences_found"],
+            "replaced": result["replaced"],
         }
     except (PermissionError, ValueError) as e:
         return {"error": f"Acesso negado: {e}"}

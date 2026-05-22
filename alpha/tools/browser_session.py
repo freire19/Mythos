@@ -8,25 +8,76 @@ so cookies, login state, and tab history survive between tool calls.
 from __future__ import annotations
 
 import asyncio
+import importlib.util as _ilu
 import logging
 import sys
 from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
-try:
-    from playwright.async_api import (
-        Browser,
-        BrowserContext,
-        Page,
-        Playwright,
-        async_playwright,
-    )
+# AUDIT_V1.8 #040: Playwright e importado eagerly via try/except no topo
+# do modulo — o `try` so trata ImportError, mas se a lib esta instalada o
+# import roda em TODA invocacao do CLI (200-500ms cold-load de playwright
+# inteiro). Usuario com install minimal mas playwright instalado no venv
+# compartilhado paga sem nunca usar browser_*.
+#
+# Fix: detectar disponibilidade via `importlib.util.find_spec` (estatico,
+# sem importar) e fazer o real-import lazy na primeira chamada de
+# `_ensure_playwright_loaded()` — chamada apenas pelo `BrowserSession.start()`.
+PLAYWRIGHT_AVAILABLE = _ilu.find_spec("playwright") is not None
 
-    PLAYWRIGHT_AVAILABLE = True
-except ImportError:
-    PLAYWRIGHT_AVAILABLE = False
-    Browser = BrowserContext = Page = Playwright = None  # type: ignore
+# Placeholders nao-importados. `_ensure_playwright_loaded()` substitui esses
+# nomes pelos symbols reais na primeira invocacao das browser tools.
+Browser = BrowserContext = Page = Playwright = async_playwright = None  # type: ignore
+
+
+def _ensure_playwright_loaded():
+    """Lazy import dos symbols Playwright. Idempotente.
+
+    Chamada pelos sites que realmente usam Browser/BrowserContext/Page/
+    async_playwright — apenas dentro de `BrowserSession.start()` e do
+    bloco que detecta isinstance(). Se Playwright nao esta instalado OU
+    instalado mas com sub-dep quebrada, retorna False (caller deve fall
+    back para mensagem de erro amigavel).
+
+    AUDIT_V1.8 #R202: `importlib.util.find_spec("playwright")` so verifica
+    se o top-level package existe — nao executa o import. Se `playwright`
+    esta instalado mas com sub-dependencia quebrada (greenlet ausente,
+    ABI mismatch em playwright._impl, wheel parcial, distro upgrade
+    incompleto), o real `from playwright.async_api import ...` aqui dispara
+    ImportError. Sem try/except, esse traceback cru propaga ate o caller
+    em vez do `RuntimeError("Playwright not installed...")` amigavel.
+    Wrap garante que ambos os modos de falha (nao-instalado vs corrupto)
+    retornem False — caller exibe a mesma mensagem actionable.
+    """
+    global Browser, BrowserContext, Page, Playwright, async_playwright
+    if not PLAYWRIGHT_AVAILABLE:
+        return False
+    if async_playwright is not None:
+        return True  # ja carregado
+    try:
+        from playwright.async_api import (  # noqa: I001
+            Browser as _B,
+            BrowserContext as _BC,
+            Page as _P,
+            Playwright as _PW,
+            async_playwright as _ap,
+        )
+    except ImportError as e:
+        # find_spec disse OK mas import real falhou — install corrupto.
+        # Log para diagnose (usuario vai ver "not installed" do caller).
+        logger.warning(
+            "Playwright top-level present but sub-import failed: %s "
+            "(install may be corrupt — try: pip install --force-reinstall playwright)",
+            e,
+        )
+        return False
+    Browser = _B
+    BrowserContext = _BC
+    Page = _P
+    Playwright = _PW
+    async_playwright = _ap
+    return True
 
 
 _BLOCKED_SCHEMES = frozenset(
@@ -84,6 +135,14 @@ class BrowserSession:
             if self.is_open():
                 return
             if not PLAYWRIGHT_AVAILABLE:
+                raise RuntimeError(
+                    "Playwright not installed. Run: "
+                    "pip install playwright && playwright install chromium"
+                )
+            # AUDIT_V1.8 #040: lazy import dos symbols Playwright apenas
+            # quando o user realmente vai abrir browser. Ate aqui, so
+            # `find_spec` rodou no module-load (cheap, sem cold-load).
+            if not _ensure_playwright_loaded():
                 raise RuntimeError(
                     "Playwright not installed. Run: "
                     "pip install playwright && playwright install chromium"

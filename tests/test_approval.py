@@ -95,6 +95,65 @@ class TestNeedsApproval:
     def test_db_write_needs_approval(self):
         assert needs_approval("query_database", {"read_only": False}) is True
 
+    # AUDIT_V1.8 #001: providers ocasionalmente emitem `null` em campos que
+    # antes assumiamos serem string vazia quando vazios. `args.get("X", "")`
+    # so cobre key ausente; com key presente + valor None, retorna None e
+    # crasha em `.strip()`/`.upper()`. Garantia: never raise nesses casos.
+    def test_handles_null_content_in_write_file(self):
+        # `content: null` antes virava AttributeError em not None.strip()
+        assert needs_approval("write_file", {"path": "f.py", "content": None}) is True
+
+    def test_handles_null_path_in_write_file(self):
+        # `path: null` antes virava AttributeError em _is_sensitive_path(None).
+        # Comportamento esperado pos-fix: nao crasha; path vazio nao e sensitive,
+        # entao auto-aprova (False). O ponto deste teste e "never raise".
+        assert needs_approval("write_file", {"path": None, "content": "x"}) is False
+
+    def test_handles_null_path_in_edit_file(self):
+        assert needs_approval("edit_file", {"path": None}) is False
+
+    def test_handles_null_method_in_http_request(self):
+        # `method: null` antes virava AttributeError em None.upper()
+        # Treated como GET (default) — auto-aprova.
+        assert needs_approval("http_request", {"method": None}) is False
+
+    # AUDIT_V1.8 #R201 (follow-up): outros sites da mesma classe de crash.
+    # `args.get("X", "")` retorna None quando provider emite `{"X": null}`.
+    # Verifica que execute_shell/execute_pipeline/git_operation tambem
+    # tratam null sem crashar (turno deve seguir, exigindo aprovacao).
+
+    def test_handles_null_command_in_execute_shell(self):
+        # `command: null` antes virava TypeError em _DANGEROUS_OPS.search(None)
+        assert needs_approval("execute_shell", {"command": None}) is True
+
+    def test_handles_null_pipeline_in_execute_pipeline(self):
+        # `pipeline: null` antes virava TypeError em _PIPELINE_DANGEROUS_RE.search(None).
+        # Pos-fix nao crasha; empty/null pipeline e considerado "safe" vacuoso
+        # (mesmo comportamento que empty string pre-fix) — auto-aprova.
+        # Ponto deste teste: never raise.
+        result = needs_approval("execute_pipeline", {"pipeline": None})
+        assert result in (True, False)  # any non-exception is OK
+
+    def test_handles_null_action_in_git_operation(self):
+        # `action: null` antes funcionava por acaso (`None in frozenset` = False)
+        # mas a coercao explicita agora e consistente — action None → string vazia
+        # → nao casa SAFE/AUTO → return True
+        assert needs_approval("git_operation", {"action": None}) is True
+
+    # AUDIT_V1.8 #R201 (follow-up): safe-by-default restaurado para method="".
+    # Fix anterior `(args.get("method") or "GET").upper()` coercia "" → "GET"
+    # auto-aprovando. Agora restaura comportamento pre-fix: "" → require approval.
+    def test_empty_method_requires_approval(self):
+        # Pre-#001: `args.get("method", "GET")` com `{"method": ""}` → ""
+        # → not in GET/HEAD/OPTIONS → require approval (safe-by-default).
+        # Pos-#001 (BUG): `or "GET"` coercia → auto-approve.
+        # Pos-#R201: empty string mantida → require approval.
+        assert needs_approval("http_request", {"method": ""}) is True
+
+    def test_missing_method_defaults_to_get(self):
+        # Comportamento legacy preservado: key ausente → default GET → auto-approve.
+        assert needs_approval("http_request", {"url": "https://x"}) is False
+
 
 class TestShellSafety:
     """Test shell command safety validation."""

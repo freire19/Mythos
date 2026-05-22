@@ -306,6 +306,7 @@ def _build_request(
     api_key: str,
     model: str,
     supports_tools: bool,
+    extra_payload: dict | None = None,
 ) -> tuple[dict, dict]:
     """Build (headers, payload) for the chat completions POST."""
     headers = {
@@ -324,6 +325,8 @@ def _build_request(
     }
     if tools and supports_tools:
         payload["tools"] = tools
+    if extra_payload:
+        payload.update(extra_payload)
     return headers, payload
 
 
@@ -576,6 +579,7 @@ async def stream_chat_with_tools(
         api_key=api_key,
         model=model,
         supports_tools=supports_tools,
+        extra_payload=cfg.get("extra_payload"),
     )
 
     last_error = None

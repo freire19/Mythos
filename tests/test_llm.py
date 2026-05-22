@@ -8,7 +8,7 @@ Tests assert the expected jitter window, not exact values.
 import statistics
 
 from alpha.config import RETRY
-from alpha.llm import _calc_backoff
+from alpha.llm import _build_request, _calc_backoff
 
 INITIAL_BACKOFF = RETRY["llm"]["initial_backoff"]
 MAX_BACKOFF = RETRY["llm"]["max_backoff"]
@@ -51,3 +51,41 @@ class TestBackoff:
 
     def test_max_retries_is_3(self):
         assert MAX_RETRIES == 3
+
+
+class TestBuildRequestExtraPayload:
+    """_build_request must forward provider-specific fields (e.g. DeepSeek's
+    thinking/reasoning_effort) into the OpenAI-compat POST body."""
+
+    def _common(self):
+        return {
+            "messages": [{"role": "user", "content": "oi"}],
+            "tools": [],
+            "temperature": 0.5,
+            "api_key": "k",
+            "model": "deepseek-v4-pro",
+            "supports_tools": True,
+        }
+
+    def test_extra_payload_merged_into_body(self):
+        _, payload = _build_request(
+            **self._common(),
+            extra_payload={
+                "thinking": {"type": "enabled"},
+                "reasoning_effort": "max",
+            },
+        )
+        assert payload["thinking"] == {"type": "enabled"}
+        assert payload["reasoning_effort"] == "max"
+        # base fields preserved
+        assert payload["model"] == "deepseek-v4-pro"
+        assert payload["stream"] is True
+
+    def test_no_extra_payload_keeps_body_clean(self):
+        _, payload = _build_request(**self._common())
+        assert "thinking" not in payload
+        assert "reasoning_effort" not in payload
+
+    def test_empty_extra_payload_is_noop(self):
+        _, payload = _build_request(**self._common(), extra_payload={})
+        assert "thinking" not in payload

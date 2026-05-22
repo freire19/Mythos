@@ -18,10 +18,10 @@ logger = logging.getLogger(__name__)
 
 GEMINI_OCR_BASE = "https://generativelanguage.googleapis.com/v1beta/openai"
 # Override via env to trade cost vs quality:
-#   gemini-3.1-pro-preview         — best vision, slow/expensive (default)
-#   gemini-3.1-flash-lite-preview  — mid quality, faster
-#   gemini-2.5-flash               — cheapest, OK for simple OCR
-GEMINI_OCR_MODEL = os.getenv("GEMINI_OCR_MODEL", "gemini-3.1-pro-preview")
+#   gemini-3.5-flash               — fast + multimodal (text/image/video/audio/PDF), good OCR default
+#   gemini-3.1-pro-preview         — best vision, slow/expensive
+#   gemini-3.1-flash-lite-preview  — mid quality
+GEMINI_OCR_MODEL = os.getenv("GEMINI_OCR_MODEL", "gemini-3.5-flash")
 MAX_IMAGE_BYTES = 5 * 1024 * 1024
 
 _EXT_TO_MEDIA = {

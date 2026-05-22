@@ -230,6 +230,7 @@ def get_provider_config(provider: str) -> dict:
     api_format = cfg.get("api_format", "openai")
     supports_vision = cfg.get("supports_vision", False)
     vision_format = cfg.get("vision_format", "openai")
+    extra_payload = _build_extra_payload(provider, model)
 
     return {
         "base_url": base_url,
@@ -239,7 +240,31 @@ def get_provider_config(provider: str) -> dict:
         "api_format": api_format,
         "supports_vision": supports_vision,
         "vision_format": vision_format,
+        "extra_payload": extra_payload,
     }
+
+
+def _build_extra_payload(provider: str, model: str) -> dict:
+    """Provider-specific payload extras (thinking mode, reasoning effort).
+
+    DeepSeek V4 (Pro/Flash) accepts `thinking` and `reasoning_effort` in the
+    OpenAI-compat payload. For agentic CLIs DeepSeek recommends `effort=max`
+    (their docs list Claude Code / OpenCode as examples). Older v3 models
+    (`deepseek-chat`, `deepseek-reasoner`) reject these fields, so we gate
+    on the model name containing `v4`.
+
+    Env overrides:
+      - DEEPSEEK_THINKING:        "enabled" (default) | "disabled"
+      - DEEPSEEK_REASONING_EFFORT: "max" (default) | "high"
+    """
+    if provider == "deepseek" and "v4" in model.lower():
+        thinking = os.getenv("DEEPSEEK_THINKING", "enabled").lower()
+        effort = os.getenv("DEEPSEEK_REASONING_EFFORT", "max").lower()
+        extras: dict = {"thinking": {"type": thinking}}
+        if thinking == "enabled":
+            extras["reasoning_effort"] = effort
+        return extras
+    return {}
 
 
 def get_available_providers() -> list[dict]:

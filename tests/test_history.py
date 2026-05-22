@@ -102,6 +102,25 @@ class TestHistory:
         data = json.loads(path.read_text())
         assert data["metadata"]["provider"] == "grok"
 
+    # AUDIT_V1.8 #004: mensagens multimodais tem `content` como list[dict].
+    # Antes do fix, _build_session_summary chamava text.startswith no list e
+    # save_session crashava silenciosamente, perdendo a sessao inteira.
+    def test_save_session_with_multimodal_content(self):
+        multimodal = [
+            {"role": "user", "content": [
+                {"type": "text", "text": "what is in this image?"},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,xxx"}},
+            ]},
+            {"role": "assistant", "content": "a cat"},
+        ]
+        # Pre-fix: este call levantava AttributeError em _build_session_summary
+        path = save_session("test_multimodal", multimodal)
+        assert path.exists()
+        # Re-list deve incluir a sessao com preview extraido do bloco text
+        sessions = list_sessions()
+        ids = [s["session_id"] for s in sessions]
+        assert "test_multimodal" in ids
+
 
 class TestSessionIdValidation:
     """Path-traversal guard on session_id (regression for /load <id>)."""

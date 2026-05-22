@@ -118,6 +118,45 @@ class TestMissingBinary:
             client.start()
 
 
+# ── AUDIT_V1.8 #034 — startup timeout ──
+
+class TestConnectOneTimeout:
+    """Garante que _connect_one nao trava indefinidamente em server lento.
+
+    Server stub que dorme infinito (sem responder JSON-RPC) deve ser morto
+    no `startup_timeout` em vez de pendurar o CLI todo.
+    """
+
+    def test_hung_server_killed_within_timeout(self, tmp_path: Path):
+        from alpha.mcp.loader import _connect_one
+        import time
+
+        # Stub que abre stdin mas nunca responde — simula Popen lento ou
+        # subprocess preso em busy-loop antes do JSON-RPC handshake.
+        stub = tmp_path / "hang_server.py"
+        stub.write_text(
+            "import sys, time\n"
+            "for line in sys.stdin:\n"
+            "    pass\n"  # absorve mas nunca responde
+            "time.sleep(999)\n"
+        )
+
+        spec = MCPServerConfig(
+            name="hung",
+            command=sys.executable,
+            args=[str(stub)],
+        )
+
+        t0 = time.monotonic()
+        result = _connect_one(spec, startup_timeout=1.0)
+        elapsed = time.monotonic() - t0
+
+        # Deve retornar None (falhou) — e dentro do timeout + margem
+        assert result is None
+        # Margem generosa para overhead de subprocess + thread join
+        assert elapsed < 5.0, f"_connect_one demorou {elapsed:.2f}s, esperado < 5s"
+
+
 # ── Result formatting ──
 
 

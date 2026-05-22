@@ -71,6 +71,47 @@ class TestProviderVisionFlag:
         assert cfg["vision_format"] == "openai"
 
 
+class TestDeepSeekThinkingPayload:
+    """DeepSeek V4 ships thinking-mode + effort knobs in the OpenAI payload.
+    Agentic CLIs default to effort=max per DeepSeek's own docs."""
+
+    def test_deepseek_v4_defaults_enabled_max(self, monkeypatch):
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "test")
+        monkeypatch.delenv("DEEPSEEK_THINKING", raising=False)
+        monkeypatch.delenv("DEEPSEEK_REASONING_EFFORT", raising=False)
+        cfg = get_provider_config("deepseek")
+        assert cfg["extra_payload"] == {
+            "thinking": {"type": "enabled"},
+            "reasoning_effort": "max",
+        }
+
+    def test_deepseek_v4_env_overrides(self, monkeypatch):
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "test")
+        monkeypatch.setenv("DEEPSEEK_REASONING_EFFORT", "high")
+        cfg = get_provider_config("deepseek")
+        assert cfg["extra_payload"]["reasoning_effort"] == "high"
+
+    def test_deepseek_thinking_disabled_drops_effort(self, monkeypatch):
+        # When thinking is off, sending reasoning_effort is meaningless and
+        # would be rejected — verify we omit it.
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "test")
+        monkeypatch.setenv("DEEPSEEK_THINKING", "disabled")
+        cfg = get_provider_config("deepseek")
+        assert cfg["extra_payload"] == {"thinking": {"type": "disabled"}}
+
+    def test_legacy_deepseek_v3_no_extras(self, monkeypatch):
+        # deepseek-chat / deepseek-reasoner reject thinking/effort fields.
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "test")
+        monkeypatch.setenv("DEEPSEEK_MODEL", "deepseek-chat")
+        cfg = get_provider_config("deepseek")
+        assert cfg["extra_payload"] == {}
+
+    def test_other_providers_have_no_deepseek_extras(self, monkeypatch):
+        monkeypatch.setenv("OPENAI_API_KEY", "test")
+        cfg = get_provider_config("openai")
+        assert cfg["extra_payload"] == {}
+
+
 class TestDotenvDiscovery:
     """§4 PyPI prep: .env must be discoverable when alpha is installed via
     pipx (no _PROJECT_ROOT/.env in site-packages). Discovery order is

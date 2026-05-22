@@ -49,6 +49,7 @@ _PRICING: dict[str, tuple[float, float]] = {
     "gemini-2.5-flash":    (0.30, 2.50),
     "gemini-3.1-pro":      (1.25, 10.00),
     "gemini-3.1-flash":    (0.30, 2.50),
+    "gemini-3.5-flash":    (1.50, 9.00),
     # Grok
     "grok-3":              (3.00, 15.00),
     "grok-3-mini":         (0.30, 0.50),

@@ -53,11 +53,18 @@ async def _run_tests(
     elif framework == "cargo":
         cmd = "cargo test"
         if pattern:
-            cmd += f" {pattern}"
+            # AUDIT_V1.8 #005: sem shlex.quote, `pattern="x; rm -rf ~"` virava
+            # shell injection apos o user aprovar `run_tests` (composite skipa
+            # approval em sub-tools). pytest ja usava shlex.quote (linha 50);
+            # cargo/go ficavam vulneraveis.
+            cmd += f" {shlex.quote(pattern)}"
     elif framework == "go":
         cmd = "go test ./..."
         if pattern:
-            cmd += f" -run '{pattern}'"
+            # AUDIT_V1.8 #005: single-quote literal nao escapa `'` dentro do
+            # pattern adversarial (`pattern="x'; rm -rf ~; echo '"`). shlex.quote
+            # produz o quoting POSIX-correto.
+            cmd += f" -run {shlex.quote(pattern)}"
     else:
         return _annotate_error(
             {"error": f"Framework '{framework}' nao suportado. Use: pytest, npm, cargo, go"},

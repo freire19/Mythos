@@ -51,6 +51,45 @@ class TestHardTruncate:
         result = _hard_truncate(msgs, start=1, end=3, keep_recent=3)
         assert [m["role"] for m in result] == ["system", "user"]
 
+    # AUDIT_V1.8 #019: quando `len(messages) <= keep_recent`, slice
+    # `messages[-keep_recent:]` retornava a lista inteira (incluindo
+    # messages[0] = system), e depois `[sys_msg] + tail` duplicava.
+    # No adapter Anthropic (_convert_messages) os system parts viram
+    # concatenados com \n\n → instrucao dobrada e respostas erraticas.
+    def test_no_system_duplication_when_len_le_keep_recent(self):
+        msgs = [
+            {"role": "system", "content": "SYS"},
+            {"role": "user", "content": "u1"},
+            {"role": "assistant", "content": "a1"},
+        ]
+        # len(messages) = 3 <= keep_recent=8
+        result = _hard_truncate(msgs, start=1, end=2, keep_recent=8)
+        roles = [m["role"] for m in result]
+        # system deve aparecer EXATAMENTE uma vez
+        assert roles.count("system") == 1
+        # E os assistente/user devem estar preservados
+        assert "u1" in [m.get("content") for m in result]
+        assert "a1" in [m.get("content") for m in result]
+
+    def test_no_system_duplication_keep_recent_1(self):
+        """Edge case: keep_recent=1 — tail pode coincidir com messages[0]."""
+        msgs = [
+            {"role": "system", "content": "SYS"},
+            {"role": "user", "content": "u1"},
+        ]
+        result = _hard_truncate(msgs, start=1, end=1, keep_recent=1)
+        roles = [m["role"] for m in result]
+        assert roles.count("system") == 1
+
+    # AUDIT_V1.8 #R203: messages=[] previously hit IndexError em `messages[0]`
+    # antes do guard `if messages else []` na linha 340. Guard inconsistente
+    # mascarava o crash. Pos-fix: guard precede ambos os accesses.
+    def test_empty_messages_returns_empty_no_crash(self):
+        # Pre-fix: IndexError em sys_msg = messages[0]
+        # Pos-fix: returns [] sem crash
+        result = _hard_truncate([], start=0, end=0, keep_recent=8)
+        assert result == []
+
 
 class TestCompressContextFallback:
     @pytest.mark.asyncio
