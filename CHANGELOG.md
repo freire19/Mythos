@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.22.1](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.22.0...alpha-code-v1.22.1) (2026-05-22)
+
+
+### Bug Fixes
+
+* close 11 AUDIT_V1.8 highs ([#001](https://github.com/freire19/Alpha_Code/issues/001)/[#004](https://github.com/freire19/Alpha_Code/issues/004)/[#005](https://github.com/freire19/Alpha_Code/issues/005)/[#018](https://github.com/freire19/Alpha_Code/issues/018)/[#019](https://github.com/freire19/Alpha_Code/issues/019)/[#034](https://github.com/freire19/Alpha_Code/issues/034)/[#040](https://github.com/freire19/Alpha_Code/issues/040)/[#041](https://github.com/freire19/Alpha_Code/issues/041) + R201/R202/R203) ([b4a3f36](https://github.com/freire19/Alpha_Code/commit/b4a3f362238223e6b0204dd55902de8cd64eb726))
+
 ## [1.22.0](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.21.10...alpha-code-v1.22.0) (2026-05-20)
 
 
