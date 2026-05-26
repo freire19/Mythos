@@ -125,10 +125,19 @@ def _build_session_summary(messages: list[dict]) -> str:
     Extracts user requests, assistant conclusions, and key tool results
     into a condensed text that can seed a new session.
     """
+    # AUDIT_V1.8 #004: mensagens com imagem tem `content` como list[dict]
+    # (multimodal). Listas nao-vazias passam pelo `or ""`, e logo abaixo
+    # `text.startswith(...)` levantava AttributeError. Sessoes com `/image`,
+    # Ctrl+V ou attachments nao salvavam (atexit engole excecao). Usar
+    # `extract_text` (de alpha.attachments) reduz block lists para o texto
+    # concatenado, ignorando blocos de imagem.
+    from .attachments import extract_text
     parts = []
     for msg in messages:
         role = msg.get("role", "")
         content = msg.get("content") or ""
+        if isinstance(content, list):
+            content = extract_text(content)
 
         if role == "user":
             # Strip CWD prefix
@@ -242,7 +251,7 @@ def save_session(
             continue  # skip system prompt (loaded fresh each time)
         if entry.get("role") == "tool":
             content = entry.get("content", "")
-            if len(content) > 2000:
+            if isinstance(content, str) and len(content) > 2000:
                 entry["content"] = content[:2000] + "\n... [truncated for storage]"
         storable.append(entry)
 
@@ -365,6 +374,11 @@ def list_sessions(limit: int = 20) -> list[dict]:
             for msg in data.get("messages", []):
                 if msg.get("role") == "user":
                     content = msg.get("content", "")
+                    # AUDIT_V1.8 #004: sessoes salvas com multimodal vem como
+                    # list[dict] na chave content — extract_text reduz a string.
+                    if isinstance(content, list):
+                        from .attachments import extract_text
+                        content = extract_text(content)
                     # Strip CWD prefix
                     if content.startswith("[CWD:"):
                         content = content.split("\n", 1)[-1]

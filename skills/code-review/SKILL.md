@@ -1,9 +1,9 @@
 ---
-name: simplify
-description: Review changed code for reuse, quality, and efficiency, then fix any issues found. Trigger when user mentions "simplify", "/simplify", "review my changes", "self-review", "limpar codigo", "revisar diff", "revisar alteracoes", or any variation of reviewing recently changed code before commit.
+name: code-review
+description: Review changed code for reuse, quality, and efficiency, then fix any issues found. Trigger when user mentions "code review", "code-review", "/code-review", "review my changes", "self-review", "limpar codigo", "revisar diff", "revisar alteracoes", or any variation of reviewing recently changed code before commit.
 ---
 
-# Simplify: Code Review and Cleanup
+# Code Review and Cleanup
 
 Review all changed files for reuse, quality, and efficiency. Fix any issues found.
 

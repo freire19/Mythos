@@ -30,7 +30,6 @@ from alpha.config import (
     get_provider_config,
 )
 from alpha import hooks
-from alpha.repl_input import read_input
 from alpha.mcp import list_active_servers as list_mcp_servers
 from alpha.skills import list_skills
 from alpha.display import (
@@ -309,6 +308,9 @@ async def _run_once(messages, user_message, provider, temperature, get_tool_fn, 
 
 def run_repl(provider: str, temperature: float):
     """Interactive REPL loop."""
+    # AUDIT_V1.8 #043: prompt_toolkit so carrega em modo REPL —
+    # single-shot CLI nao paga o cold-load de ~99ms.
+    from alpha.repl_input import read_input
     active_agent = _resolve_active_agent()
     if active_agent and active_agent.provider:
         provider = active_agent.provider

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 from typing import Any
 
 from ..tools import ToolDefinition, ToolSafety, register_tool
@@ -19,6 +20,13 @@ logger = logging.getLogger(__name__)
 TOOL_PREFIX = "mcp__"
 _active_clients: list[MCPClient] = []
 _loaded = False
+
+# AUDIT_V1.8 #034: cap total para o handshake completo (start+initialize+
+# list_tools) por servidor MCP. Sem isso, um servidor com Popen lento
+# (NFS filesystem, PID exhaustion, binario travado em busy-loop) pendurava
+# o CLI por 60s+ (30s initialize + 30s list_tools) ou indefinidamente
+# (Popen sem timeout). Cap defensivo: 5 servers x 15s = 75s pior caso.
+_MCP_STARTUP_TIMEOUT = 15.0
 
 
 def _qualified_name(server: str, tool: str) -> str:
@@ -132,24 +140,77 @@ def _register_server_tools(client: MCPClient) -> int:
     return count
 
 
-def _connect_one(spec: MCPServerConfig) -> MCPClient | None:
+def _connect_one(
+    spec: MCPServerConfig,
+    startup_timeout: float = _MCP_STARTUP_TIMEOUT,
+) -> MCPClient | None:
+    """Conecta a um MCP server com cap absoluto no handshake completo.
+
+    AUDIT_V1.8 #034: start+initialize+list_tools podem cada um ter seu
+    proprio timeout interno (default 30s do client), mas Popen em si nao
+    tem timeout — filesystem stall ou subprocess preso em busy-loop antes
+    de aceitar JSON-RPC trava aqui ate o `wait_for_input` interno expirar.
+    Wrapper threading.Thread.join(timeout) garante cap total e mata o
+    subprocess se passar do limite. Daemon=True para nao bloquear sys.exit.
+    """
     client = MCPClient(
         name=spec.name,
         command=spec.command,
         args=spec.args,
         env=spec.env,
     )
-    try:
-        client.start()
-        client.initialize()
-        client.list_tools()
-    except MCPError as e:
-        logger.warning("MCP '%s' failed to start: %s", spec.name, e)
-        client.stop()
+    result: dict[str, Any] = {}
+
+    def _do_connect() -> None:
+        try:
+            client.start()
+            client.initialize()
+            client.list_tools()
+            result["ok"] = True
+        except MCPError as e:
+            result["error"] = e
+            result["category"] = "mcp_error"
+        except Exception as e:
+            result["error"] = e
+            result["category"] = "unexpected"
+
+    t = threading.Thread(
+        target=_do_connect,
+        name=f"mcp-connect-{spec.name}",
+        daemon=True,
+    )
+    t.start()
+    t.join(timeout=startup_timeout)
+
+    if t.is_alive():
+        # Handshake nao completou — mata o subprocess. Thread daemon vai
+        # morrer com o processo se mesmo `client.stop()` nao conseguir
+        # liberar (raro: stop usa terminate + wait 3s + kill).
+        logger.warning(
+            "MCP '%s' startup timeout (%.1fs) — killing subprocess",
+            spec.name, startup_timeout,
+        )
+        try:
+            client.stop()
+        except Exception as stop_err:
+            logger.debug(
+                "MCP '%s' stop() apos timeout falhou: %s", spec.name, stop_err
+            )
         return None
-    except Exception as e:
-        logger.warning("MCP '%s' unexpected error: %s", spec.name, e)
-        client.stop()
+
+    if "ok" not in result:
+        err = result.get("error", "unknown")
+        category = result.get("category", "unknown")
+        if category == "mcp_error":
+            logger.warning("MCP '%s' failed to start: %s", spec.name, err)
+        else:
+            logger.warning("MCP '%s' unexpected error: %s", spec.name, err)
+        try:
+            client.stop()
+        except Exception as stop_err:
+            logger.debug(
+                "MCP '%s' stop() apos error falhou: %s", spec.name, stop_err
+            )
         return None
     return client
 

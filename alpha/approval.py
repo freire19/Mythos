@@ -594,12 +594,19 @@ def needs_approval(tool_name: str, args: dict) -> bool:
         return False
 
     if tool_name in AUTO_APPROVE_TOOLS:
-        if tool_name == "write_file" and not args.get("content", "").strip():
+        # AUDIT_V1.8 #001: providers (DeepSeek/Ollama) emitem `{"content": null}`
+        # ou `{"path": null}` em casos raros. `args.get("X", "")` so cai no default
+        # quando a CHAVE esta ausente — com a chave presente e valor None, o get
+        # retorna None e `None.strip()` levanta AttributeError, matando o turno.
+        # `args.get("X") or ""` cobre os dois casos (key ausente OR valor falsy).
+        content = args.get("content") or ""
+        if tool_name == "write_file" and not content.strip():
             return True
-        if tool_name in ("write_file", "edit_file") and _is_sensitive_path(args.get("path", "")):
+        path_val = args.get("path") or ""
+        if tool_name in ("write_file", "edit_file") and _is_sensitive_path(path_val):
             logger.warning(
                 "Sensitive path write: tool=%s path=%r — requesting approval (issue #002)",
-                tool_name, args.get("path", ""),
+                tool_name, path_val,
             )
             return True
         return False
@@ -607,9 +614,16 @@ def needs_approval(tool_name: str, args: dict) -> bool:
     if tool_name in REQUIRE_APPROVAL_TOOLS:
         return True
 
+    # AUDIT_V1.8 #R201 (follow-up de #001): mesma classe de crash null-from-provider
+    # se aplicava a execute_shell.command / execute_pipeline.pipeline /
+    # git_operation.action. `args.get("X", "")` so cai no default quando a key
+    # esta ausente — provider emitindo `{"command": null}` retorna None e
+    # `is_safe_shell_command(None)` → `re.search(None)` → TypeError. Mesmo
+    # padrao `args.get("X") or ""` aplicado em todos os sites.
+
     # execute_shell: auto-approve safe commands (no &&, ||, ;)
     if tool_name == "execute_shell":
-        command = args.get("command", "")
+        command = args.get("command") or ""
         if is_safe_shell_command(command):
             logger.info(f"Auto-approve safe shell: {command[:80]}")
             return False
@@ -617,7 +631,7 @@ def needs_approval(tool_name: str, args: dict) -> bool:
 
     # execute_pipeline: auto-approve if all commands are safe (allows &&, ||, ;)
     if tool_name == "execute_pipeline":
-        pipeline = args.get("pipeline", "")
+        pipeline = args.get("pipeline") or ""
         if _is_safe_pipeline(pipeline):
             logger.info(f"Auto-approve safe pipeline: {pipeline[:80]}")
             return False
@@ -625,7 +639,7 @@ def needs_approval(tool_name: str, args: dict) -> bool:
 
     # git_operation: read-only auto-approved, write needs approval
     if tool_name == "git_operation":
-        action = args.get("action", "")
+        action = args.get("action") or ""
         if action in _SAFE_GIT_ACTIONS:
             return False
         if action in _AUTO_GIT_ACTIONS:
@@ -634,7 +648,16 @@ def needs_approval(tool_name: str, args: dict) -> bool:
 
     # http_request: GET/HEAD/OPTIONS auto-approved
     if tool_name == "http_request":
-        method = args.get("method", "GET").upper()
+        # AUDIT_V1.8 #001 + #R201: tres casos distintos:
+        #   - key ausente → default GET (auto-approve, comportamento legacy)
+        #   - key presente com null → mesmo path do default (evita None.upper crash)
+        #   - key presente com "" → preserva safe-by-default (require approval)
+        # O fix anterior de #001 fazia `or "GET"` que tambem coercia ""→GET,
+        # silenciosamente flipando safe-by-default. #R201 restaura o invariante.
+        if "method" not in args or args["method"] is None:
+            method = "GET"
+        else:
+            method = str(args["method"]).upper()
         if method in ("GET", "HEAD", "OPTIONS"):
             return False
         return True

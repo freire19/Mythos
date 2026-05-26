@@ -330,8 +330,21 @@ def _hard_truncate(
     tool responses correspondentes (DL022: tail `[user, assistant.tc]`
     causava HTTP 400 porque tool_calls sem responses quebram a API).
     """
+    # AUDIT_V1.8 #R203: guard contra messages=[] precisa proteger AMBOS
+    # `sys_msg = messages[0]` (linha 333 antiga, crashava com IndexError) E
+    # `tail_source = messages[1:]`. A versao anterior so guardava a segunda,
+    # criando guard inconsistente que mascarava o crash da primeira.
+    if not messages:
+        return []
     sys_msg = messages[0]
-    tail = list(messages[-keep_recent:]) if keep_recent > 0 else []
+    # AUDIT_V1.8 #019: `messages[-keep_recent:]` em listas com `len <= keep_recent`
+    # retorna a lista inteira, incluindo `messages[0]` (system). Apos
+    # `result = [sys_msg] + tail`, o system aparecia duplicado — em Anthropic
+    # (que concatena system parts com \n\n no adapter) viravam instrucoes
+    # dobradas e respostas erraticas (saudacoes repetidas, regras conflitantes).
+    # Slice a partir de `messages[1:]` exclui o system explicitamente.
+    tail_source = messages[1:]
+    tail = list(tail_source[-keep_recent:]) if keep_recent > 0 else []
     # 1. Drop tool messages orfas do INICIO da tail.
     while tail and tail[0].get("role") == "tool":
         tail.pop(0)
@@ -431,6 +444,13 @@ async def compress_context(
                 f"tokens ({len(messages) - len(new_messages)} messages dropped)"
             )
             messages[:] = new_messages
+            # AUDIT_V1.8 #018: sem reset apos hard-truncate, o contador fica
+            # >= threshold para sempre. Toda compressao subsequente cai aqui
+            # mesmo apos o LLM voltar a funcionar — silently degrada a sessao
+            # ate o final. Reset garante que apenas uma janela transitoria de
+            # falha dispara hard-truncate; o proximo summary com sucesso volta
+            # ao path normal.
+            _compress_consecutive_failures.set(0)
             return messages
         logger.warning(
             f"Compression produced empty summary — skipping "

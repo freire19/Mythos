@@ -27,7 +27,7 @@ from ._http_singleton import LoopAwareClient
 from ._rate_limiter import acquire_llm_token as _rate_limit_acquire
 
 from .config import HTTPX_LIMITS_LLM, LLM_TIMEOUT, RETRY
-from .llm import DsmlStripper, _calc_backoff
+from .llm import DsmlStripper, _StreamAccumulator, _calc_backoff
 
 logger = logging.getLogger(__name__)
 
@@ -217,7 +217,7 @@ class _AnthropicStreamState:
     )
 
     def __init__(self) -> None:
-        self.accumulated_content = ""
+        self.accumulated_content = _StreamAccumulator()
         self.blocks: dict[int, dict] = {}
         self.dsml_stripper = DsmlStripper()
         # Anthropic emits input_tokens in `message_start` and final
@@ -384,7 +384,7 @@ async def stream_anthropic(
 
                     emit = _apply_anthropic_event(event, state)
                     if emit:
-                        state.accumulated_content += emit
+                        state.accumulated_content.add(emit)
                         state.yielded_any = True
                         yield {"type": "content_token", "token": emit}
                     if state.stopped:
@@ -393,7 +393,7 @@ async def stream_anthropic(
             # Drain any unclosed `<…` tail held back during streaming.
             tail = state.dsml_stripper.flush()
             if tail:
-                state.accumulated_content += tail
+                state.accumulated_content.add(tail)
                 state.yielded_any = True
                 yield {"type": "content_token", "token": tail}
 
@@ -436,7 +436,7 @@ async def stream_anthropic(
 
     yield {
         "type": "final",
-        "content": state.accumulated_content,
+        "content": state.accumulated_content.get(),
         "tool_calls": _collect_tool_calls(state.blocks),
         "error": None,
         "usage": state.last_usage or None,

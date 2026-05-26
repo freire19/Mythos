@@ -40,12 +40,7 @@ from .loop import (
     _CYCLE_WINDOW,
     _detect_loop,
     _LOOP_DETECT_MIN_CALLS,
-    _LOOP_DETECT_MIN_ITER,
-    _MAX_REPEAT_CALLS,
     _result_preview,
-    _SIMILAR_REPEAT_CALLS,
-    _SIMILARITY_THRESHOLD,
-    _STALE_WINDOW,
 )
 
 logger = logging.getLogger(__name__)
