@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.22.2](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.22.1...alpha-code-v1.22.2) (2026-05-26)
+
+
+### Bug Fixes
+
+* close 8 AUDIT_V1.8 issues — 3 highs + 5 mediums ([dbc0736](https://github.com/freire19/Alpha_Code/commit/dbc0736edf18fbb42516762bda667d2d7cd593e6))
+
 ## [1.22.1](https://github.com/freire19/Alpha_Code/compare/alpha-code-v1.22.0...alpha-code-v1.22.1) (2026-05-22)
 
 
