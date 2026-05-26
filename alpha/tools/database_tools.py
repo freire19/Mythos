@@ -196,9 +196,31 @@ def _is_dangerous_query(sql: str) -> str | None:
             if c in ("'", '"'):
                 in_string, quote_char = True, c
             elif c == ";" and i < n - 1:
-                remaining = stripped[i + 1 :].strip()
-                if remaining and not remaining.startswith("--"):
-                    return "Multi-statement queries bloqueadas por segurança"
+                remaining = stripped[i + 1:].strip()
+                if not remaining:
+                    i += 1
+                    continue
+                # AUDIT_V1.8 #009: comentario `--` apos `;` mascara
+                # multi-statement no detector. `WHERE 1; -- comment\nDROP t`
+                # passa porque remaining.startswith("--") → True.
+                # Precisa pular a linha do comentario e reavaliar.
+                if remaining.startswith("--"):
+                    nl = remaining.find("\n")
+                    after = remaining[nl + 1:].strip() if nl != -1 else ""
+                    if after:
+                        return "Multi-statement queries bloqueadas por segurança"
+                    i += 1
+                    continue
+                if remaining.startswith("/*"):
+                    end = remaining.find("*/")
+                    if end == -1:
+                        return "Multi-statement com block-comment nao-terminado"
+                    after = remaining[end + 2:].strip()
+                    if after:
+                        return "Multi-statement queries bloqueadas por segurança"
+                    i += 1
+                    continue
+                return "Multi-statement queries bloqueadas por segurança"
         else:
             # Dentro de string: doubled-quote escapa, qualquer outra ocorrencia
             # da mesma quote fecha. Backslash NAO escapa (SQL standard).

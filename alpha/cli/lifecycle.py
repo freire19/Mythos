@@ -21,7 +21,8 @@ from typing import Callable
 from alpha import hooks
 from alpha.display import cleanup_indicator
 from alpha.mcp import shutdown_mcp_servers
-from alpha.repl_input import cleanup_temp_images
+# AUDIT_V1.8 #043: cleanup_temp_images import movido para dentro de
+# install_lifecycle_hooks() — prompt_toolkit so carrega em modo REPL.
 
 
 def _stderr(msg: str) -> None:
@@ -77,6 +78,31 @@ def _shutdown_mcp_servers() -> None:
     _safe_shutdown("shutdown_mcp_servers", shutdown_mcp_servers)
 
 
+def _shutdown_pg_pools() -> None:
+    """atexit hook: close any open PostgreSQL connection pools.
+
+    AUDIT_V1.8 #030: _close_pg_pools era definida mas nunca chamada —
+    pools ficavam abertos ate o processo morrer, gerando warnings no
+    lado do PG sobre client disconnect sem proper shutdown.
+    """
+    try:
+        from alpha.tools.database_tools import _close_pg_pools
+
+        try:
+            asyncio.get_running_loop()
+            new_loop = asyncio.new_event_loop()
+            try:
+                new_loop.run_until_complete(_close_pg_pools())
+            finally:
+                new_loop.close()
+        except RuntimeError:
+            asyncio.run(_close_pg_pools())
+    except ImportError:
+        pass  # asyncpg nao instalado, sem pools pra fechar
+    except Exception as e:
+        _stderr(f"shutdown_pg_pools: {type(e).__name__}: {e}")
+
+
 def _fire_on_stop() -> None:
     """atexit hook: fire user-defined on_stop hooks."""
     _safe_shutdown(
@@ -119,9 +145,12 @@ def install_lifecycle_hooks() -> None:
     global _INSTALLED
     if _INSTALLED:
         return
+    # AUDIT_V1.8 #043: prompt_toolkit so carrega em modo REPL.
+    from alpha.repl_input import cleanup_temp_images
     atexit.register(_fire_on_stop)
     atexit.register(_shutdown_browser_session)
     atexit.register(_shutdown_mcp_servers)
+    atexit.register(_shutdown_pg_pools)
     atexit.register(cleanup_temp_images)
     # atexit runs hooks in reverse-registration order, so registering
     # cleanup_indicator last means it fires first — restoring the

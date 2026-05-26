@@ -603,6 +603,10 @@ async def _execute_sequential(
                 await asyncio.to_thread(approval_callback, tool_name, args)
                 if approval_callback else False
             )
+            # AUDIT_V1.8 #002: record_approval ausente no path sequencial.
+            # O path paralelo (linha 506) ja chama — o sequencial nao,
+            # subestimando drasticamente as estatisticas de aprovacao.
+            record_approval(approved)
             if not approved:
                 result = {"skipped": True, "reason": "User denied this action"}
                 yield _record_skip(tc, tool_name, result, messages)

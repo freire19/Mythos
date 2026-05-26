@@ -260,6 +260,42 @@ def _calc_backoff(attempt: int, retry_after: float | None = None) -> float:
 # in units that don't touch the network and can be unit-tested directly.
 
 
+class _StreamAccumulator:
+    """String accumulator que evita O(N²) `+=` em content grande.
+
+    AUDIT_V1.8 #042: `state.accumulated_content += chunk` em 400KB de
+    response custa 50-200ms CPU (copia O(N) por chunk). Lista interna
+    + join so no final corta pra O(total_len) no final.
+    """
+
+    __slots__ = ("_parts", "_len")
+
+    def __init__(self) -> None:
+        self._parts: list[str] = []
+        self._len = 0
+
+    def add(self, text: str) -> None:
+        self._parts.append(text)
+        self._len += len(text)
+
+    def get(self) -> str:
+        return "".join(self._parts)
+
+    def __bool__(self) -> bool:
+        return self._len > 0
+
+    def __len__(self) -> int:
+        return self._len
+
+    def cap(self, max_len: int) -> None:
+        """Drop oldest parts until total length fits max_len."""
+        if self._len <= max_len:
+            return
+        joined = "".join(self._parts)
+        self._parts = [joined[-max_len:]]
+        self._len = max_len
+
+
 class _StreamState:
     """Per-attempt accumulators for one streaming call.
 
@@ -279,14 +315,9 @@ class _StreamState:
     )
 
     def __init__(self) -> None:
-        self.accumulated_content = ""
+        self.accumulated_content = _StreamAccumulator()
         self.raw_content_for_recovery = ""
-        # `reasoning_content` e o canal de "thinking" do DeepSeek-reasoner
-        # (e tambem dos `gpt-oss` no Ollama). A API exige que o campo
-        # acumulado da resposta seja devolvido na turn seguinte, ou
-        # responde HTTP 400. Provedores que nao usam thinking nunca emitem
-        # o campo, entao guardamos None e nao adicionamos ao message dict.
-        self.accumulated_reasoning = ""
+        self.accumulated_reasoning = _StreamAccumulator()
         self.tool_calls_acc: dict[int, dict] = {}
         # Capture the last non-empty finish_reason. Gemini emits diagnostic
         # values (e.g. "function_call_filter: MALFORMED_FUNCTION_CALL")
@@ -402,7 +433,7 @@ def _process_chunk(data: dict, state: _StreamState) -> str | None:
                 state.raw_content_for_recovery = state.raw_content_for_recovery[-_RAW_RECOVERY_CAP:]
         safe = state.dsml_stripper.feed(content)
         if safe:
-            state.accumulated_content += safe
+            state.accumulated_content.add(safe)
             emit = safe
 
     # Thinking tokens (DeepSeek-reasoner). Acumulados silenciosamente
@@ -411,9 +442,8 @@ def _process_chunk(data: dict, state: _StreamState) -> str | None:
     # turn — reasoning can reach 100KB+ and bloats context invisibly.
     reasoning = delta.get("reasoning_content", "")
     if reasoning:
-        state.accumulated_reasoning += reasoning
-        if len(state.accumulated_reasoning) > 50_000:
-            state.accumulated_reasoning = state.accumulated_reasoning[-50_000:]
+        state.accumulated_reasoning.add(reasoning)
+        state.accumulated_reasoning.cap(50_000)
 
     if delta.get("tool_calls"):
         for tc_delta in delta["tool_calls"]:
@@ -437,9 +467,9 @@ def _build_final_with_tool_calls(state: _StreamState) -> dict:
     ]
     return {
         "type": "final",
-        "content": state.accumulated_content,
+        "content": state.accumulated_content.get(),
         "tool_calls": tool_calls,
-        "reasoning_content": state.accumulated_reasoning or None,
+        "reasoning_content": state.accumulated_reasoning.get() or None,
         "error": None,
         "usage": state.last_usage,
     }
@@ -455,10 +485,10 @@ def _build_final_with_recovery(state: _StreamState, provider: str, model_name: s
     diagnostic finish_reason, surface that as an error so the user sees
     why the turn went silent.
     """
-    reasoning_out = state.accumulated_reasoning or None
+    reasoning_out = state.accumulated_reasoning.get() or None
     recovered = (
         _recover_tool_call_from_dsml(state.raw_content_for_recovery)
-        or _recover_tool_call_from_content(state.accumulated_content)
+        or _recover_tool_call_from_content(state.accumulated_content.get())
     )
     if recovered is not None:
         logger.info(
@@ -505,7 +535,7 @@ def _build_final_with_recovery(state: _StreamState, provider: str, model_name: s
         }
     return {
         "type": "final",
-        "content": state.accumulated_content,
+        "content": state.accumulated_content.get(),
         "tool_calls": [],
         "reasoning_content": reasoning_out,
         "error": None,
@@ -664,7 +694,7 @@ async def stream_chat_with_tools(
             # Drain any unclosed `<…` tail held back during streaming.
             tail = state.dsml_stripper.flush()
             if tail:
-                state.accumulated_content += tail
+                state.accumulated_content.add(tail)
                 yield {"type": "content_token", "token": tail}
 
             # Success — build final event and return.
@@ -690,7 +720,7 @@ async def stream_chat_with_tools(
             logger.error("%s after %d attempts", last_error, max_retries + 1)
             yield {
                 "type": "final",
-                "content": state.accumulated_content,
+                "content": state.accumulated_content.get(),
                 "tool_calls": [],
                 "error": f"{last_error} after {max_retries + 1} attempts",
             }
