@@ -36,10 +36,9 @@ from __future__ import annotations
 import os
 import shutil
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Literal
 
-from .settings import find_config_file, read_json
+from .settings import JSON_INVALID, find_config_file, read_json_or_invalid
 
 SandboxTool = Literal["auto", "firejail", "bubblewrap"]
 
@@ -57,6 +56,9 @@ class SandboxConfig:
     tool: SandboxTool = "auto"
     deny_network: bool = True
     extra_args: list[str] = field(default_factory=list)
+    # #D807: settings.json exists but could not be parsed — the sandbox state
+    # is unknowable, so treat it as enabled-but-broken (fail-closed).
+    config_error: str = ""
 
 
 def load_config() -> SandboxConfig:
@@ -67,8 +69,22 @@ def load_config() -> SandboxConfig:
     set to a truthy value; otherwise file wins.
     """
     path = find_config_file("settings.json")
-    data = read_json(path, default={}) or {}
-    raw = data.get("sandbox") or {}
+    data = read_json_or_invalid(path, default={})
+    if data is JSON_INVALID:
+        return SandboxConfig(
+            enabled=True,
+            config_error=(
+                f"settings.json at {path} exists but could not be parsed, so the "
+                "sandbox opt-in state is unknowable — refusing to run unsandboxed "
+                "(fail-closed); fix the JSON syntax or remove the file"
+            ),
+        )
+    data = data or {}
+    if not isinstance(data, dict):
+        data = {}
+    raw = data.get("sandbox")
+    if not isinstance(raw, dict):
+        raw = {}
 
     env_force = os.environ.get("ALPHA_SANDBOX", "").lower() in ("1", "true", "yes")
     enabled = bool(raw.get("enabled", False)) or env_force
@@ -76,19 +92,27 @@ def load_config() -> SandboxConfig:
     if tool not in ("auto", "firejail", "bubblewrap"):
         tool = "auto"
 
+    extra_args = raw.get("extra_args")
+    if not isinstance(extra_args, list):
+        extra_args = []
+
     return SandboxConfig(
         enabled=enabled,
         tool=tool,  # type: ignore[arg-type]
         deny_network=bool(raw.get("deny_network", True)),
-        extra_args=list(raw.get("extra_args") or []),
+        extra_args=list(extra_args),
     )
 
 
 def resolve_tool(preferred: SandboxTool) -> tuple[str, str] | None:
     """Return (tool_name, absolute_path) for the requested sandbox backend.
 
-    `auto` tries firejail first (simpler config), bubblewrap second.
-    Returns None when no backend is installed.
+    SECURITY_TIER0: `auto` now prefers bubblewrap over firejail. bwrap gives
+    real filesystem containment (`--ro-bind / /` + a writable workspace bind),
+    while firejail — even with the home-containment flags below — starts from a
+    fully-visible host filesystem and can only restrict it best-effort. When
+    both are installed and the user hasn't pinned one, the stronger backend
+    wins. Returns None when no backend is installed.
     """
     if preferred == "firejail":
         path = shutil.which("firejail")
@@ -96,13 +120,13 @@ def resolve_tool(preferred: SandboxTool) -> tuple[str, str] | None:
     if preferred == "bubblewrap":
         path = shutil.which("bwrap")
         return ("bubblewrap", path) if path else None
-    # auto
-    fj = shutil.which("firejail")
-    if fj:
-        return ("firejail", fj)
+    # auto — prefer bubblewrap (stronger containment), fall back to firejail.
     bw = shutil.which("bwrap")
     if bw:
         return ("bubblewrap", bw)
+    fj = shutil.which("firejail")
+    if fj:
+        return ("firejail", fj)
     return None
 
 
@@ -112,14 +136,31 @@ def _firejail_prefix(binary: str, *, cwd: str | None, cfg: SandboxConfig) -> lis
     `--quiet` suppresses firejail's own banner so the tool output stays clean.
     `--private-tmp` gives the sandboxed process its own /tmp without exposing
     the host's; legitimate /tmp usage still works (compilers, pip).
-    `--private-cwd` is intentionally NOT set — we want the agent to see real
-    files under the workspace. Network and filesystem-write paths are the
-    risks worth blocking by default.
+
+    SECURITY_TIER0 — filesystem containment. The previous prefix set only
+    `--net=none --private-tmp`, leaving the sandboxed process with read/write
+    access to the entire `$HOME` (it could still read `~/.ssh/id_rsa` or plant
+    a payload in `~/.bashrc`), directly contradicting this module's docstring.
+    We now mount the home directory read-only and carve the workspace (`cwd`)
+    back to read-write, so a command can edit its project but can't touch the
+    rest of the user's files. Firejail applies `--read-write` after
+    `--read-only`, so the later workspace carve-out wins.
+
+    This is best-effort: firejail starts from a fully-visible host filesystem,
+    so a workspace outside `$HOME` (or reads under `/etc`) are not covered as
+    tightly as bubblewrap's `--ro-bind / /`. `resolve_tool` prefers bubblewrap
+    in `auto` for exactly this reason; firejail is the fallback.
     """
     args = [binary, "--quiet"]
     if cfg.deny_network:
         args.append("--net=none")
     args.append("--private-tmp")
+    home = os.path.expanduser("~")
+    if home and os.path.isdir(home):
+        args.append(f"--read-only={home}")
+    if cwd:
+        # Workspace stays writable; carved out of the read-only home above.
+        args.append(f"--read-write={os.path.abspath(cwd)}")
     args.extend(cfg.extra_args)
     args.append("--")
     return args
@@ -168,6 +209,8 @@ def wrap_command(
     is installed, raises `SandboxUnavailableError`.
     """
     cfg = cfg or load_config()
+    if cfg.config_error:
+        raise SandboxUnavailableError(cfg.config_error)
     if not cfg.enabled:
         return list(cmd_parts)
 
@@ -187,14 +230,6 @@ def wrap_command(
     return prefix + list(cmd_parts)
 
 
-def is_enabled() -> bool:
-    """Cheap predicate for tools that want to log/branch on sandbox state.
-
-    Reads config each call; settings.json is small and the call sites
-    here are tool-invocation cold paths, not hot loops."""
-    return load_config().enabled
-
-
 def describe() -> str:
     """One-line human description of the active sandbox state.
 
@@ -202,6 +237,8 @@ def describe() -> str:
     user has sandbox enabled, so the constraints are visible up front.
     """
     cfg = load_config()
+    if cfg.config_error:
+        return f"sandbox: BROKEN CONFIG — {cfg.config_error}"
     if not cfg.enabled:
         return "sandbox: disabled"
     resolved = resolve_tool(cfg.tool)

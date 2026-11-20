@@ -87,17 +87,31 @@ def test_resolve_tool_firejail_missing(monkeypatch):
     assert sandbox.resolve_tool("firejail") is None
 
 
-def test_resolve_tool_auto_prefers_firejail(monkeypatch):
+def test_resolve_tool_auto_prefers_bubblewrap(monkeypatch):
+    # SECURITY_TIER0: when both are installed, `auto` prefers bubblewrap —
+    # it gives real filesystem containment (`--ro-bind / /`) while firejail
+    # only restricts a fully-visible host FS best-effort.
     monkeypatch.setattr(
         sandbox.shutil,
         "which",
         lambda n: {"firejail": "/u/bin/firejail", "bwrap": "/u/bin/bwrap"}.get(n),
     )
     name, _ = sandbox.resolve_tool("auto")
+    assert name == "bubblewrap"
+
+
+def test_resolve_tool_auto_falls_back_to_firejail(monkeypatch):
+    # Only firejail installed → auto uses it.
+    monkeypatch.setattr(
+        sandbox.shutil,
+        "which",
+        lambda n: "/u/bin/firejail" if n == "firejail" else None,
+    )
+    name, _ = sandbox.resolve_tool("auto")
     assert name == "firejail"
 
 
-def test_resolve_tool_auto_falls_back_to_bwrap(monkeypatch):
+def test_resolve_tool_auto_bwrap_only(monkeypatch):
     monkeypatch.setattr(
         sandbox.shutil, "which", lambda n: "/u/bin/bwrap" if n == "bwrap" else None
     )
@@ -136,6 +150,22 @@ def test_wrap_command_firejail_prefix(monkeypatch):
     assert "--private-tmp" in wrapped
     # The actual command must be at the tail.
     assert wrapped[-2:] == ["git", "status"]
+
+
+def test_wrap_command_firejail_contains_filesystem(monkeypatch, tmp_path):
+    # SECURITY_TIER0: firejail must mount $HOME read-only and carve the
+    # workspace back to read-write, so a command can't read ~/.ssh or plant
+    # in ~/.bashrc.
+    monkeypatch.setattr(
+        sandbox, "resolve_tool", lambda _: ("firejail", "/usr/bin/firejail")
+    )
+    home = str(tmp_path)
+    monkeypatch.setattr(sandbox.os.path, "expanduser", lambda p: home if p == "~" else p)
+    monkeypatch.setattr(sandbox.os.path, "isdir", lambda p: True)
+    cfg = sandbox.SandboxConfig(enabled=True, tool="firejail")
+    wrapped = sandbox.wrap_command(["ls"], cwd=f"{home}/proj", cfg=cfg)
+    assert f"--read-only={home}" in wrapped
+    assert f"--read-write={home}/proj" in wrapped
 
 
 def test_wrap_command_firejail_allows_network_when_configured(monkeypatch):
@@ -191,7 +221,7 @@ def test_wrap_command_bwrap_no_cwd(monkeypatch):
     assert "--bind" not in wrapped
 
 
-# ─── describe / is_enabled ───────────────────────────────────────
+# ─── describe ────────────────────────────────────────────────────
 
 
 def test_describe_disabled(tmp_path, monkeypatch):
@@ -218,13 +248,8 @@ def test_describe_enabled_but_missing(tmp_path, monkeypatch):
     assert "NO BACKEND" in out
 
 
-def test_is_enabled_reflects_config(tmp_path, monkeypatch):
-    monkeypatch.delenv("ALPHA_SANDBOX", raising=False)
-    monkeypatch.chdir(tmp_path)
-    assert sandbox.is_enabled() is False
-
-    monkeypatch.setenv("ALPHA_SANDBOX", "1")
-    assert sandbox.is_enabled() is True
+# #DM073: `sandbox.is_enabled()` foi removido (dead code — nenhum caller
+# de produção; o estado equivale a `load_config().enabled`, coberto acima).
 
 
 # ─── integration with run_subprocess_safe ────────────────────────

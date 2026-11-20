@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import time
 from pathlib import Path
 
@@ -63,7 +62,10 @@ def maybe_install() -> Path | None:
     global _installed
     if _installed:
         return None
-    if os.environ.get("ALPHA_JSON_LOGS", "").lower() not in ("1", "true", "yes"):
+    # #DM061: vocabulário canônico (aceita também "on" e tolera espaços,
+    # como todos os outros flags booleanos).
+    from .config import env_bool
+    if not env_bool("ALPHA_JSON_LOGS", default=False):
         return None
     from .settings import alpha_user_dir
     log_dir = alpha_user_dir("logs")

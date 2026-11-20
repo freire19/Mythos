@@ -38,7 +38,7 @@ _PROVIDERS = [
 def step_provider(current: dict[str, str]) -> dict:
     default = current.get("ALPHA_PROVIDER", "deepseek")
     choice = ask_choice("Which LLM provider?", [p["id"] for p in _PROVIDERS], default)
-    return next(p for p in _PROVIDERS if p["id"] == choice)
+    return next((p for p in _PROVIDERS if p["id"] == choice), _PROVIDERS[0])
 
 
 def step_api_key(provider: dict, current: dict[str, str]) -> str | None:

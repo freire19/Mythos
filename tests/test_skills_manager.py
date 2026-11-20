@@ -263,6 +263,64 @@ def test_update_reinstalls_from_recorded_source(tmp_path, user_skills_dir):
     assert (user_skills_dir / "myskill" / "marker.txt").read_text() == "updated"
 
 
+def test_install_name_override_persisted_in_index(tmp_path, user_skills_dir):
+    # #010: the override must be recorded so update can reuse it.
+    src = _write_skill(tmp_path / "src" / "original", "original")
+    manager.install(str(src), name_override="renamed")
+    index = manager._load_index()
+    assert index["renamed"]["name_override"] == "renamed"
+
+
+def test_update_preserves_name_override_no_orphan(tmp_path, user_skills_dir):
+    # #010 regression: a skill installed under a custom --name must update
+    # in place, NOT re-appear under the source's natural name (orphan dup).
+    src = _write_skill(tmp_path / "src" / "original", "original")
+    manager.install(str(src), name_override="renamed")
+
+    (src / "marker.txt").write_text("v2", encoding="utf-8")
+    result = manager.update("renamed")
+
+    # Updated in place under the override name...
+    assert "renamed" in result.installed
+    assert (user_skills_dir / "renamed" / "marker.txt").read_text() == "v2"
+    # ...and NO orphan duplicate under the natural name.
+    assert not (user_skills_dir / "original").exists()
+    assert "original" not in manager._load_index()
+
+
+def test_update_without_override_uses_natural_name(tmp_path, user_skills_dir):
+    # Entries with no recorded override keep the pre-fix behaviour.
+    src = _write_skill(tmp_path / "plain", "plain")
+    manager.install(str(src))
+    assert "name_override" not in manager._load_index()["plain"]
+    result = manager.update("plain")
+    assert "plain" in result.installed
+
+
+def test_update_records_oserror_without_aborting(tmp_path, user_skills_dir, monkeypatch):
+    # #016: a FS error (clone/copytree/rmtree) during update must be recorded
+    # per-skill instead of propagating and aborting the remaining packages.
+    a = _write_skill(tmp_path / "src" / "a", "a")
+    b = _write_skill(tmp_path / "src" / "b", "b")
+    manager.install(str(a))
+    manager.install(str(b))
+
+    calls = {"n": 0}
+    real_install = manager.install
+
+    def flaky_install(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise OSError("disk full")
+        return real_install(*args, **kwargs)
+
+    monkeypatch.setattr(manager, "install", flaky_install)
+    result = manager.update()  # update ALL
+    # First skill's OSError captured as an error, second still updated.
+    assert any("disk full" in e for e in result.errors)
+    assert result.installed  # the non-failing skill went through
+
+
 def test_update_unknown_name_errors(user_skills_dir):
     with pytest.raises(manager.SkillInstallError, match="not tracked"):
         manager.update("never-installed")

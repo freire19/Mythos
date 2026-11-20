@@ -6,7 +6,6 @@ injection; we don't spawn the real binaries in CI.
 
 from __future__ import annotations
 
-import pytest
 
 from alpha import clipboard
 

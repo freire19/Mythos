@@ -14,7 +14,6 @@ does nothing — it's the approval prompt that gates execution.
 
 from __future__ import annotations
 
-import os
 from typing import Any
 
 from . import ToolCategory, ToolDefinition, ToolSafety, register_tool
@@ -93,9 +92,8 @@ async def _pre_flight(
     model: str | None = None,
 ) -> dict[str, Any]:
     """Emit a strategy approval card with cost + time estimates."""
-    from ..config import get_provider_config
+    from ..config import DEFAULT_PROVIDER, get_provider_config
     from ..preflight import (
-        env_float,
         estimate_step_cost,
         estimate_step_time,
     )
@@ -112,7 +110,10 @@ async def _pre_flight(
     # Best-effort model resolution — the worst case is unknown-model →
     # $0.00 surfaced as `~$?` on the card.
     if not model:
-        provider = os.environ.get("ALPHA_PROVIDER", "deepseek")
+        # #DM071: fonte única do default de provider é config.DEFAULT_PROVIDER
+        # (que já honra ALPHA_PROVIDER) — nada de re-ler o env com o literal
+        # "deepseek" duplicado aqui.
+        provider = DEFAULT_PROVIDER
         try:
             model = get_provider_config(provider).get("model", "")
         except Exception:
@@ -160,21 +161,12 @@ async def _pre_flight(
         if approach:
             normalized_alts.append({"approach": approach, "why_rejected": why_rejected})
 
-    # Per-turn USD ceiling. Unset = no cap. When the estimate exceeds
-    # the cap, surface a structured refusal the agent loop can act on.
-    cap = env_float("ALPHA_MAX_TURN_COST_USD")
-    if cap is not None and estimated_cost_usd > cap:
-        return {
-            "error": "budget_cap_exceeded",
-            "estimated_cost_usd": round(estimated_cost_usd, 4),
-            "cap_usd": cap,
-            "message": (
-                f"Pre-flight estimated ${estimated_cost_usd:.4f} but "
-                f"ALPHA_MAX_TURN_COST_USD={cap} — turn aborted. Split "
-                f"the task, raise the cap, or remove steps."
-            ),
-        }
-
+    # AUDIT_V2.3 #201: o cap por-turno NÃO é mais enforced aqui — chamar
+    # `pre_flight` é discricionário do modelo e `args_preview` é controlado
+    # por ele (dava para subestimar). O enforcement real (spend acumulado +
+    # estimativa do batch sobre os arguments reais) vive no loop do
+    # `run_agent`, espelhando o cap de sessão. O card continua mostrando a
+    # estimativa ao usuário.
     return {
         "approved": True,
         "goal": goal.strip(),

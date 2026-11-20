@@ -6,16 +6,14 @@ metodo HTTP invalido, timeout, fallback urllib, e retry em metodos seguros.
 
 from __future__ import annotations
 
-import asyncio
 import sys
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
 from alpha.net_utils import is_private_ip_address, validate_url
 from alpha.tools.network_tools import (
     _ALLOWED_METHODS,
-    _MAX_RESPONSE_SIZE,
     _http_request,
     _http_request_with_retry,
     _rewrite_url_with_ip,
@@ -135,7 +133,7 @@ class TestValidateUrl:
 class TestHttpRequestInvalidMethod:
     @pytest.mark.anyio
     async def test_method_not_allowed(self):
-        result = await _http_request("https://example.com", method="PATCH")
+        await _http_request("https://example.com", method="PATCH")
         # PATCH is ALLOWED — let's verify it's in the set.
         assert "PATCH" in _ALLOWED_METHODS
 

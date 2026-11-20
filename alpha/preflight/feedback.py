@@ -64,9 +64,26 @@ def _read_entries(limit: int | None = None) -> list[dict[str, Any]]:
     the log is append-only but a crash mid-write could leave a bad line.
     `limit` returns the most-recent N entries; None returns all.
     """
-    if not _FEEDBACK_PATH.exists():
+    rotated = _FEEDBACK_PATH.with_suffix(".jsonl.1")
+    if not _FEEDBACK_PATH.exists() and not rotated.exists():
         return []
     entries: list[dict[str, Any]] = []
+    # AUDIT_V1.8 #021: _maybe_rotate move o log ativo pra .jsonl.1
+    # quando excede 2MB. _read_entries so lia o ativo, perdendo o
+    # historico rotacionado. Ler .jsonl.1 antes mantem ordem cronologica.
+    if rotated.exists():
+        try:
+            with rotated.open("r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        entries.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        continue
+        except OSError as e:
+            logger.warning("preflight_feedback rotated read failed: %s", e)
     try:
         with _FEEDBACK_PATH.open("r", encoding="utf-8") as f:
             for line in f:

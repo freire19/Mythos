@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+import shlex
+import subprocess
 
 from alpha.display import C, c
 from alpha.memory import (
@@ -71,7 +73,18 @@ def _handle_memory(ctx: ReplContext, parts: list[str]) -> DispatchResult:
         if not p.exists():
             p.write_text("", encoding="utf-8")
         editor = os.environ.get("EDITOR") or os.environ.get("VISUAL") or "nano"
-        rc = os.system(f"{editor} {p!s}")
+        # #D130: run via subprocess (no shell) instead of os.system(f"...") —
+        # a compromised $EDITOR (e.g. "vi; rm -rf ~") would otherwise inject
+        # through /bin/sh. shlex.split honors legit editor args ("code --wait")
+        # while the path stays a separate argv entry, never a shell string.
+        try:
+            argv = shlex.split(editor) + [str(p)]
+        except ValueError:
+            argv = [editor, str(p)]
+        try:
+            rc = subprocess.run(argv).returncode
+        except (FileNotFoundError, OSError) as e:
+            rc = f"erro: {e}"
         print(f"  {c(C.GRAY, f'editor exit code: {rc} — memory file: {p}')}")
         return DispatchResult.CONTINUE
 

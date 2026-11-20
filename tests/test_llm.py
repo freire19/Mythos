@@ -89,3 +89,21 @@ class TestBuildRequestExtraPayload:
     def test_empty_extra_payload_is_noop(self):
         _, payload = _build_request(**self._common(), extra_payload={})
         assert "thinking" not in payload
+
+
+class TestTransientHttpxErrors:
+    def test_tuple_covers_previously_escaping_errors(self):
+        # #300: these are NOT subclasses of TimeoutException/ConnectionError/
+        # OSError — they escaped the OpenAI-path retry handler and crashed the
+        # whole CLI. The transient tuple must keep covering them.
+        import httpx
+
+        from alpha.llm import _TRANSIENT_HTTPX_ERRORS
+        for exc in (
+            httpx.ConnectError,
+            httpx.ReadError,
+            httpx.WriteError,
+            httpx.RemoteProtocolError,
+            httpx.PoolTimeout,
+        ):
+            assert issubclass(exc, _TRANSIENT_HTTPX_ERRORS), exc.__name__

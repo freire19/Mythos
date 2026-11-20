@@ -13,8 +13,6 @@ Cobre:
 
 from __future__ import annotations
 
-import inspect
-
 import pytest
 
 
@@ -88,45 +86,100 @@ class TestRuntimeEnvOverrides:
         assert get_subagent_allow() == frozenset()
 
 
-class TestRunSubagentReadsGetters:
-    """`_run_subagent` chama os getters runtime em vez de FEATURES dict.
-
-    #DM040 split: blocklist logic moved to `_resolve_subagent_blocklist`.
-    These tests now inspect that helper instead of `_run_subagent`.
+class TestResolveBlocklistBehavior:
+    """`_resolve_subagent_blocklist` compoe a blocklist a partir dos getters
+    runtime (policy/extra_block/allow). Em vez de grepar o source, exercitamos
+    a funcao com env controlada e checamos o set resultante — qualquer
+    regressao (cache import-time, override de allow furando anti-recursao, etc)
+    falha o teste.
     """
 
-    def test_run_subagent_calls_getters(self):
+    def test_reads_policy_getter_at_call_time(self, monkeypatch):
+        """strict (default, sem callback) bloqueia destrutivas; relaxed nao —
+        prova que o getter de policy e lido a cada call, nao congelado."""
+        from alpha.tools import delegate_tools
+        from alpha.tools.delegate_tools import SUBAGENT_DESTRUCTIVE_BLOCKLIST
+
+        monkeypatch.setenv("ALPHA_SUBAGENT_POLICY", "strict")
+        monkeypatch.delenv("ALPHA_SUBAGENT_EXTRA_BLOCK", raising=False)
+        monkeypatch.delenv("ALPHA_SUBAGENT_ALLOW", raising=False)
+        strict = delegate_tools._resolve_subagent_blocklist(None)
+        assert SUBAGENT_DESTRUCTIVE_BLOCKLIST <= strict
+
+        monkeypatch.setenv("ALPHA_SUBAGENT_POLICY", "relaxed")
+        relaxed = delegate_tools._resolve_subagent_blocklist(None)
+        assert not (SUBAGENT_DESTRUCTIVE_BLOCKLIST <= relaxed)
+
+    def test_reads_extra_block_getter_at_call_time(self, monkeypatch):
+        """Um nome em ALPHA_SUBAGENT_EXTRA_BLOCK aparece na blocklist —
+        e some quando a env muda, sem reload."""
         from alpha.tools import delegate_tools
 
-        src = inspect.getsource(delegate_tools._resolve_subagent_blocklist)
-        # Os 3 getters devem ser chamados.
-        assert "get_subagent_policy()" in src
-        assert "get_subagent_extra_block()" in src
-        assert "get_subagent_allow()" in src
+        monkeypatch.setenv("ALPHA_SUBAGENT_POLICY", "relaxed")
+        monkeypatch.delenv("ALPHA_SUBAGENT_ALLOW", raising=False)
 
-    def test_does_not_use_stale_feat_dict(self):
-        """Garante que o codigo NAO le mais via `feat.get("subagent_*")`,
-        evitando regressao silenciosa do cache import-time."""
+        monkeypatch.setenv("ALPHA_SUBAGENT_EXTRA_BLOCK", "read_file")
+        assert "read_file" in delegate_tools._resolve_subagent_blocklist(None)
+
+        monkeypatch.delenv("ALPHA_SUBAGENT_EXTRA_BLOCK", raising=False)
+        assert "read_file" not in delegate_tools._resolve_subagent_blocklist(None)
+
+    def test_reads_allow_getter_at_call_time(self, monkeypatch):
+        """ALPHA_SUBAGENT_ALLOW remove uma destrutiva da blocklist (strict),
+        provando que o getter de allow tambem e lido em runtime."""
         from alpha.tools import delegate_tools
 
-        src = inspect.getsource(delegate_tools._resolve_subagent_blocklist)
-        assert 'feat.get("subagent_policy"' not in src
-        assert 'feat.get("subagent_extra_block"' not in src
-        assert 'feat.get("subagent_allow"' not in src
+        monkeypatch.setenv("ALPHA_SUBAGENT_POLICY", "strict")
+        monkeypatch.delenv("ALPHA_SUBAGENT_EXTRA_BLOCK", raising=False)
 
-    def test_relaxed_policy_skips_destructive_blocklist(self):
+        monkeypatch.delenv("ALPHA_SUBAGENT_ALLOW", raising=False)
+        assert "execute_shell" in delegate_tools._resolve_subagent_blocklist(None)
+
+        monkeypatch.setenv("ALPHA_SUBAGENT_ALLOW", "execute_shell")
+        assert "execute_shell" not in delegate_tools._resolve_subagent_blocklist(None)
+
+    def test_relaxed_policy_skips_destructive_blocklist(self, monkeypatch):
+        from alpha.tools import delegate_tools
+        from alpha.tools.delegate_tools import SUBAGENT_DESTRUCTIVE_BLOCKLIST
+
+        monkeypatch.setenv("ALPHA_SUBAGENT_POLICY", "relaxed")
+        monkeypatch.delenv("ALPHA_SUBAGENT_EXTRA_BLOCK", raising=False)
+        monkeypatch.delenv("ALPHA_SUBAGENT_ALLOW", raising=False)
+
+        blocked = delegate_tools._resolve_subagent_blocklist(None)
+        # Nenhuma destrutiva sobra, mas anti-recursao continua.
+        assert SUBAGENT_DESTRUCTIVE_BLOCKLIST.isdisjoint(blocked)
+        assert {"delegate_task", "delegate_parallel"} <= blocked
+
+    def test_delegate_invariant_survives_allow_override(self, monkeypatch):
+        """Mesmo com allow incluindo delegate_*, anti-recursao permanece —
+        o override NAO pode habilitar recursao entre agentes."""
         from alpha.tools import delegate_tools
 
-        src = inspect.getsource(delegate_tools._resolve_subagent_blocklist)
-        assert 'policy != "relaxed"' in src or 'policy == "strict"' in src
+        monkeypatch.setenv("ALPHA_SUBAGENT_POLICY", "relaxed")
+        monkeypatch.delenv("ALPHA_SUBAGENT_EXTRA_BLOCK", raising=False)
+        monkeypatch.setenv(
+            "ALPHA_SUBAGENT_ALLOW", "delegate_task,delegate_parallel,delegate_consensus"
+        )
 
-    def test_delegate_invariant_preserved(self):
-        """Mesmo com allow incluindo delegate_*, anti-recursao permanece."""
+        blocked = delegate_tools._resolve_subagent_blocklist(None)
+        assert {"delegate_task", "delegate_parallel"} <= blocked
+
+    def test_strict_with_parent_callback_does_not_block_destructive(
+        self, monkeypatch
+    ):
+        """strict + callback presente: o callback decide por tool, entao a
+        blocklist NAO inclui as destrutivas (so anti-recursao)."""
         from alpha.tools import delegate_tools
+        from alpha.tools.delegate_tools import SUBAGENT_DESTRUCTIVE_BLOCKLIST
 
-        src = inspect.getsource(delegate_tools._resolve_subagent_blocklist)
-        # Conta ocorrencias — esperamos no minimo 2 (inicio + apos allow override).
-        assert src.count('"delegate_task", "delegate_parallel"') >= 2
+        monkeypatch.setenv("ALPHA_SUBAGENT_POLICY", "strict")
+        monkeypatch.delenv("ALPHA_SUBAGENT_EXTRA_BLOCK", raising=False)
+        monkeypatch.delenv("ALPHA_SUBAGENT_ALLOW", raising=False)
+
+        blocked = delegate_tools._resolve_subagent_blocklist(lambda *a, **kw: True)
+        assert SUBAGENT_DESTRUCTIVE_BLOCKLIST.isdisjoint(blocked)
+        assert {"delegate_task", "delegate_parallel"} <= blocked
 
 
 @pytest.mark.parametrize(

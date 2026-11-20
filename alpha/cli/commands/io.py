@@ -10,7 +10,6 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from alpha.attachments import build_user_content  # noqa: F401  — kept for back-compat
 from alpha.display import C, c, print_error
 
 from ._types import DispatchResult, ReplContext
@@ -110,8 +109,20 @@ def handle_audio(
         return DispatchResult.CONTINUE
 
     from alpha import audio as _audio
+    from alpha.tools.workspace import assert_within_workspace
 
     audio_path = Path(os.path.expanduser(parts[1]))
+    # #D143: /audio UPLOADS the file to an external service (Whisper), so —
+    # unlike /image and /pdf which process locally — a path outside the
+    # workspace is an exfiltration risk (e.g. `/audio ~/.ssh/id_rsa`). Confine
+    # it to the workspace; copy the file in if you really mean to send it.
+    ws_err = assert_within_workspace(audio_path.resolve())
+    if ws_err:
+        print_error(
+            f"audio: {ws_err}\n  /audio envia o arquivo para um serviço "
+            "externo (Whisper) — restrito ao workspace por segurança."
+        )
+        return DispatchResult.CONTINUE
     rest = user_input.split(maxsplit=2)
     question = rest[2] if len(rest) >= 3 else "Summarize this audio."
 

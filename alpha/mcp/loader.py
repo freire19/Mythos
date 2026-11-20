@@ -7,18 +7,32 @@ the second time. `shutdown_mcp_servers()` terminates all subprocesses.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import math
+import re
 import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import wait as _futures_wait
 from typing import Any
 
+import httpx
+
+from .._text_safety import strip_control_and_bidi
 from ..tools import ToolDefinition, ToolSafety, register_tool
 from .client import MCPClient, MCPError
 from .config import MCPServerConfig, load_mcp_config
+from .http_client import MCPAuthRequired, MCPHttpClient
 
 logger = logging.getLogger(__name__)
 
+# Ambos os transportes expõem a mesma superfície (duck-typed): start/stop/
+# initialize/list_tools/call_tool + .name/.tools.
+AnyMCPClient = MCPClient | MCPHttpClient
+
 TOOL_PREFIX = "mcp__"
-_active_clients: list[MCPClient] = []
+_active_clients: list[AnyMCPClient] = []
 _loaded = False
 
 # AUDIT_V1.8 #034: cap total para o handshake completo (start+initialize+
@@ -27,6 +41,13 @@ _loaded = False
 # o CLI por 60s+ (30s initialize + 30s list_tools) ou indefinidamente
 # (Popen sem timeout). Cap defensivo: 5 servers x 15s = 75s pior caso.
 _MCP_STARTUP_TIMEOUT = 15.0
+# #D812: teto AGREGADO do startup — os connects rodam em paralelo, mas um
+# lote grande de servidores travados não pode segurar o prompt além disso.
+_MCP_GLOBAL_STARTUP_BUDGET = 30.0
+# #D814: retry curto SÓ no handshake (initialize/list_tools são idempotentes;
+# tools/call NÃO é — segue single-shot) em erro de transporte transitório.
+_HANDSHAKE_RETRIES = 1
+_HANDSHAKE_BACKOFF = 0.5
 
 
 def _qualified_name(server: str, tool: str) -> str:
@@ -59,7 +80,11 @@ def _format_tool_result(raw: dict) -> dict[str, Any]:
             text = _sanitize_mcp_text(str(resource.get("text", "")))
             parts.append(f"[resource {uri}]\n{text}" if text else f"[resource {uri}]")
         else:
-            parts.append(f"[{kind} content omitted]")
+            # #D326: `kind` é controlado pelo servidor MCP — sanitiza como label
+            # estrutural (remove non-printables/newlines, cap curto) para não
+            # injetar `]\n## SYSTEM:` no tool_result que o LLM lê.
+            kind_label = _sanitize_mcp_uri(str(kind))[:32] or "unknown"
+            parts.append(f"[{kind_label} content omitted]")
 
     text = "\n".join(parts).strip()
     if raw.get("isError"):
@@ -67,26 +92,13 @@ def _format_tool_result(raw: dict) -> dict[str, Any]:
     return {"output": text} if text else {"output": ""}
 
 
-# DEEP_SECURITY V3.3 #D119: stripping de bytes de controle e bidi-overrides.
-# Mesma policy usada em `delegate_tools._strip_control_chars` para subagent
-# prompts. NUL/ANSI/bidi sao os principais vetores de "esconder instrucoes
-# no meio do output" em texto que o LLM le como contexto.
-_MCP_CONTROL_CHARS = set(chr(c) for c in range(32) if c not in (9, 10, 13)) | {"\x7f"}
-_MCP_BIDI_OVERRIDES = {
-    "‪", "‫", "‬", "‭", "‮",  # LRE/RLE/PDF/LRO/RLO
-    "⁦", "⁧", "⁨", "⁩",            # LRI/RLI/FSI/PDI
-    "‎", "‏",                                # LRM/RLM
-}
-_MCP_FORBIDDEN_CHARS = _MCP_CONTROL_CHARS | _MCP_BIDI_OVERRIDES
-
-
-def _sanitize_mcp_text(text: str) -> str:
-    """Strip control chars + bidi overrides from MCP text content."""
-    if not text:
-        return text
-    if not any(c in _MCP_FORBIDDEN_CHARS for c in text):
-        return text  # hot-path: most content is clean
-    return "".join(c for c in text if c not in _MCP_FORBIDDEN_CHARS)
+# DEEP_SECURITY V3.3 #D119 + AUDIT_V2.3 #501: stripping de bytes de controle
+# e bidi-overrides. Policy única em `alpha._text_safety` — a mesma usada em
+# `_delegate_core._strip_control_chars` para subagent prompts (o set literal
+# vivia copiado verbatim nos dois módulos). NUL/ANSI/bidi sao os principais
+# vetores de "esconder instrucoes no meio do output" em texto que o LLM le
+# como contexto. Já em um único passe C via translation table (#DP024).
+_sanitize_mcp_text = strip_control_and_bidi
 
 
 def _sanitize_mcp_uri(uri: str) -> str:
@@ -99,16 +111,68 @@ def _sanitize_mcp_uri(uri: str) -> str:
     """
     if not uri:
         return uri
-    cleaned = "".join(c for c in uri if c.isprintable() and c not in ("\n", "\r", "\t"))
-    if len(cleaned) > 512:
+    head = uri[:513]
+    cleaned = "".join(c for c in head if c.isprintable() and c not in ("\n", "\r", "\t"))
+    if len(cleaned) > 512 or len(uri) > 512:
         cleaned = cleaned[:512] + "...[uri-truncated]"
     return cleaned
 
 
-def _make_executor(client: MCPClient, tool_name: str):
+# #D311: o nome QUALIFICADO (`mcp__<server>__<tool>`) vai para a API OpenAI
+# (que exige `^[a-zA-Z0-9_-]{1,64}$`) e para o schema do LLM. Um nome com
+# control/bidi/newline entrava verbatim (prompt-injection + quebra de API).
+_MCP_NAME_RE = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
+_MCP_DESC_CAP = 8000
+# #D313: caps contra DoS de contexto/custo por servidor MCP hostil — tools/list
+# só era limitado pelos ~10MB do transporte, então milhares de tools ou schemas
+# gigantes eram serializados ao LLM a cada turno.
+_MCP_MAX_TOOLS_PER_SERVER = 128
+_MCP_MAX_SCHEMA_BYTES = 32_000
+# AUDIT_V2.3 #102: profundidade máxima do inputSchema sanitizado. O transporte
+# aceita até ~10MB — um schema pequeno mas patologicamente aninhado (milhares
+# de arrays/objects) estouraria a recursão ANTES do cap de bytes do #D313.
+_MCP_MAX_SCHEMA_DEPTH = 12
+
+
+def _sanitize_schema(obj, depth: int = 0):
+    """#D311/#102: strip recursivo de control/bidi das STRINGS de um JSON
+    schema vindo do servidor MCP (description/title/enum que o LLM vê),
+    preservando a estrutura. Aplica a mesma policy dos resultados
+    (`_sanitize_mcp_text`). Containers além de `_MCP_MAX_SCHEMA_DEPTH`
+    níveis são descartados (esvaziados) em vez de recursar."""
+    if isinstance(obj, str):
+        return _sanitize_mcp_text(obj)
+    if isinstance(obj, list):
+        return [] if depth >= _MCP_MAX_SCHEMA_DEPTH else [
+            _sanitize_schema(v, depth + 1) for v in obj
+        ]
+    if isinstance(obj, dict):
+        return {} if depth >= _MCP_MAX_SCHEMA_DEPTH else {
+            k: _sanitize_schema(v, depth + 1) for k, v in obj.items()
+        }
+    return obj
+
+
+def _make_executor(client: AnyMCPClient, tool_name: str):
     async def executor(**kwargs) -> dict[str, Any]:
+        # AUDIT_V2.2 #011: cap the MCP call at the remaining turn budget so a
+        # slow server doesn't keep a non-cancellable to_thread worker blocked
+        # (and the MCP connection tied up) long after the agent gave up.
+        from .._turn_budget import remaining as _remaining_budget
+        from .client import TOOL_CALL_TIMEOUT
+        budget = _remaining_budget()
+        # #D813: budget desconhecido (inf/None) ≠ budget exaurido (<=0) —
+        # o segundo caso ganha um floor fail-fast em vez dos 120s cheios.
+        if budget is None or math.isinf(budget):
+            call_timeout = TOOL_CALL_TIMEOUT
+        elif budget <= 0:
+            call_timeout = 2.0
+        else:
+            call_timeout = min(TOOL_CALL_TIMEOUT, budget)
         try:
-            raw = await asyncio.to_thread(client.call_tool, tool_name, kwargs)
+            raw = await asyncio.to_thread(
+                client.call_tool, tool_name, kwargs, call_timeout
+            )
         except MCPError as e:
             return {"error": str(e)}
         except Exception as e:
@@ -118,18 +182,48 @@ def _make_executor(client: MCPClient, tool_name: str):
     return executor
 
 
-def _register_server_tools(client: MCPClient) -> int:
+def _register_server_tools(client: AnyMCPClient) -> int:
     count = 0
     for tool in client.tools:
+        if count >= _MCP_MAX_TOOLS_PER_SERVER:
+            logger.warning(
+                "MCP servidor '%s': mais de %d tools — restantes ignoradas (#D313).",
+                client.name, _MCP_MAX_TOOLS_PER_SERVER,
+            )
+            break
         name = tool.get("name")
         if not isinstance(name, str) or not name:
             continue
         qualified = _qualified_name(client.name, name)
-        params = tool.get("inputSchema") or {"type": "object", "properties": {}}
+        # #D311: rejeita nome qualificado inválido (control/bidi/newline ou fora
+        # de ^[a-zA-Z0-9_-]{1,64}$) em vez de registrar verbatim; sanitiza a
+        # description (com cap) e o inputSchema recursivamente.
+        if not _MCP_NAME_RE.match(qualified):
+            logger.warning(
+                "MCP tool %r do servidor '%s': nome qualificado %r inválido "
+                "(fora de ^[a-zA-Z0-9_-]{1,64}$) — tool ignorada (#D311).",
+                name, client.name, qualified,
+            )
+            continue
+        raw_desc = tool.get("description") or f"MCP tool {name} from {client.name}"
+        description = _sanitize_mcp_text(str(raw_desc))[:_MCP_DESC_CAP]
+        params = _sanitize_schema(
+            tool.get("inputSchema") or {"type": "object", "properties": {}}
+        )
+        # #D313: schema gigante infla o prompt a cada turno — troca por
+        # placeholder VÁLIDO (truncar a string quebraria o tool-calling).
+        if len(json.dumps(params, ensure_ascii=False)) > _MCP_MAX_SCHEMA_BYTES:
+            logger.warning(
+                "MCP tool %r do servidor '%s': inputSchema excede %d bytes — "
+                "substituído por placeholder (#D313).",
+                name, client.name, _MCP_MAX_SCHEMA_BYTES,
+            )
+            params = {"type": "object", "properties": {}}
+            description = (description + " [schema omitido: excedeu o cap]")[:_MCP_DESC_CAP]
         register_tool(
             ToolDefinition(
                 name=qualified,
-                description=tool.get("description") or f"MCP tool {name} from {client.name}",
+                description=description,
                 parameters=params,
                 safety=ToolSafety.DESTRUCTIVE,  # MCP tools require approval by default
                 executor=_make_executor(client, name),
@@ -140,10 +234,24 @@ def _register_server_tools(client: MCPClient) -> int:
     return count
 
 
+def _transient_transport_error(e: MCPError) -> bool:
+    """#D814: erro de transporte transitório (vale retry no handshake)?
+
+    HTTP: o `_post`/reads traduzem httpx→MCPError com `from e`, então a
+    causa preserva o tipo. Stdio: EOF/pipe quebrado viram MCPError com
+    mensagens fixas do client. Erros de protocolo (JSON-RPC error, HTTP
+    4xx/5xx) NÃO são transitórios.
+    """
+    if isinstance(e.__cause__, httpx.TransportError):
+        return True
+    msg = str(e)
+    return "closed connection" in msg or "write failed" in msg
+
+
 def _connect_one(
     spec: MCPServerConfig,
     startup_timeout: float = _MCP_STARTUP_TIMEOUT,
-) -> MCPClient | None:
+) -> AnyMCPClient | None:
     """Conecta a um MCP server com cap absoluto no handshake completo.
 
     AUDIT_V1.8 #034: start+initialize+list_tools podem cada um ter seu
@@ -153,19 +261,39 @@ def _connect_one(
     Wrapper threading.Thread.join(timeout) garante cap total e mata o
     subprocess se passar do limite. Daemon=True para nao bloquear sys.exit.
     """
-    client = MCPClient(
-        name=spec.name,
-        command=spec.command,
-        args=spec.args,
-        env=spec.env,
-    )
+    client: AnyMCPClient
+    if spec.is_http:
+        client = MCPHttpClient(
+            name=spec.name,
+            url=spec.url,
+            headers=spec.headers,
+            oauth=False if spec.auth == "none" else None,
+        )
+    else:
+        client = MCPClient(
+            name=spec.name,
+            command=spec.command,
+            args=spec.args,
+            env=spec.env,
+        )
     result: dict[str, Any] = {}
 
     def _do_connect() -> None:
         try:
             client.start()
-            client.initialize()
-            client.list_tools()
+            for attempt in range(_HANDSHAKE_RETRIES + 1):
+                try:
+                    client.initialize()
+                    client.list_tools()
+                    break
+                except MCPError as e:
+                    if attempt >= _HANDSHAKE_RETRIES or not _transient_transport_error(e):
+                        raise
+                    logger.debug(
+                        "MCP '%s': erro transitório no handshake (%s) — "
+                        "retry %d/%d", spec.name, e, attempt + 1, _HANDSHAKE_RETRIES,
+                    )
+                    time.sleep(_HANDSHAKE_BACKOFF)
             result["ok"] = True
         except MCPError as e:
             result["error"] = e
@@ -201,7 +329,11 @@ def _connect_one(
     if "ok" not in result:
         err = result.get("error", "unknown")
         category = result.get("category", "unknown")
-        if category == "mcp_error":
+        if isinstance(err, MCPAuthRequired):
+            # Not a failure of the config — the user simply hasn't authorized
+            # yet. The message already says `/mcp auth <name>`.
+            logger.warning("MCP '%s': %s", spec.name, err)
+        elif category == "mcp_error":
             logger.warning("MCP '%s' failed to start: %s", spec.name, err)
         else:
             logger.warning("MCP '%s' unexpected error: %s", spec.name, err)
@@ -215,7 +347,7 @@ def _connect_one(
     return client
 
 
-def load_mcp_servers() -> list[MCPClient]:
+def load_mcp_servers() -> list[AnyMCPClient]:
     """Spawn all enabled MCP servers and register their tools.
 
     Returns the list of clients that connected successfully. Failures are
@@ -231,8 +363,31 @@ def load_mcp_servers() -> list[MCPClient]:
         _loaded = True
         return []
 
-    for spec in enabled:
-        client = _connect_one(spec)
+    # #D812: connect em paralelo com teto agregado — o loop sequencial
+    # antigo somava até N×15s de stall no prompt quando vários servidores
+    # travavam. Cada _connect_one preserva sua semântica (cap de 15s,
+    # kill do subprocess, logs); o registro das tools fica na main thread.
+    pool = ThreadPoolExecutor(
+        max_workers=min(len(enabled), 8), thread_name_prefix="mcp-connect"
+    )
+    futures = [(spec, pool.submit(_connect_one, spec)) for spec in enabled]
+    _futures_wait(
+        [f for _, f in futures], timeout=_MCP_GLOBAL_STARTUP_BUDGET
+    )
+    pool.shutdown(wait=False, cancel_futures=True)
+    for spec, fut in futures:
+        if not fut.done() or fut.cancelled():
+            logger.warning(
+                "MCP '%s' descartado: estourou o budget global de startup "
+                "(%.0fs)", spec.name, _MCP_GLOBAL_STARTUP_BUDGET,
+            )
+            fut.add_done_callback(_stop_late_client)
+            continue
+        try:
+            client = fut.result()
+        except Exception as e:
+            logger.warning("MCP '%s' unexpected error: %s", spec.name, e)
+            continue
         if client is None:
             continue
         n = _register_server_tools(client)
@@ -241,6 +396,23 @@ def load_mcp_servers() -> list[MCPClient]:
 
     _loaded = True
     return list(_active_clients)
+
+
+def _stop_late_client(fut) -> None:
+    """Encerra um client cujo connect terminou DEPOIS do budget global —
+    já foi descartado, então não pode ficar vivo sem registro."""
+    if fut.cancelled():
+        return
+    try:
+        client = fut.result()
+    except Exception:
+        return
+    if client is None:
+        return
+    try:
+        client.stop()
+    except Exception as e:
+        logger.debug("MCP late client stop failed: %s", e)
 
 
 def shutdown_mcp_servers() -> None:
@@ -258,6 +430,50 @@ def shutdown_mcp_servers() -> None:
 
 def list_active_servers() -> list[dict]:
     return [
-        {"name": c.name, "tools": [t.get("name") for t in c.tools]}
+        {
+            "name": c.name,
+            "tools": [t.get("name") for t in c.tools],
+            "resources": bool(getattr(c, "supports_resources", lambda: False)()),
+        }
         for c in _active_clients
     ]
+
+
+def get_client(name: str) -> AnyMCPClient | None:
+    """Active client by server name (for the mcp_* resource tools)."""
+    for c in _active_clients:
+        if c.name == name:
+            return c
+    return None
+
+
+def find_spec(name: str) -> MCPServerConfig | None:
+    for spec in load_mcp_config():
+        if spec.name == name:
+            return spec
+    return None
+
+
+def connect_server(name: str) -> AnyMCPClient:
+    """(Re)connect one configured server by name and register its tools —
+    used by `/mcp auth` after an OAuth login. Raises MCPError on failure."""
+    spec = find_spec(name)
+    if spec is None:
+        raise MCPError(f"MCP server '{name}' não está em .alpha/mcp.json")
+    old = get_client(name)
+    if old is not None:
+        try:
+            old.stop()
+        except Exception as e:
+            logger.debug("MCP %s stop before reconnect failed: %s", name, e)
+        _active_clients.remove(old)
+        from ..tools import TOOL_REGISTRY
+        for tname in [t for t in TOOL_REGISTRY if t.startswith(_qualified_name(name, ""))]:
+            TOOL_REGISTRY.pop(tname, None)
+    client = _connect_one(spec)
+    if client is None:
+        raise MCPError(f"MCP '{name}' não conectou — veja o log acima.")
+    n = _register_server_tools(client)
+    _active_clients.append(client)
+    logger.info("MCP '%s' (re)connected with %d tool(s)", name, n)
+    return client

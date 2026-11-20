@@ -35,22 +35,28 @@ What's NOT here:
 from __future__ import annotations
 
 import asyncio
+import logging
 import shlex
 from pathlib import Path
 
 from .._platform import IS_WINDOWS
-from ..security import (
-    HARD_BLOCKED,
-    HARD_BLOCKED_RE,
-    _HARD_BLOCKED_PATTERNS,
-    validate_command,
-    validate_pipeline,
-)
+# AUDIT_V2.2 #021: removed the genuinely-dead imports HARD_BLOCKED,
+# _HARD_BLOCKED_PATTERNS and validate_pipeline (referenced only in comments).
+# HARD_BLOCKED_RE is kept as an intentional re-export: it's accessed as
+# `shell_tools.HARD_BLOCKED_RE` by tests/test_perf_v10_stragglers.py.
+from ..security import HARD_BLOCKED_RE, validate_command  # noqa: F401  (re-export)
 from . import ToolCategory, ToolDefinition, ToolSafety, register_tool
-from ._subprocess_helpers import SubprocessTimeoutError, run_subprocess_safe
-from ..config import TOOL_TIMEOUTS
+from ._subprocess_helpers import (
+    STDERR_CAP,
+    STDOUT_CAP,
+    SubprocessTimeoutError,
+    run_subprocess_safe,
+)
+from ..config import TOOL_TIMEOUTS, TOOL_TIMEOUT_CAPS
 from .safe_env import get_safe_env
 from .workspace import AGENT_WORKSPACE, assert_within_workspace
+
+logger = logging.getLogger(__name__)
 
 # Backward compat (#D002): _validate_command was refactored to
 # alpha.security.validate_command. Alias kept so internal callers
@@ -83,15 +89,18 @@ async def _execute_shell_windows(command: str, cwd: str, timeout: int) -> dict:
         }
     return {
         "exit_code": r.returncode,
-        "stdout": r.stdout.decode(errors="replace")[:15000],
-        "stderr": r.stderr.decode(errors="replace")[:5000],
+        "stdout": r.stdout.decode(errors="replace")[:STDOUT_CAP],
+        "stderr": r.stderr.decode(errors="replace")[:STDERR_CAP],
     }
 
 
-async def _execute_shell(command: str, cwd: str = None, timeout: int | None = None) -> dict:
-    """Execute a shell command with timeout."""
+async def _execute_shell(
+    command: str, cwd: str | None = None, timeout: int | None = None,
+    background: bool = False,
+) -> dict:
+    """Execute a shell command with timeout (or detached, when background)."""
     if timeout is None:
-        timeout = TOOL_TIMEOUTS.get("shell", 30)
+        timeout = TOOL_TIMEOUTS.get("shell", 180)
     # Validate command
     block_reason = _validate_command(command)
     if block_reason:
@@ -107,8 +116,31 @@ async def _execute_shell(command: str, cwd: str = None, timeout: int | None = No
     else:
         cwd = str(AGENT_WORKSPACE)
 
+    # Background: registra no bg_tasks (log em .alpha/runs/bg/, notificação
+    # de término no turno seguinte). Validação de comando/cwd JÁ aconteceu.
+    if background:
+        if IS_WINDOWS:
+            return {"error": "background=true não suportado no Windows ainda"}
+        # #100: aplicar o MESMO wrap de sandbox do foreground ANTES de detachar.
+        # Fail-closed: se o sandbox está on mas sem backend, propaga o erro em
+        # vez de rodar o comando cru fora da jaula (o background era fail-open).
+        from ..bg_tasks import start as _bg_start
+        from ..shell_sandbox import SandboxUnavailableError, wrap_command
+        try:
+            cmd_parts = shlex.split(command)
+            sandboxed = shlex.join(wrap_command(cmd_parts, cwd=cwd))
+        except SandboxUnavailableError as e:
+            return {"error": str(e), "blocked": True}
+        except ValueError as e:
+            return {"error": f"Comando malformado: {e}"}
+        return _bg_start(sandboxed, cwd, env=get_safe_env())
+
     # Cap timeout (#D003: fonte unica em config.TOOL_TIMEOUT_CAPS)
     from ..config import TOOL_TIMEOUT_CAPS
+    try:
+        timeout = int(timeout)
+    except (TypeError, ValueError):
+        return {"error": f"timeout inválido: {timeout!r} (esperado número inteiro)"}
     timeout = min(timeout, TOOL_TIMEOUT_CAPS.get("shell", 300))
 
     try:
@@ -124,6 +156,20 @@ async def _execute_shell(command: str, cwd: str = None, timeout: int | None = No
 
         # GUI commands: detach (fire-and-forget) — não capturar output
         if base_cmd in _GUI_COMMANDS:
+            # #D324: o spawn GUI-detach não passa por wrap_command; rodá-lo com o
+            # sandbox ativo violaria a contenção pedida (e envolvê-lo em bwrap/
+            # firejail sem D-Bus/display quebraria xdg-open/notify-send). Fail-
+            # closed: recusa quando o sandbox está habilitado.
+            from ..shell_sandbox import load_config as _load_sandbox_config
+            if _load_sandbox_config().enabled:
+                return {
+                    "error": (
+                        f"'{base_cmd}' (GUI detach) é bloqueado com o sandbox "
+                        "habilitado — roda fora da jaula. Desabilite o sandbox "
+                        "ou rode o comando manualmente."
+                    ),
+                    "blocked": True,
+                }
             proc = await asyncio.create_subprocess_exec(
                 *cmd_parts,
                 stdout=asyncio.subprocess.DEVNULL,
@@ -186,8 +232,8 @@ async def _execute_shell(command: str, cwd: str = None, timeout: int | None = No
 
             return {
                 "exit_code": last_returncode,
-                "stdout": (prev_output or b"").decode(errors="replace")[:15000],
-                "stderr": all_stderr.decode(errors="replace")[:5000],
+                "stdout": (prev_output or b"").decode(errors="replace")[:STDOUT_CAP],
+                "stderr": all_stderr.decode(errors="replace")[:STDERR_CAP],
             }
         else:
             try:
@@ -202,34 +248,53 @@ async def _execute_shell(command: str, cwd: str = None, timeout: int | None = No
 
             return {
                 "exit_code": r.returncode,
-                "stdout": r.stdout.decode(errors="replace")[:15000],
-                "stderr": r.stderr.decode(errors="replace")[:5000],
+                "stdout": r.stdout.decode(errors="replace")[:STDOUT_CAP],
+                "stderr": r.stderr.decode(errors="replace")[:STDERR_CAP],
             }
     except Exception as e:
-        return {"error": str(e)}
+        # AUDIT_V2.2 #016: log with traceback and surface the error type —
+        # a bare str(e) on a spawn failure (binary missing in sandbox,
+        # permission denied, OOM at fork) left no trace in the logs.
+        logger.exception("execute_shell failed: %s", str(command)[:120])
+        return {"error": f"{type(e).__name__}: {e}"}
 
 
 register_tool(
     ToolDefinition(
         name="execute_shell",
         description=(
-            "Executar um comando shell. Pipes (|) são suportados — cada "
-            "segmento e validado contra padrões catastróficos. "
-            "Para && / || / ; / redirects (>, 2>) use execute_pipeline. "
-            "Timeout máximo: 300s. Retorna stdout, stderr, exit_code."
+            "Execute a shell command. Pipes (|) are supported — each "
+            "segment is validated against catastrophic patterns. "
+            "For && / || / ; / redirects (>, 2>) use execute_pipeline. "
+            "Maximum timeout: 300s. Returns stdout, stderr, exit_code. "
+            "Set background=true for long-running commands (dev servers, "
+            "builds, watchers): returns a task_id immediately; you'll be "
+            "notified when it finishes — check with bg_task_output/"
+            "bg_tasks_list instead of blocking."
         ),
         parameters={
             "type": "object",
             "properties": {
-                "command": {"type": "string", "description": "Comando shell a executar"},
+                "command": {"type": "string", "description": "Shell command to execute"},
                 "cwd": {
                     "type": "string",
-                    "description": "Diretório de trabalho (opcional, deve estar dentro do workspace)",
+                    "description": "Working directory (optional, must be inside the workspace)",
                 },
                 "timeout": {
                     "type": "integer",
-                    "description": "Timeout em segundos (máx 300). Padrão: 30",
-                    "default": 30,
+                    "description": (
+                        f"Timeout in seconds (max {TOOL_TIMEOUT_CAPS['shell']}). "
+                        f"Default: {TOOL_TIMEOUTS['shell']}"
+                    ),
+                    "default": TOOL_TIMEOUTS["shell"],
+                },
+                "background": {
+                    "type": "boolean",
+                    "description": (
+                        "Run detached and return a task_id immediately "
+                        "(no pipes). Default: false"
+                    ),
+                    "default": False,
                 },
             },
             "required": ["command"],

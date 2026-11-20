@@ -18,16 +18,18 @@ from pathlib import Path
 from . import ToolCategory, ToolDefinition, ToolSafety, register_tool
 from .path_helpers import _validate_path_no_symlink
 from .safe_env import get_safe_env
-from ..config import TOOL_TIMEOUTS
+from ..config import TOOL_TIMEOUTS, TOOL_TIMEOUT_CAPS
+from ._subprocess_helpers import STDERR_CAP, STDOUT_CAP
 from ..security import validate_pipeline
 from .workspace import AGENT_WORKSPACE, assert_within_workspace
 
 logger = logging.getLogger(__name__)
 
-# Operators allowed in pipelines
-# Allowed pipe/redirect operators
-_PIPE_OPERATORS: frozenset[str] = frozenset()  # DM038: reservado para uso futuro
-
+# The only redirect target allowed outside the workspace: `2>/dev/null` is
+# how every shell user silences noise, and the null device stores nothing.
+# Matched as the exact literal — no normalization, so `/dev/null/../sda`
+# or a symlink named like it never qualifies.
+_DEV_NULL = "/dev/null"
 
 def _validate_redirect_paths(pipeline: str) -> str | None:
     """Ensure redirect targets are within workspace.
@@ -36,11 +38,39 @@ def _validate_redirect_paths(pipeline: str) -> str | None:
     cria arquivo. Pular esses para evitar tanto criar arquivos chamados
     `&1` quanto rejeitar pipelines comuns como `cmd 2>&1 | grep ...`.
     """
-    redirects = re.findall(r"(?:>>?|2>>?)\s*(\S+)", pipeline)
-    for target in redirects:
+    # #010: tokenize quoting-aware (posix=False keeps quotes) so a `>` INSIDE a
+    # quoted arg (`echo "a > b" > out`) isn't mistaken for a redirect operator.
+    # The old raw regex captured `b"` as a spurious target → false-positive
+    # workspace rejection. A standalone `>`/`2>>`/… token takes the NEXT token
+    # as target; an attached form (`hi>file`, `>out`) takes its suffix.
+    try:
+        tokens = shlex.split(pipeline, posix=False)
+    except ValueError:
+        return None  # unbalanced quotes — downstream shlex will reject it
+    _OP = re.compile(r"^(?:\d?>>?|&>>?)$")
+    _ATTACHED = re.compile(r"(?:\d?>>?|&>>?)(\S+)$")
+    targets: list[str] = []
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        if tok and tok[0] in ("'", '"'):
+            i += 1
+            continue  # fully-quoted arg — never a redirect operator
+        if _OP.match(tok):
+            if i + 1 < len(tokens):
+                targets.append(tokens[i + 1])
+        else:
+            m = _ATTACHED.search(tok)
+            if m:
+                targets.append(m.group(1))
+        i += 1
+    for target in targets:
         if target.startswith("&"):
             continue  # &1, &2 sao FD references, nao paths
-        target_path = Path(target).expanduser().resolve()
+        clean = target.strip().strip("'\"")
+        if not clean or clean == _DEV_NULL:
+            continue  # discarding output writes nothing anywhere
+        target_path = Path(clean).expanduser().resolve()
         err = assert_within_workspace(target_path)
         if err:
             return f"Redirect para '{target}': {err}"
@@ -68,6 +98,8 @@ def _parse_segment(segment: str) -> tuple[list[str], dict[str, str]]:
         # FD duplication: 2>&1, 1>&2 — not a file path.
         if target.startswith("&"):
             continue
+        # Strip shell quoting que o regex captura junto com o path.
+        target = target.strip().strip("'\"")
         if op == ">":
             redirects["stdout"] = target
         elif op == ">>":
@@ -78,6 +110,14 @@ def _parse_segment(segment: str) -> tuple[list[str], dict[str, str]]:
             redirects["stderr_append"] = target
         elif op == "<":
             redirects["stdin"] = target
+
+    for a, b in (("stdout", "stdout_append"), ("stderr", "stderr_append")):
+        if a in redirects and b in redirects:
+            raise ValueError(
+                f"Redirects conflitantes no mesmo comando: "
+                f"'{'>' if a == 'stdout' else '2>'}' e "
+                f"'{'>>' if a == 'stdout' else '2>>'}'"
+            )
 
     cmd_str = _REDIRECT_RE.sub("", segment).strip()
     parts = shlex.split(cmd_str) if cmd_str else []
@@ -137,6 +177,9 @@ def _open_redirect_files(redirects: dict[str, str]) -> dict:
     handles: dict = {}
     try:
         for key, target in redirects.items():
+            if target == _DEV_NULL:
+                handles[key] = open(os.devnull, _REDIRECT_FDOPEN_MODE[key])
+                continue
             # Validacao de path: rejeita symlinks no raw input E em parents
             # ANTES do open. Mesmo helper usado por write_file/edit_file. Para
             # paths inexistentes (caso comum em redirect `> new.txt`) cai no
@@ -228,61 +271,31 @@ async def _execute_pipe_chain(
     if not pipe_segments:
         return 0, "", ""
 
-    # Caso simples: um único comando
-    if len(pipe_segments) == 1:
-        parts, redirects = _parse_segment(pipe_segments[0])
-        if not parts:
-            return 0, "", ""
-        handles = _open_redirect_files(redirects)
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                *parts,
-                stdin=handles.get("stdin"),
-                stdout=handles.get("stdout", asyncio.subprocess.PIPE),
-                stderr=handles.get("stderr", asyncio.subprocess.PIPE),
-                cwd=cwd,
-                env=env,
-            )
-            try:
-                stdout_bytes, stderr_bytes = await asyncio.wait_for(
-                    proc.communicate(),
-                    timeout=timeout,
-                )
-            except (TimeoutError, asyncio.CancelledError):
-                # Sem kill, o subprocess vira zumbi ate ESGOTAR PIDs.
-                proc.kill()
-                try:
-                    await asyncio.wait_for(proc.wait(), timeout=5)
-                except TimeoutError:
-                    logger.exception(f"Pipeline process {proc.pid} didn't die after kill — may be in D state")
-                except Exception:
-                    logger.exception(f"Pipeline process {proc.pid}: unexpected error after kill")
-                raise
-            return (
-                proc.returncode,
-                (stdout_bytes or b"").decode(errors="replace"),
-                (stderr_bytes or b"").decode(errors="replace"),
-            )
-        finally:
-            for h in handles.values():
-                if hasattr(h, "close"):
-                    h.close()
-
-    # Multi-command pipe: run sequentially, passing stdout → stdin
+    # AUDIT_V1.10 #049: single-cmd e multi-cmd compartilhavam ~30 linhas
+    # de lógica quase idêntica (create_subprocess_exec, communicate com
+    # timeout, kill+wait, close handles). Unificado em loop único.
     prev_output = None
     all_stderr = ""
     last_exit_code = 0
 
-    for j, seg in enumerate(pipe_segments):
+    is_single = len(pipe_segments) == 1
+
+    for seg in pipe_segments:
         parts, redirects = _parse_segment(seg)
         if not parts:
             continue
 
         handles = _open_redirect_files(redirects)
         try:
+            # Single-cmd usa handles para stdin; multi-cmd pipeia stdout→stdin.
+            stdin_src = (
+                (handles.get("stdin") or asyncio.subprocess.DEVNULL)
+                if (is_single and prev_output is None)
+                else asyncio.subprocess.PIPE
+            )
             proc = await asyncio.create_subprocess_exec(
                 *parts,
-                stdin=asyncio.subprocess.PIPE if prev_output is not None else handles.get("stdin"),
+                stdin=stdin_src,
                 stdout=handles.get("stdout", asyncio.subprocess.PIPE),
                 stderr=handles.get("stderr", asyncio.subprocess.PIPE),
                 cwd=cwd,
@@ -298,9 +311,13 @@ async def _execute_pipe_chain(
                 try:
                     await asyncio.wait_for(proc.wait(), timeout=5)
                 except TimeoutError:
-                    logger.exception(f"Pipeline process {proc.pid} didn't die after kill — may be in D state")
+                    logger.exception(
+                        f"Pipeline process {proc.pid} didn't die after kill"
+                    )
                 except Exception:
-                    logger.exception(f"Pipeline process {proc.pid}: unexpected error after kill")
+                    logger.exception(
+                        f"Pipeline process {proc.pid}: unexpected error after kill"
+                    )
                 raise
             prev_output = stdout_bytes
             last_exit_code = proc.returncode
@@ -318,10 +335,10 @@ async def _execute_pipe_chain(
     )
 
 
-async def _execute_pipeline(pipeline: str, cwd: str = None, timeout: int | None = None) -> dict:
+async def _execute_pipeline(pipeline: str, cwd: str | None = None, timeout: int | None = None) -> dict:
     """Execute a shell pipeline with pipes, redirects, and operators — sem shell."""
     if timeout is None:
-        timeout = TOOL_TIMEOUTS.get("pipeline", 120)
+        timeout = TOOL_TIMEOUTS.get("pipeline", 240)
 
     # Validate entire pipeline
     block_reason = validate_pipeline(pipeline)
@@ -343,7 +360,6 @@ async def _execute_pipeline(pipeline: str, cwd: str = None, timeout: int | None 
     else:
         cwd = str(AGENT_WORKSPACE)
 
-    from ..config import TOOL_TIMEOUT_CAPS
     timeout = min(timeout, TOOL_TIMEOUT_CAPS.get("pipeline", 120))
     env = get_safe_env()
 
@@ -395,8 +411,8 @@ async def _execute_pipeline(pipeline: str, cwd: str = None, timeout: int | None 
 
         return {
             "exit_code": last_exit_code,
-            "stdout": final_stdout[:15000],
-            "stderr": final_stderr[:5000],
+            "stdout": final_stdout[:STDOUT_CAP],
+            "stderr": final_stderr[:STDERR_CAP],
             "pipeline": pipeline,
         }
     except TimeoutError:
@@ -411,25 +427,31 @@ register_tool(
     ToolDefinition(
         name="execute_pipeline",
         description=(
-            "Executar um pipeline de comandos shell com pipes (|), operadores lógicos "
-            "(&&, ||, ;) e redirects (>, >>). Cada comando do pipeline é validado "
-            "individualmente. Exemplo: 'cat server.log | grep ERROR | wc -l'"
+            "Execute a shell command pipeline with pipes (|), logical operators "
+            "(&&, ||, ;) and redirects (>, >>). Each command in the pipeline is "
+            "validated individually. Example: 'cat server.log | grep ERROR | wc -l'"
         ),
         parameters={
             "type": "object",
             "properties": {
                 "pipeline": {
                     "type": "string",
-                    "description": "Pipeline completo. Ex: 'cat app.log | grep ERROR | sort | uniq -c | sort -rn | head -20'",
+                    "description": "Full pipeline. E.g. 'cat app.log | grep ERROR | sort | uniq -c | sort -rn | head -20'",
                 },
                 "cwd": {
                     "type": "string",
-                    "description": "Diretório de trabalho (opcional, deve estar dentro do workspace)",
+                    "description": "Working directory (optional, must be inside the workspace)",
                 },
                 "timeout": {
                     "type": "integer",
-                    "description": "Timeout em segundos (máx 120). Padrão: 60",
-                    "default": 60,
+                    # #DM063: default efetivo = min(default, cap) — TOOL_TIMEOUTS
+                    # ["pipeline"]=240 excede o proprio cap (120), entao o valor
+                    # anunciado ao modelo e o que realmente vale apos o min().
+                    "description": (
+                        f"Timeout in seconds (max {TOOL_TIMEOUT_CAPS['pipeline']}). "
+                        f"Default: {min(TOOL_TIMEOUTS['pipeline'], TOOL_TIMEOUT_CAPS['pipeline'])}"
+                    ),
+                    "default": min(TOOL_TIMEOUTS["pipeline"], TOOL_TIMEOUT_CAPS["pipeline"]),
                 },
             },
             "required": ["pipeline"],

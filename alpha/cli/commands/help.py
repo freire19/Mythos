@@ -1,4 +1,10 @@
-"""/help — list available slash commands."""
+"""/help — list available slash commands.
+
+#DM068: the list is derived from the single-source catalogue in
+``alpha.cli.commands`` (``iter_commands``) instead of a hand-kept copy.
+The import is deferred to call time to avoid a circular import (this
+module is imported by the package ``__init__``).
+"""
 
 from __future__ import annotations
 
@@ -7,29 +13,20 @@ from alpha.display import C, c
 from ._types import DispatchResult, ReplContext
 
 
+def _print_entry(name: str, desc: str) -> None:
+    # Pad plain text (not the colored string) so columns align; commands
+    # longer than 9 chars just get the single separator space.
+    pad = " " * max(0, 9 - len(name))
+    print(f"  {c(C.CYAN, name)}{pad} — {desc}")
+
+
 def _handle_help(ctx: ReplContext, parts: list[str]) -> DispatchResult:
-    print(f"  {c(C.CYAN, '/init')}     — Draft an ALPHA.md for this project")
-    print(f"  {c(C.CYAN, '/clear')}    — Clear history and screen")
-    print(f"  {c(C.CYAN, '/history')}  — Show conversation history")
-    print(f"  {c(C.CYAN, '/save')}     — Save current session")
-    print(f"  {c(C.CYAN, '/load')}     — Load a previous session")
-    print(f"  {c(C.CYAN, '/continue')} — Resume from last session")
-    print(f"  {c(C.CYAN, '/sessions')} — List saved sessions")
-    print(f"  {c(C.CYAN, '/context')}  — Show context window usage")
-    print(f"  {c(C.CYAN, '/cost')}     — Show token usage and estimated USD cost for this session")
-    print(f"  {c(C.CYAN, '/stats')}    — Show iteration/tool/approval stats for this session")
-    print(f"  {c(C.CYAN, '/memory')}   — Manage cross-session memory (list|forget <i>|clear|edit [workspace|global])")
-    print(f"  {c(C.CYAN, '/accept-edits')} — Toggle auto-approve for destructive tools (shift+tab)")
-    print(f"  {c(C.CYAN, '/tools')}    — List available tools")
-    print(f"  {c(C.CYAN, '/skills')}   — List registered skills (ready vs inactive)")
-    print(f"  {c(C.CYAN, '/mcp')}      — List connected MCP servers")
-    print(f"  {c(C.CYAN, '/image')}    — Attach an image (Ctrl+V or Alt+V also works)")
-    print(f"  {c(C.CYAN, '/pdf')}      — Attach a PDF (text extracted via pypdf)")
-    print(f"  {c(C.CYAN, '/audio')}    — Attach audio (transcribed via OpenAI Whisper)")
-    print(f"  {c(C.CYAN, '/agents')}   — List named agents")
-    print(f"  {c(C.CYAN, '/agent')}    — Show/switch active agent")
-    print(f"  {c(C.CYAN, '/model')}    — Show/switch provider & model")
-    print(f"  {c(C.CYAN, '/sandbox')}  — Show sandbox state for destructive shell tools")
-    print(f"  {c(C.CYAN, '/<skill>')}  — Invoke a skill by name (e.g. /skill-creator)")
-    print(f"  {c(C.CYAN, '/exit')}     — Exit")
+    from alpha.cli.commands import iter_commands
+
+    for name, desc in iter_commands():
+        if name == "/exit":
+            # Keep the /<skill> pseudo-entry right before /exit, as before.
+            _print_entry("/<skill>", "Invoke a skill by name (e.g. /skill-creator)")
+            _print_entry("!<cmd>", "Run a shell command yourself; its output rides with your next message")
+        _print_entry(name, desc)
     return DispatchResult.CONTINUE

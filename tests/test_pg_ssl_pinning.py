@@ -174,3 +174,65 @@ class TestLoopbackConstantsCovered:
     @pytest.mark.parametrize("h", ["localhost", "127.0.0.1", "::1", ""])
     def test_host_in_loopback(self, h):
         assert h in _LOOPBACK_HOSTS
+
+
+class TestPgPoolLoopAware:
+    """#001: asyncpg pools are bound to their creation loop. The CLI runs
+    asyncio.run() per turn (new loop each turn), so a cached pool reused on a
+    later turn crashes with 'attached to a different loop'. The cache must
+    rebuild when the loop changes."""
+
+    def setup_method(self):
+        import alpha.tools.database_tools as dbt
+        dbt._pg_pools.clear()
+        dbt._pg_pools_loop = None
+
+    def _inject_fake_asyncpg(self, fake_create):
+        import sys
+        import types
+        m = types.ModuleType("asyncpg")
+        m.create_pool = fake_create
+        sys.modules["asyncpg"] = m
+
+    def test_pool_rebuilt_on_new_loop(self):
+        import asyncio
+        import alpha.tools.database_tools as dbt
+
+        calls = {"n": 0}
+
+        async def fake_create(*a, **k):
+            calls["n"] += 1
+            return object()  # a distinct pool per build
+
+        self._inject_fake_asyncpg(fake_create)
+        conn = "postgresql://localhost:5432/db"  # loopback → no SSRF resolve
+
+        async def turn():
+            return await dbt._get_pg_pool(conn)
+
+        p1 = asyncio.run(turn())  # loop A
+        p2 = asyncio.run(turn())  # loop B (fresh loop) — must rebuild, not reuse
+        assert calls["n"] == 2
+        assert p1 is not p2
+
+    def test_pool_cached_within_same_loop(self):
+        import asyncio
+        import alpha.tools.database_tools as dbt
+
+        calls = {"n": 0}
+
+        async def fake_create(*a, **k):
+            calls["n"] += 1
+            return object()
+
+        self._inject_fake_asyncpg(fake_create)
+        conn = "postgresql://localhost:5432/db"
+
+        async def turn():
+            a = await dbt._get_pg_pool(conn)
+            b = await dbt._get_pg_pool(conn)
+            assert a is b  # cached within the loop
+            return a
+
+        asyncio.run(turn())
+        assert calls["n"] == 1

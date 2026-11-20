@@ -34,6 +34,9 @@ def _reset_global_state():
         # ContextVar precisa de set explicito; reset() so funciona em frame
         # do mesmo task. Atribuir 0 em cada test e seguro.
         ctx._compress_consecutive_failures.set(0)
+        # Calibração de tokens: volta ao heurístico puro entre tests.
+        ctx._token_calibration.set(1.0)
+        ctx._token_estimate_cache.set(None)
 
     def _reset_pg_pools():
         try:

@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 
@@ -74,11 +73,8 @@ def repl_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 def _drive_repl(monkeypatch, *inputs):
     """Run ``main.run_repl`` against a scripted input. Returns ``main`` so
     callers can assert on captured state."""
-    import main
+    import alpha.cli.entry as main  # #702: o módulo real (main.py é shim)
 
-    # `read_input` vive em alpha.repl_input desde a refatoracao v1.22;
-    # main.py importa localmente dentro de run_repl, entao o patch precisa
-    # atingir o modulo de origem (nao ha mais `main.read_input`).
     monkeypatch.setattr("alpha.repl_input.read_input", _ScriptedInput(*inputs))
     monkeypatch.setattr("alpha.agent.run_agent", _fake_run_agent_done)
     main.run_repl(provider="deepseek", temperature=0.5)
@@ -110,7 +106,7 @@ class TestClear:
         _drive_repl(monkeypatch, "hello", "/clear", "/exit")
         out = capsys.readouterr().out
         # Banner appears at startup AND after /clear → at least 2 occurrences.
-        assert out.count("MYTHOS") >= 2
+        assert out.count("Mythos") >= 2
 
 
 class TestHistory:
@@ -254,5 +250,5 @@ def test_repl_starts_and_exits_cleanly(repl_env, monkeypatch, capsys):
     """Bare-minimum sanity: start REPL, send /exit, verify banner appeared."""
     _drive_repl(monkeypatch, "/exit")
     out = capsys.readouterr().out
-    assert "MYTHOS" in out
+    assert "Mythos" in out
     assert "Goodbye" in out

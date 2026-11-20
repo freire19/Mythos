@@ -40,10 +40,10 @@ jobs:
     name: Build wheel + sdist
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
 
       - name: Set up Python 3.12
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
         with:
           python-version: '3.12'
           cache: pip
@@ -57,7 +57,7 @@ jobs:
         run: python -m build
 
       - name: Upload dist artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
           name: python-distributions
           path: dist/
@@ -67,19 +67,24 @@ jobs:
     name: Upload to PyPI
     needs: build
     runs-on: ubuntu-latest
+    # AUDIT_V2.3 #701: environment de proteção — por si só é inerte, mas
+    # permite configurar required reviewers/wait timer em Settings →
+    # Environments → pypi, colocando um portão humano opcional na frente
+    # do OIDC sem tocar no workflow de novo.
+    environment: pypi
     # `id-token: write` is the entire point — it lets gh-action-pypi-publish
     # mint a short-lived OIDC token that PyPI accepts via trusted publishing.
     permissions:
       id-token: write
     steps:
       - name: Download dist artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
         with:
           name: python-distributions
           path: dist/
 
       - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33  # v1.14.2
         # No `with:` block needed — the action defaults to PyPI (not TestPyPI)
         # and reads dist/ for distributions. OIDC is automatic when the job
         # has `id-token: write` and the repo is configured as a trusted

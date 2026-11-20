@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import Literal
 
 from .._json_utils import load_json_file
+from ..settings import atomic_write_text
 
 USER_SKILLS_DIR = Path.home() / ".alpha" / "skills"
 INSTALLED_INDEX = USER_SKILLS_DIR / ".installed.json"
@@ -103,9 +104,11 @@ def _load_index() -> dict[str, dict]:
 
 def _save_index(index: dict[str, dict]) -> None:
     USER_SKILLS_DIR.mkdir(parents=True, exist_ok=True)
-    tmp = INSTALLED_INDEX.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(index, indent=2, sort_keys=True), encoding="utf-8")
-    tmp.replace(INSTALLED_INDEX)
+    # #DM066: helper compartilhado — antes era `write_text` cru num tmp de
+    # nome fixo (sem fsync, sem mode); crash no meio corrompia o índice.
+    atomic_write_text(
+        INSTALLED_INDEX, json.dumps(index, indent=2, sort_keys=True), fsync=True
+    )
 
 
 def _git_commit_short(repo_dir: Path) -> str:
@@ -126,7 +129,7 @@ def _git_commit_short(repo_dir: Path) -> str:
 def _find_skill_dirs(root: Path) -> list[Path]:
     """Return directories under `root` that contain a SKILL.md.
 
-    Two layouts are supported:
+    Three layouts are supported:
       1. `root/SKILL.md`              → single-skill repo (returns [root])
       2. `root/<name>/SKILL.md`       → multi-skill repo (returns each subdir)
       3. `root/skills/<name>/SKILL.md` → conventional "skills" directory layout
@@ -297,6 +300,13 @@ def _stage_skills(
         }
         if commit:
             entry["commit"] = commit
+        # #010: persist the override so `update` can re-install under the SAME
+        # name. Without it, update() re-stages under the source's natural name
+        # (src.name), creating an orphan duplicate and leaving the renamed
+        # skill stale. Override is only allowed for single-skill sources, so
+        # at most one entry carries it.
+        if name_override:
+            entry["name_override"] = name_override
         index[name] = entry
         result.installed.append(name)
 
@@ -344,7 +354,7 @@ def list_installed() -> list[dict]:
     rows: list[dict] = []
     for name in on_disk:
         entry = index.get(name)
-        if entry:
+        if isinstance(entry, dict):
             rows.append({"name": name, **entry, "tracked": True})
         else:
             rows.append({
@@ -379,11 +389,26 @@ def update(name: str | None = None) -> InstallResult:
     combined = InstallResult()
     for skill_name in targets:
         entry = index[skill_name]
+        if not isinstance(entry, dict) or not entry.get("source"):
+            combined.errors.append(f"{skill_name}: malformed index entry (missing source)")
+            continue
         source = entry["source"]
+        # #010: re-pass the recorded override so the skill re-installs under
+        # its current name instead of the source's natural name (orphan dup).
+        # Entries installed before this fix lack the field → None → natural
+        # name, i.e. the pre-fix behaviour (no regression for those).
+        override = entry.get("name_override")
         try:
-            sub = install(source, force=True)
+            sub = install(source, name_override=override, force=True)
         except SkillInstallError as e:
             combined.errors.append(f"{skill_name}: {e}")
+            continue
+        except OSError as e:
+            # #016: capturar tambem OSError/PermissionError (clone, copytree,
+            # rmtree). Sem isto, um erro de FS no meio de um `update` (sem nome,
+            # itera todos) propagava e abortava os pacotes restantes, deixando
+            # o indice em estado misto. Agora cada skill falha isoladamente.
+            combined.errors.append(f"{skill_name}: {type(e).__name__}: {e}")
             continue
         combined.installed.extend(sub.installed)
         combined.skipped.extend(sub.skipped)

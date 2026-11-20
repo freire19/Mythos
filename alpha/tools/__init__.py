@@ -7,7 +7,7 @@ Supports:
 - Category and mode filtering
 - Runtime enable/disable
 
-Tool module index (where each tool lives, see #096):
+Tool module index (where each tool lives, see #096; regenerated for #DM074):
 - file_tools.py    — read_file, write_file, edit_file, search_files,
                      glob_files, list_directory
 - shell_tools.py   — execute_shell
@@ -15,17 +15,20 @@ Tool module index (where each tool lives, see #096):
 - code_tools.py    — execute_python, install_package
 - git_tools.py     — git_operation
 - network_tools.py — http_request
-- search_tools.py  — web_search, extract_page_content, search_files
+- search_tools.py  — web_search, web_fetch
 - database_tools.py — query_database, list_tables, describe_table
-- composite_tools.py → project_overview, run_tests, search_and_replace,
-                       deploy_check
-- system_tools.py  — clipboard_read, clipboard_write, screenshot,
-                     get_system_info, get_battery_status, etc.
-- browser_tools.py — browser_navigate, browser_click, browser_fill, etc.
-- delegate_tools.py — delegate_task, delegate_parallel
-- plan_tools.py    — present_plan, todo_write
+- composite_tools.py — project_overview, run_tests, search_and_replace,
+                       deploy_check (registered by the _composite_* submodules)
+- system_tools.py  — clipboard_read, clipboard_write, screenshot, notify_user
+- browser_tools.py — browser_* family (navigate, click, fill, screenshot, …)
+- delegate_tools.py — delegate_task, delegate_parallel, delegate_consensus
+- plan_tools.py    — present_plan, pre_flight, todo_write
+- bg_task_tools.py — bg_tasks_list, bg_task_output, bg_task_kill
+- memory_tools.py  — record_memory
+- interaction_tools.py — ask_choice
 - skill_tools.py   — load_skill
 - apify_tools.py   — apify_run_actor, apify_search_actors
+- antigravity_tools.py — google_antigravity
 - security_tools.py — scan_vulnerabilities, audit_dependencies,
                        scan_binary, fuzz_endpoint,
                        check_misconfigurations
@@ -125,9 +128,29 @@ def get_openai_tools(
         (name, td) for name, td in TOOL_REGISTRY.items()
         if td.enabled and (not td.modes or mode is None or mode in td.modes)
     ]
+    # Drop whole tool families that can't run in this environment so their
+    # schemas don't inflate every prompt. Registration stays unconditional
+    # (get_tool / TOOL_REGISTRY still resolve them for dispatch); this only
+    # controls what the model is offered. Flags are tri-state (auto/on/off).
+    from ..config import apify_tools_enabled, browser_tools_enabled
+    # ToolCategory subclasses str, so an enum member and its literal ("browser")
+    # are equal and hash-alike — membership matches tools registered either way.
+    _drop_categories: set = set()
+    if not browser_tools_enabled():
+        _drop_categories.add(ToolCategory.BROWSER)
+    if not apify_tools_enabled():
+        _drop_categories.add(ToolCategory.SCRAPING)
+    if _drop_categories:
+        eligible = [
+            (n, td) for n, td in eligible if td.category not in _drop_categories
+        ]
     if name_filter is not None:
         allowed = set(name_filter([name for name, _ in eligible]))
         eligible = [(n, td) for n, td in eligible if n in allowed]
+    # `tool_search` is advertised ONLY through `tool_lazy.apply()` — its real
+    # description is the live index of deferred tools. The static registry
+    # entry exists for dispatch, never for the prompt.
+    eligible = [(n, td) for n, td in eligible if n != "tool_search"]
     return [
         {
             "type": "function",

@@ -42,6 +42,10 @@ def _handle_clear(ctx: ReplContext, parts: list[str]) -> DispatchResult:
     ctx.messages[:] = [{"role": "system", "content": ctx.system_prompt}]
     ctx.session_id = generate_session_id()
     reset_approve_all()
+    from alpha import agent_sessions, plan_mode, tool_lazy
+    plan_mode.set_active(False)
+    tool_lazy.reset_loaded()
+    agent_sessions.reset()
     reset_cost_session()
     reset_stats_session()
     os.system("clear" if os.name != "nt" else "cls")
@@ -54,8 +58,11 @@ def _handle_history(ctx: ReplContext, parts: list[str]) -> DispatchResult:
         print(c(C.GRAY, "  History is empty."))
     else:
         for msg in ctx.history[-20:]:
-            role = msg["role"]
-            content = msg["content"][:100]
+            role = msg.get("role", "?")
+            # #DB03: mensagens de tool-call têm content=None (turno que só chama
+            # tools); `None[:100]` crashava o REPL após um /load. Coage p/ str.
+            raw = msg.get("content")
+            content = (raw if isinstance(raw, str) else str(raw))[:100]
             color = C.GREEN if role == "user" else C.CYAN
             print(f"  {c(color, role)}: {content}")
     return DispatchResult.CONTINUE
@@ -76,7 +83,13 @@ def _apply_loaded_messages(ctx: ReplContext, loaded: list[dict]) -> None:
     ctx.messages[:] = [{"role": "system", "content": ctx.system_prompt}]
     ctx.messages.extend(loaded)
     ctx.history.clear()
-    ctx.history.extend(m for m in loaded if m["role"] in ("user", "assistant"))
+    # AUDIT_V2.3 #700(a): `.get` tolerante — message sem `role` (ou entrada
+    # não-dict, caso o caller não venha de load_session) não pode levantar
+    # KeyError/TypeError e derrubar o REPL via dispatch.
+    ctx.history.extend(
+        m for m in loaded
+        if isinstance(m, dict) and m.get("role") in ("user", "assistant")
+    )
 
 
 def _handle_load(ctx: ReplContext, parts: list[str]) -> DispatchResult:

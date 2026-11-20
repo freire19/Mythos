@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import os
 import re
-import time
 
 _SENSITIVE_PATTERNS = re.compile(
     # Boundary nota: `\b` em regex Python trata `_` como char de palavra,
@@ -57,11 +56,32 @@ _cached_safe_env: dict[str, str] | None = None
 _last_env_size: int = -1
 
 
+# #D129: dynamic-loader / interpreter-injection env vars. The shell_tools
+# docstring long CLAIMED these were stripped, but they weren't (doc/impl
+# drift). Now they actually are — a compromised LD_PRELOAD/PYTHONPATH/etc. in
+# the parent env must not pivot into subprocesses the agent spawns. Mirrors
+# the MCP env blocklist (#D142).
+_LOADER_INJECTION_KEYS = frozenset({
+    "PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP", "PYTHONUSERBASE",
+    "GCONV_PATH", "NLSPATH", "LOCPATH", "HOSTALIASES", "RESOLV_HOST_CONF",
+    "NODE_PATH", "NODE_OPTIONS", "RUBYLIB", "RUBYOPT",
+    "PERL5LIB", "PERL5OPT", "PERLLIB",
+    "JAVA_TOOL_OPTIONS", "JDK_JAVA_OPTIONS", "_JAVA_OPTIONS", "CLASSPATH",
+})
+_LOADER_PREFIX_RE = re.compile(r"^(?:LD_|DYLD_)")
+
+
+def _is_loader_injection_key(k: str) -> bool:
+    return k in _LOADER_INJECTION_KEYS or bool(_LOADER_PREFIX_RE.match(k))
+
+
 def _build_safe_env() -> dict[str, str]:
     return {
         k: v
         for k, v in os.environ.items()
-        if not _SENSITIVE_PATTERNS.search(k) and k not in _EXPLICIT_KEYS
+        if not _SENSITIVE_PATTERNS.search(k)
+        and k not in _EXPLICIT_KEYS
+        and not _is_loader_injection_key(k)
     } | {"PYTHONDONTWRITEBYTECODE": "1"}
 
 

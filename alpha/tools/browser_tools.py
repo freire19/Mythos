@@ -12,10 +12,11 @@ import time
 from pathlib import Path
 from urllib.parse import urlparse
 
-from . import ToolCategory, ToolDefinition, ToolSafety, register_tool
 from .browser_session import (
     PLAYWRIGHT_AVAILABLE,
+    PLAYWRIGHT_INSTALL_MSG,
     BrowserSession,
+    cdp_endpoint,
     validate_browser_url,
 )
 
@@ -28,13 +29,18 @@ _MAX_DESCRIBE_ELEMENTS = 100
 
 def _check_available() -> dict | None:
     if not PLAYWRIGHT_AVAILABLE:
-        return {
-            "error": (
-                "Playwright not installed. Run: "
-                "pip install playwright && playwright install chromium"
-            )
-        }
+        return {"error": PLAYWRIGHT_INSTALL_MSG}
     return None
+
+
+def _compile_user_regex(pattern: str):
+    """Compila regex vinda do usuário → (rx, error_dict_or_None) (#DM077)."""
+    import re
+
+    try:
+        return re.compile(pattern), None
+    except re.error as e:
+        return None, {"error": f"Regex inválida: {e}"}
 
 
 def _domain_allowed(url: str) -> str | None:
@@ -65,7 +71,9 @@ def _domain_allowed(url: str) -> str | None:
 async def _ensure_session(headless: bool = True):
     session = await BrowserSession.get()
     if not session.is_open():
-        await session.open(headless=headless)
+        # Lazy open honours the user's attach opt-in too, so browser_navigate
+        # before browser_open lands in their Chrome, not a fresh Chromium.
+        await session.open(headless=headless, profile=_profile_default(), cdp=cdp_endpoint())
     return session
 
 
@@ -83,23 +91,66 @@ async def _require_page():
     return page, None
 
 
+async def _require_session():
+    """Returns (session, error_dict_or_None) — para tools que operam na
+    sessão (buffers, abas) em vez da página ativa. Definida antes do import
+    de `_browser_tabs` (abaixo) para que os tab tools a reutilizem (#DM077)."""
+    err = _check_available()
+    if err:
+        return None, err
+    session = await BrowserSession.get()
+    if not session.is_open():
+        return None, {"error": "Sessão de navegador não aberta. Use browser_open primeiro."}
+    return session, None
+
+
 # ─── Session lifecycle ───────────────────────────────────────────
 
 
-async def _browser_open(headless: bool = True) -> dict:
+def _profile_default() -> bool:
+    """ALPHA_BROWSER_PROFILE=1 liga o modo perfil por default (opt-in)."""
+    import os
+
+    return os.environ.get("ALPHA_BROWSER_PROFILE", "").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+
+
+async def _browser_open(headless: bool = True, profile: bool | None = None) -> dict:
     err = _check_available()
     if err:
         return err
+    if profile is None:
+        profile = _profile_default()
+    try:
+        # Attach is the USER's opt-in only (env var) — no model-controlled
+        # endpoint on this auto-approved tool.
+        endpoint = cdp_endpoint()
+    except ValueError as e:
+        return {"error": str(e)}
     try:
         session = await BrowserSession.get()
         already_open = session.is_open()
-        if not already_open:
-            await session.open(headless=headless)
-        return {
-            "status": "already_open" if already_open else "opened",
+        same_mode = already_open and session.same_mode(headless, profile, endpoint)
+        if not same_mode:
+            await session.open(headless=headless, profile=profile, cdp=endpoint)
+        result = {
+            "status": "already_open" if same_mode else ("reopened" if already_open else "opened"),
             "headless": session.headless,
+            "profile": session.persistent,
+            "attached": session.attached,
             "tab_count": len(session.pages),
         }
+        if session.profile_dir:
+            result["profile_dir"] = session.profile_dir
+        if session.attached:
+            result["cdp"] = session.cdp
+            result["note"] = (
+                "Attached to the user's own Chrome (their cookies/logins apply). You work "
+                "only in tabs you open; the user's tabs are not visible to you. "
+                "browser_close closes your tabs and disconnects."
+            )
+        return result
     except Exception as e:
         return {"error": f"{type(e).__name__}: {e}"}
 
@@ -130,6 +181,9 @@ async def _browser_status() -> dict:
         "tab_count": len(session.pages),
         "active_tab": session.active_idx,
         "headless": session.headless,
+        "profile": session.persistent,
+        "attached": session.attached,
+        "cdp": session.cdp,
     }
 
 
@@ -158,13 +212,32 @@ async def _browser_navigate(url: str, wait_until: str = "load", timeout: int = 3
         return {"error": f"Navegação falhou: {type(e).__name__}: {e}"}
 
 
+async def _history_nav(page, go) -> dict:
+    """#D137: run a history navigation (go_back/go_forward) and RE-VALIDATE the
+    landed URL. back/forward can reach a URL never checked directly — e.g. one
+    pushed via history.pushState by malicious JS, or a `file://`/internal IP —
+    bypassing the SSRF/scheme checks `_browser_navigate` applies. Rescue to
+    about:blank if the landed URL is blocked.
+    """
+    await go()
+    landed = page.url
+    if landed and not landed.startswith(("about:", "chrome:", "data:")):
+        url_err = validate_browser_url(landed) or _domain_allowed(landed)
+        if url_err:
+            try:
+                await page.goto("about:blank")
+            except Exception as e:
+                logger.warning("history-nav rescue to about:blank failed: %s", e)
+            return {"error": f"Navegação bloqueada: {url_err}", "blocked": True}
+    return {"url": page.url, "title": await page.title()}
+
+
 async def _browser_back() -> dict:
     page, err = await _require_page()
     if err:
         return err
     try:
-        await page.go_back()
-        return {"url": page.url, "title": await page.title()}
+        return await _history_nav(page, page.go_back)
     except Exception as e:
         return {"error": str(e)}
 
@@ -174,8 +247,7 @@ async def _browser_forward() -> dict:
     if err:
         return err
     try:
-        await page.go_forward()
-        return {"url": page.url, "title": await page.title()}
+        return await _history_nav(page, page.go_forward)
     except Exception as e:
         return {"error": str(e)}
 
@@ -246,10 +318,17 @@ async def _browser_screenshot(save_to: str | None = None, full_page: bool = Fals
 
         path.parent.mkdir(parents=True, exist_ok=True)
         await page.screenshot(path=str(path), full_page=full_page)
+        viewport = getattr(page, "viewport_size", None) or {}
         return {
             "saved_to": str(path),
             "size_bytes": path.stat().st_size,
             "url": page.url,
+            # Viewport para o modelo calibrar coordenadas (Plano-Browser E3).
+            "viewport": {"width": viewport.get("width"), "height": viewport.get("height")},
+            # Chave _-prefixada: oculta do JSON textual enviado ao LLM
+            # (_format_result). O executor a usa para anexar a imagem como
+            # mensagem de visão quando o provider ativo suporta (Etapa 1).
+            "_image_path": str(path),
         }
     except Exception as e:
         return {"error": str(e)}
@@ -341,7 +420,7 @@ async def _browser_wait_for(selector: str, timeout: int = 10) -> dict:
 # focused on session lifecycle, navigation, content extraction, and
 # interaction. Re-imported here so `_browser_registrations.py` can still
 # pick them up by module reference.
-from ._browser_tabs import (  # noqa: E402 — must come after _check_available is defined
+from ._browser_tabs import (  # noqa: E402,F401 — re-export (E402: after _check_available; F401: AUDIT_V2.2 #024 intentional re-export for _browser_registrations)
     _browser_close_tab,
     _browser_list_tabs,
     _browser_new_tab,
@@ -412,6 +491,252 @@ async def _browser_execute_js(code: str) -> dict:
             return {"result": result}
         except (TypeError, ValueError):
             return {"result": str(result)}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+# ─── Computer-use interactions (Plano-Browser Etapa 3) ───────────
+#
+# Coordenadas são do VIEWPORT do último browser_screenshot (que retorna
+# `viewport` justamente para o modelo calibrar).
+
+
+async def _browser_click_at(
+    x: float, y: float, button: str = "left", click_count: int = 1
+) -> dict:
+    page, err = await _require_page()
+    if err:
+        return err
+    if button not in ("left", "right", "middle"):
+        return {"error": f"Botão inválido: {button} (left|right|middle)"}
+    try:
+        await page.mouse.click(x, y, button=button, click_count=min(max(click_count, 1), 3))
+        return {"clicked_at": [x, y], "button": button, "url": page.url}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+async def _browser_scroll(
+    direction: str = "down", amount_px: int = 600, selector: str | None = None
+) -> dict:
+    page, err = await _require_page()
+    if err:
+        return err
+    try:
+        if selector:
+            await page.locator(selector).first.scroll_into_view_if_needed(timeout=5000)
+            return {"scrolled_to": selector}
+        amount = min(max(int(amount_px), 40), 20_000)
+        dx, dy = {
+            "down": (0, amount),
+            "up": (0, -amount),
+            "right": (amount, 0),
+            "left": (-amount, 0),
+        }.get(direction, (None, None))
+        if dy is None and dx is None:
+            return {"error": f"Direção inválida: {direction} (up|down|left|right)"}
+        await page.mouse.wheel(dx, dy)
+        return {"scrolled": direction, "amount_px": amount}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+async def _browser_type(text: str, delay_ms: int = 20) -> dict:
+    """Digitação char a char no elemento focado — para editores rich-text e
+    inputs que rejeitam o set direto do `browser_fill`."""
+    page, err = await _require_page()
+    if err:
+        return err
+    if len(text) > 5000:
+        return {"error": "Texto > 5000 chars — use browser_fill para conteúdo longo"}
+    try:
+        await page.keyboard.type(text, delay=min(max(delay_ms, 0), 200))
+        return {"typed_chars": len(text)}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+async def _browser_hover(
+    selector: str | None = None, x: float | None = None, y: float | None = None
+) -> dict:
+    page, err = await _require_page()
+    if err:
+        return err
+    try:
+        if selector:
+            await page.hover(selector, timeout=5000)
+            return {"hovered": selector}
+        if x is not None and y is not None:
+            await page.mouse.move(x, y)
+            return {"hovered_at": [x, y]}
+        return {"error": "Informe selector OU x+y"}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+async def _browser_drag(
+    from_x: float, from_y: float, to_x: float, to_y: float, steps: int = 12
+) -> dict:
+    page, err = await _require_page()
+    if err:
+        return err
+    try:
+        await page.mouse.move(from_x, from_y)
+        await page.mouse.down()
+        await page.mouse.move(to_x, to_y, steps=min(max(steps, 1), 50))
+        await page.mouse.up()
+        return {"dragged": {"from": [from_x, from_y], "to": [to_x, to_y]}}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+# ─── Observability (Plano-Browser Etapa 4) ───────────────────────
+
+
+def _ts_fmt(ts: float) -> str:
+    import time as _time
+
+    try:
+        return _time.strftime("%H:%M:%S", _time.localtime(ts))
+    except (OSError, OverflowError, ValueError):
+        return "?"
+
+
+async def _browser_read_console(
+    pattern: str | None = None, level: str | None = None, limit: int = 50
+) -> dict:
+    session, err = await _require_session()
+    if err:
+        return err
+    entries = list(session.console_logs)
+    if level:
+        entries = [e for e in entries if e.get("level") == level]
+    if pattern:
+        rx, rx_err = _compile_user_regex(pattern)
+        if rx_err:
+            return rx_err
+        entries = [e for e in entries if rx.search(e.get("text", ""))]
+    limit = min(max(limit, 1), 200)
+    tail = entries[-limit:]
+    return {
+        "entries": [
+            {"time": _ts_fmt(e["ts"]), "level": e.get("level"), "text": e.get("text")}
+            for e in tail
+        ],
+        "matched": len(entries),
+        "returned": len(tail),
+    }
+
+
+async def _browser_read_network(
+    url_pattern: str | None = None, status: int | None = None, limit: int = 50
+) -> dict:
+    session, err = await _require_session()
+    if err:
+        return err
+    entries = list(session.network_events)
+    if status is not None:
+        entries = [e for e in entries if e.get("status") == status]
+    if url_pattern:
+        rx, rx_err = _compile_user_regex(url_pattern)
+        if rx_err:
+            return rx_err
+        entries = [e for e in entries if rx.search(e.get("url", ""))]
+    limit = min(max(limit, 1), 200)
+    tail = entries[-limit:]
+    return {
+        "entries": [
+            {
+                "time": _ts_fmt(e["ts"]),
+                "method": e.get("method"),
+                "status": e.get("status"),
+                "url": e.get("url"),
+                **({"failure": e["failure"]} if e.get("failure") else {}),
+                **({"content_type": e["content_type"]} if e.get("content_type") else {}),
+            }
+            for e in tail
+        ],
+        "matched": len(entries),
+        "returned": len(tail),
+    }
+
+
+# ─── Complementos (Plano-Browser Etapa 5) ────────────────────────
+
+
+async def _browser_upload(selector: str, path: str) -> dict:
+    """Anexa um arquivo do WORKSPACE a um <input type=file>."""
+    page, err = await _require_page()
+    if err:
+        return err
+    from .workspace import AGENT_WORKSPACE, assert_within_workspace
+
+    p = Path(path).expanduser()
+    if not p.is_absolute():
+        p = Path(AGENT_WORKSPACE) / p
+    try:
+        p = p.resolve()
+    except OSError as e:
+        return {"error": f"Path inválido: {e}"}
+    ws_err = assert_within_workspace(p)
+    if ws_err:
+        return {"error": ws_err}
+    if not p.is_file():
+        return {"error": f"Arquivo não encontrado: {p}"}
+    try:
+        await page.set_input_files(selector, str(p), timeout=10_000)
+        return {"uploaded": str(p), "selector": selector}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+async def _browser_wait_for_navigation(
+    url_pattern: str | None = None,
+    state: str = "load",
+    timeout: int = 15,
+) -> dict:
+    """Espera a página atingir um load state e/ou uma URL (regex)."""
+    page, err = await _require_page()
+    if err:
+        return err
+    if state not in ("load", "domcontentloaded", "networkidle"):
+        return {"error": f"State inválido: {state}"}
+    timeout_ms = min(max(timeout, 1), 60) * 1000
+    try:
+        if url_pattern:
+            rx, rx_err = _compile_user_regex(url_pattern)
+            if rx_err:
+                return rx_err
+            await page.wait_for_url(rx, wait_until=state, timeout=timeout_ms)
+        else:
+            await page.wait_for_load_state(state, timeout=timeout_ms)
+        return {"url": page.url, "state": state}
+    except Exception as e:
+        return {"error": str(e), "url": page.url}
+
+
+async def _browser_aria_snapshot(selector: str = "body") -> dict:
+    """Árvore de acessibilidade real (YAML) — visão estrutural precisa da
+    página, complementa o describe_page heurístico."""
+    page, err = await _require_page()
+    if err:
+        return err
+    try:
+        locator = page.locator(selector).first
+        if not hasattr(locator, "aria_snapshot"):
+            return {
+                "error": (
+                    "aria_snapshot requer Playwright >= 1.49 — "
+                    "pip install -U playwright"
+                )
+            }
+        snapshot = await locator.aria_snapshot()
+        truncated = len(snapshot) > 30_000
+        return {
+            "selector": selector,
+            "snapshot": snapshot[:30_000],
+            "truncated": truncated,
+        }
     except Exception as e:
         return {"error": str(e)}
 

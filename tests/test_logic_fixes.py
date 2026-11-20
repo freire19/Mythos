@@ -4,7 +4,6 @@ Cobre #DL012, #DL013, #DL014, #DL019.
 """
 
 import json
-from pathlib import Path
 
 import pytest
 

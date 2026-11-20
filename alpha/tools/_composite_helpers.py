@@ -81,14 +81,70 @@ async def _run_tool(name: str, *, timeout: float | None = None, **kwargs) -> dic
             "unknown_tool",
         )
 
+    # AUDIT_V2.2 #033: the #D110 trust model skips the *approval prompt* for
+    # composite-invoked sub-tools (the outer composite was already approved) —
+    # but `is_denied` is a HARD BLOCK, not a prompt. A user `deny` rule means
+    # "never run", so honour it even inside a composite (e.g. run_tests →
+    # execute_shell when the user denied execute_shell).
+    from ..approval import is_denied
+    denied, reason = is_denied(name, kwargs)
+    if denied:
+        return _annotate_error(
+            {"error": f"Tool '{name}' bloqueada por regra deny: {reason}",
+             "denied_by_rule": True},
+            "violation",
+        )
+
+    # #015: re-enforce the active workspace on sub-tool args. The executor's
+    # workspace gate runs only for top-level tool calls; composite-invoked
+    # sub-tools bypass it (#D110 trust model). When a workspace is active
+    # (sub-agent), validate/rewrite path args here so a composite that builds
+    # a path internally can't escape the workspace. No-op when unset (main).
+    from ..agents.workspace import active_workspace as _active_ws
+    _ws = _active_ws.get()
+    if _ws:
+        from ..agents import validate_workspace_args
+        ok, new_kwargs, ws_err = validate_workspace_args(_ws, name, kwargs)
+        if not ok:
+            return _annotate_error(
+                {"error": ws_err, "workspace_violation": True}, "violation"
+            )
+        kwargs = new_kwargs
+
     if timeout is None:
         timeout = _SLOW_TOOL_TIMEOUT if name in _SLOW_TOOLS else TOOL_EXECUTION_TIMEOUT
 
-    try:
-        return await asyncio.wait_for(tool_def.executor(**kwargs), timeout=timeout)
-    except (TimeoutError, asyncio.TimeoutError):
+    # CODE_REVIEW2 #5: mirror the executor's turn-budget clamp so sub-tools
+    # invoked by composite tools (project_overview, run_tests,
+    # search_and_replace, deploy_check) also respect the wall-clock
+    # budget. Without this, a composite started near end of budget would
+    # have its outer call cancelled correctly, but inner sub-tools would
+    # still log "300s timeout" while the real cap was the clamp.
+    from .._turn_budget import clamp as _clamp_budget, remaining as _remaining_budget
+    _budget_left = _remaining_budget()
+    if _budget_left <= 0:
         return _annotate_error(
-            {"error": f"Tool '{name}' excedeu timeout de {timeout}s", "timeout": True},
+            {
+                "error": f"Tool '{name}' skipped — turn wall-clock budget exhausted",
+                "timeout": True,
+            },
+            "timeout",
+        )
+    effective_timeout = _clamp_budget(float(timeout))
+
+    try:
+        return await asyncio.wait_for(tool_def.executor(**kwargs), timeout=effective_timeout)
+    except (TimeoutError, asyncio.TimeoutError):
+        clamped = effective_timeout < timeout
+        suffix = f" (clamped from {int(timeout)}s by turn budget)" if clamped else ""
+        return _annotate_error(
+            {
+                "error": (
+                    f"Tool '{name}' excedeu timeout de "
+                    f"{int(effective_timeout)}s{suffix}"
+                ),
+                "timeout": True,
+            },
             "timeout",
         )
     except Exception as e:

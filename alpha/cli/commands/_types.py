@@ -8,7 +8,7 @@ or the other handlers.
 from __future__ import annotations
 
 import enum
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
@@ -50,5 +50,4 @@ class ReplContext:
     # transform the user's input before the LLM call.
     user_input_override: str | None = None
     image_paths_override: list[Path] | None = None
-    skip_history_record: bool = field(default=False)
     history_record_override: str | None = None

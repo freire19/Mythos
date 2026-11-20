@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import os
 import shlex
 
 from ..executor import _annotate_error
@@ -10,10 +12,19 @@ from ._composite_helpers import _resolve_target, _run_tool
 from .file_tools import _SKIP_DIRS
 
 
+def _has_test_files(root) -> bool:
+    for _dirpath, dirs, files in os.walk(str(root)):
+        dirs[:] = [d for d in dirs if d not in _SKIP_DIRS]
+        for f in files:
+            if f.endswith(".py") and (f.startswith("test_") or f.endswith("_test.py")):
+                return True
+    return False
+
+
 async def _run_tests(
-    path: str = None,
+    path: str | None = None,
     framework: str = "auto",
-    pattern: str = None,
+    pattern: str | None = None,
 ) -> dict:
     """Detect test framework and run tests."""
     target_path, err = _resolve_target(path)
@@ -31,17 +42,17 @@ async def _run_tests(
         elif (target_path / "go.mod").exists():
             framework = "go"
         else:
-            test_files = [
-                p for p in target_path.rglob("*.py")
-                if (p.name.startswith("test_") or p.name.endswith("_test.py"))
-                and not any(part in _SKIP_DIRS for part in p.relative_to(target_path).parts)
-            ]
-            if test_files:
+            if await asyncio.to_thread(_has_test_files, target_path):
                 framework = "pytest"
             else:
-                return {
-                    "error": "Nao foi possivel detectar o framework de testes automaticamente. Especifique 'framework'."
-                }
+                # #017: passar pelo `_annotate_error` (como o ramo de framework
+                # não-suportado em :69) para manter o invariante {ok:false,
+                # category} que o trust-model #D110 espera — o modelo vê falha
+                # de tool num formato único em vez de um `{error}` cru.
+                return _annotate_error(
+                    {"error": "Nao foi possivel detectar o framework de testes automaticamente. Especifique 'framework'."},
+                    "runtime",
+                )
 
     # Build command based on framework
     if framework == "pytest":
@@ -72,8 +83,12 @@ async def _run_tests(
         )
 
     result = await _run_tool("execute_shell", command=cmd, cwd=str(target_path), timeout=120)
-    result["framework"] = framework
-    result["command"] = cmd
+    # AUDIT_V2.2 #010: only stamp framework/command on a real test result —
+    # don't pollute an _annotate_error dict (timeout/denied/runtime) with keys
+    # that make a failed sub-tool look like a test that actually ran.
+    if not result.get("error") and result.get("ok") is not False:
+        result["framework"] = framework
+        result["command"] = cmd
     return result
 
 
@@ -81,25 +96,25 @@ register_tool(
     ToolDefinition(
         name="run_tests",
         description=(
-            "Detectar framework de testes e executar. Suporta pytest, npm test, cargo test, go test. "
-            "Auto-detecao baseada em arquivos de configuracao do projeto."
+            "Detect the test framework and run it. Supports pytest, npm test, cargo test, go test. "
+            "Auto-detection based on the project's configuration files."
         ),
         parameters={
             "type": "object",
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "Caminho do projeto (opcional, usa workspace padrao)",
+                    "description": "Project path (optional, uses the default workspace)",
                 },
                 "framework": {
                     "type": "string",
-                    "description": "Framework de testes. 'auto' para detectar automaticamente",
+                    "description": "Test framework. 'auto' to detect automatically",
                     "enum": ["auto", "pytest", "npm", "cargo", "go"],
                     "default": "auto",
                 },
                 "pattern": {
                     "type": "string",
-                    "description": "Padrao para filtrar testes especificos (ex: 'test_auth' para pytest)",
+                    "description": "Pattern to filter specific tests (e.g. 'test_auth' for pytest)",
                 },
             },
         },

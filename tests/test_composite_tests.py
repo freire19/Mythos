@@ -7,7 +7,6 @@ approval em sub-tools por trust model #D110).
 
 from __future__ import annotations
 
-from pathlib import Path
 from unittest.mock import patch
 
 import pytest

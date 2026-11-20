@@ -94,8 +94,8 @@ def transcribe(path: Path, *, model: str = "whisper-1", timeout: float = 120.0) 
         # OpenAI returns structured errors; surface the message field
         # so the user sees "invalid_request_error: file too short" etc.
         try:
-            err = response.json().get("error", {}).get("message", response.text)
-        except ValueError:
+            err = (response.json().get("error") or {}).get("message", response.text)
+        except (ValueError, AttributeError, TypeError):
             err = response.text
         raise AudioTranscriptionError(
             f"Whisper {response.status_code}: {err}"

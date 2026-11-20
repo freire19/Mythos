@@ -40,13 +40,17 @@ class TestSubagentBlocklistContents:
         for name in (
             "execute_shell", "execute_pipeline", "http_request",
             "query_database", "clipboard_write", "install_package",
+            # SECURITY_TIER0: execute_python nao e mais auto-aprovada; um
+            # sub-agent sem callback nao pode rodar codigo arbitrario.
+            "execute_python",
         ):
             assert name in SUBAGENT_DESTRUCTIVE_BLOCKLIST, name
 
     def test_auto_approved_destructive_not_blocked(self):
-        # write_file/edit_file/execute_python sao DESTRUCTIVE mas
-        # auto-aprovadas por design — nao devem aparecer na blocklist.
-        for name in ("write_file", "edit_file", "execute_python",
+        # write_file/edit_file sao DESTRUCTIVE mas auto-aprovadas por design —
+        # nao devem aparecer na blocklist. (execute_python saiu desta lista em
+        # SECURITY_TIER0 — agora e bloqueada para sub-agents sem callback.)
+        for name in ("write_file", "edit_file",
                      "search_and_replace", "run_tests"):
             assert name not in SUBAGENT_DESTRUCTIVE_BLOCKLIST, name
 
@@ -55,12 +59,13 @@ class TestBlocklistCoversAllDestructiveExceptPolicyExceptions:
     """Garante que toda tool DESTRUCTIVE nova force decisao explicita."""
 
     # Tools DESTRUCTIVE com tratamento especial fora da blocklist:
-    # - delegate_*: bloqueadas separadamente (anti-recursao)
+    # - delegate_* / agent_message: bloqueadas separadamente (anti-recursao,
+    #   DELEGATION_TOOLS em _delegate_core)
     # - present_plan / pre_flight: planning tools, sem efeito real (DESTRUCTIVE
     #   apenas para forcar approval gate)
     # - git_operation: gating dinamico via _auto_approve_no_callback
     POLICY_EXCEPTIONS = frozenset({
-        "delegate_task", "delegate_parallel", "delegate_consensus",
+        "delegate_task", "delegate_parallel", "delegate_consensus", "agent_message",
         "present_plan", "pre_flight", "git_operation",
     })
 

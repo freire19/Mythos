@@ -78,8 +78,8 @@ class TestRenderMarkdownIntegration:
         # Backticks in the body should still render as code spans
         text = "※ recap: commit `abc123` landed"
         out = render_markdown(text)
-        assert "\x1b[48;5;236m" in out  # BG_GRAY from code span
-        assert " abc123 " in out
+        assert "\x1b[38;5;69m" in out  # code-span tint (VIOLET_GLOW)
+        assert "abc123" in out
 
     def test_non_recap_text_unchanged(self, colors_on):
         text = "Just regular **bold** text."

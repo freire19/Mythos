@@ -23,7 +23,6 @@ import asyncio
 import difflib
 import logging
 import sys
-from typing import Any
 
 from .agent import run_agent
 from .display import C, c, render_markdown
@@ -88,23 +87,42 @@ async def _capture_reply(
     provider: str,
 ) -> str:
     """Drive run_agent for one turn and return the assembled assistant text."""
+    # CODE_REVIEW3 #3 + CODE_REVIEW4 #4: scope the turn deadline via
+    # set_deadline + Token reset in finally — consistent with main.py
+    # and delegate_tools.py (no longer the lone `with use_deadline`
+    # site). Without this, remaining()=inf in the executor's ContextVar
+    # → tools run with static timeouts (300s slow tools), re-creating
+    # the 11-minute-still-going pathology in the replay path.
+    import time as _t
+    from ._turn_budget import set_deadline as _set_deadline, reset as _reset_deadline
+    from .config import MAX_TURN_SECONDS as _MAX_TURN_SECONDS
+
     captured: list[str] = []
-    async for event in run_agent(
-        messages=messages,
-        user_message=user_message,
-        provider=provider,
-        get_tool_fn=get_tool,
-        tools=get_openai_tools(),
-    ):
-        t = event.get("type")
-        if t == "token":
-            captured.append(event.get("text", ""))
-        elif t == "done":
-            reply = event.get("reply")
-            if isinstance(reply, str) and reply:
-                return reply
-        elif t == "error":
-            return f"[error: {event.get('message', 'unknown')}]"
+    _td_token = None
+    try:
+        _td_token = _set_deadline(_t.monotonic() + _MAX_TURN_SECONDS)
+        async for event in run_agent(
+            messages=messages,
+            user_message=user_message,
+            provider=provider,
+            get_tool_fn=get_tool,
+            tools=get_openai_tools(),
+        ):
+            t = event.get("type")
+            if t == "token":
+                captured.append(event.get("text", ""))
+            elif t == "done":
+                reply = event.get("reply")
+                if isinstance(reply, str) and reply:
+                    return reply
+            elif t == "error":
+                return f"[error: {event.get('message', 'unknown')}]"
+    finally:
+        if _td_token is not None:
+            try:
+                _reset_deadline(_td_token)
+            except (LookupError, ValueError):
+                pass
     return "".join(captured)
 
 

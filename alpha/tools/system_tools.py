@@ -12,10 +12,18 @@ import asyncio
 import logging
 import shutil
 import subprocess
+from typing import TYPE_CHECKING
 
 from . import ToolCategory, ToolDefinition, ToolSafety, register_tool
 
+if TYPE_CHECKING:
+    from pathlib import Path
+
 logger = logging.getLogger(__name__)
+
+# Cache do diretório de screenshots — evita criar um novo mkdtemp
+# por chamada (cada um registra atexit). (#017)
+_screenshot_dir: "Path | None" = None  # cache reuse (#017)
 
 
 def _detect_display_server() -> str:
@@ -65,6 +73,11 @@ async def _clipboard_read() -> dict:
             "truncated": len(content) > 10000,
         }
     except asyncio.TimeoutError:
+        proc.kill()
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=3)
+        except Exception:
+            pass
         return {"error": "Timeout ao ler clipboard"}
     except asyncio.CancelledError:
         proc.kill()
@@ -104,6 +117,11 @@ async def _clipboard_write(content: str) -> dict:
 
         return {"success": True, "length": len(content)}
     except asyncio.TimeoutError:
+        proc.kill()
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=3)
+        except Exception:
+            pass
         return {"error": "Timeout ao escrever no clipboard"}
     except asyncio.CancelledError:
         proc.kill()
@@ -138,14 +156,22 @@ async def _screenshot(region: str = "full") -> dict:
     # pre-creates the dir or plants a symlink in /tmp sticky-bit.
     import atexit as _atexit
     import shutil as _shutil
-    screenshot_dir = Path(tempfile.mkdtemp(
-        prefix=f"alpha_screenshots_{os.getuid()}_",
-        dir=tempfile.gettempdir(),
-    ))
-    # mkdtemp creates with 0o700 already, but ensure it stays private.
-    os.chmod(screenshot_dir, 0o700)
-    # Cleanup is best-effort; dir may already have files from this session.
-    _atexit.register(lambda: _shutil.rmtree(str(screenshot_dir), ignore_errors=True))
+
+    global _screenshot_dir
+    if _screenshot_dir is None or not _screenshot_dir.exists():
+        _screenshot_dir = Path(tempfile.mkdtemp(
+            prefix=f"alpha_screenshots_{os.getuid()}_",
+            dir=tempfile.gettempdir(),
+        ))
+        os.chmod(_screenshot_dir, 0o700)
+        # #D138: bind the dir VALUE at registration time. A bare lambda closed
+        # over the `_screenshot_dir` global (late binding): if /tmp was wiped
+        # mid-session and the dir recreated, a 2nd handler registered and both
+        # read the *current* global at exit → the first dir leaked + double
+        # rmtree. Capturing `d=...` makes each handler clean its own dir.
+        _d = str(_screenshot_dir)
+        _atexit.register(lambda d=_d: _shutil.rmtree(d, ignore_errors=True))
+    screenshot_dir = _screenshot_dir
 
     filename = f"screenshot_{int(time.time())}_{secrets.token_hex(3)}.png"
     filepath = screenshot_dir / filename
@@ -183,6 +209,8 @@ async def _screenshot(region: str = "full") -> dict:
             ["grim", str(filepath)],
         ]
 
+    timed_out: list[str] = []
+
     for cmd in tools_to_try:
         tool_name = cmd[0]
         if not shutil.which(tool_name):
@@ -203,6 +231,9 @@ async def _screenshot(region: str = "full") -> dict:
                     "size_bytes": size,
                     "region": region,
                     "tool_used": tool_name,
+                    # Convenção do executor: chaves `_` saem do JSON textual e a
+                    # imagem viaja como bloco de vision (igual browser_screenshot).
+                    "_image_path": str(filepath),
                 }
         except asyncio.CancelledError:
             proc.kill()
@@ -211,10 +242,22 @@ async def _screenshot(region: str = "full") -> dict:
             except Exception:
                 pass
             raise
+        except (asyncio.TimeoutError, TimeoutError):
+            proc.kill()
+            try:
+                await proc.wait()
+            except Exception:
+                pass
+            timed_out.append(tool_name)
+            continue
         except (OSError, subprocess.CalledProcessError) as e:
             logger.debug("Screenshot tool %s failed: %s", tool_name, e)
             continue
 
+    if timed_out:
+        return {
+            "error": "Timeout ao capturar screenshot com: " + ", ".join(timed_out)
+        }
     return {
         "error": "Nenhuma ferramenta de screenshot disponível. "
         "Instale uma: gnome-screenshot, scrot, grim (Wayland), ou import (ImageMagick)"
@@ -256,6 +299,13 @@ async def _notify_user(
                 return {"error": f"Falha ao enviar notificação: {stderr.decode(errors='replace')}"}
 
             return {"sent": True, "channel": "desktop", "urgency": urgency}
+        except asyncio.TimeoutError:
+            proc.kill()
+            try:
+                await proc.wait()
+            except Exception:
+                pass
+            return {"error": "Timeout ao enviar notificação"}
         except asyncio.CancelledError:
             proc.kill()
             try:
@@ -281,9 +331,9 @@ register_tool(
     ToolDefinition(
         name="clipboard_read",
         description=(
-            "Ler o conteúdo atual do clipboard do sistema. "
-            "Pede aprovação porque clipboards costumam guardar senhas, "
-            "tokens e outros valores sensíveis copiados pelo usuário."
+            "Read the current system clipboard content. "
+            "Requires approval because clipboards often hold passwords, "
+            "tokens and other sensitive values the user copied."
         ),
         parameters={"type": "object", "properties": {}},
         # DESTRUCTIVE: clipboard pode conter credenciais transitorias.
@@ -298,13 +348,13 @@ register_tool(
 register_tool(
     ToolDefinition(
         name="clipboard_write",
-        description="Escrever conteúdo no clipboard do sistema (sobrescreve o conteúdo atual).",
+        description="Write content to the system clipboard (overwrites the current content).",
         parameters={
             "type": "object",
             "properties": {
                 "content": {
                     "type": "string",
-                    "description": "Conteúdo para copiar ao clipboard",
+                    "description": "Content to copy to the clipboard",
                 },
             },
             "required": ["content"],
@@ -318,13 +368,13 @@ register_tool(
 register_tool(
     ToolDefinition(
         name="screenshot",
-        description="Capturar screenshot da tela. Salva em /tmp e retorna o caminho do arquivo.",
+        description="Capture a screenshot of the screen. Saves to a private session temp dir (tempfile.mkdtemp) and returns the file path.",
         parameters={
             "type": "object",
             "properties": {
                 "region": {
                     "type": "string",
-                    "description": "Região: 'full' (tela inteira) ou 'active_window' (janela ativa). Padrão: full",
+                    "description": "Region: 'full' (entire screen) or 'active_window' (active window). Default: full",
                     "enum": ["full", "active_window"],
                     "default": "full",
                 },
@@ -352,22 +402,22 @@ register_tool(
             "properties": {
                 "message": {
                     "type": "string",
-                    "description": "Mensagem da notificação",
+                    "description": "Notification message",
                 },
                 "title": {
                     "type": "string",
-                    "description": "Título da notificação. Padrão: ALPHA",
+                    "description": "Notification title. Default: ALPHA",
                     "default": "ALPHA",
                 },
                 "urgency": {
                     "type": "string",
-                    "description": "Urgência: low, normal, high",
+                    "description": "Urgency: low, normal, high",
                     "enum": ["low", "normal", "high"],
                     "default": "normal",
                 },
                 "channel": {
                     "type": "string",
-                    "description": "Canal: 'desktop' (popup) ou 'voice' (TTS)",
+                    "description": "Channel: 'desktop' (popup) or 'voice' (TTS)",
                     "enum": ["desktop", "voice"],
                     "default": "desktop",
                 },

@@ -12,10 +12,14 @@ from alpha.display import core as display_core
 
 
 @pytest.fixture(autouse=True)
-def _reset_subagent_state():
+def _reset_subagent_state(monkeypatch):
+    # These tests cover the per-call rows of the full trace.
+    monkeypatch.setenv("ALPHA_SUBAGENT_TRACE", "full")
     display_core._subagent_last_call.clear()
+    display_core._subagent_activity.clear()
     yield
     display_core._subagent_last_call.clear()
+    display_core._subagent_activity.clear()
 
 
 class TestPrintSubagentEventToolCall:
@@ -30,7 +34,7 @@ class TestPrintSubagentEventToolCall:
             agent_label="agent-1",
         )
         out = capsys.readouterr().out
-        assert "read_file" in out
+        assert "Read(" in out
         assert "⚤" in out
 
     def test_tool_call_destructive_safety(self, capsys):
@@ -56,7 +60,7 @@ class TestPrintSubagentEventToolCall:
                 "safety": "safe",
             },
         )
-        assert "list_directory" in capsys.readouterr().out
+        assert "List(" in capsys.readouterr().out
 
     def test_duplicate_tool_call_is_collapsed(self, capsys):
         event = {
@@ -68,7 +72,7 @@ class TestPrintSubagentEventToolCall:
         display_core.print_subagent_event(event, agent_label="dup-agent")
         display_core.print_subagent_event(event, agent_label="dup-agent")
         display_core.print_subagent_event(event, agent_label="dup-agent")
-        assert capsys.readouterr().out.count("read_file") == 1
+        assert capsys.readouterr().out.count("Read(") == 1
 
     def test_flush_subagent_dup_emits_counter(self, capsys):
         event = {

@@ -66,13 +66,54 @@ def _handle_skills(ctx: ReplContext, parts: list[str]) -> DispatchResult:
 
 
 def _handle_mcp(ctx: ReplContext, parts: list[str]) -> DispatchResult:
+    sub = parts[1] if len(parts) > 1 else ""
+    if sub in ("auth", "login", "logout"):
+        return _handle_mcp_auth(ctx, sub, parts[2] if len(parts) > 2 else "")
     servers = list_mcp_servers()
     if not servers:
         print(c(C.GRAY, "  No MCP servers connected. Configure .alpha/mcp.json"))
     else:
         for s in servers:
             tool_names = ", ".join(s["tools"]) or c(C.GRAY, "(no tools)")
-            print(f"  {c(C.CYAN, s['name']):30s} {tool_names}")
+            res = c(C.GRAY_DARK, " +resources") if s.get("resources") else ""
+            print(f"  {c(C.CYAN, s['name']):30s} {tool_names}{res}")
+    print(c(C.GRAY_DARK, "  /mcp auth <server> autoriza via OAuth · /mcp logout <server> esquece o token"))
+    return DispatchResult.CONTINUE
+
+
+def _handle_mcp_auth(ctx: ReplContext, sub: str, name: str) -> DispatchResult:
+    """`/mcp auth <server>`: interactive OAuth login + reconnect.
+    `/mcp logout <server>`: drop the stored token."""
+    from alpha.mcp import loader as mcp_loader
+    from alpha.mcp import oauth
+    from alpha.mcp.client import MCPError
+
+    if not name:
+        print(f"  {c(C.YELLOW, 'Usage:')} /mcp {sub} <server>")
+        return DispatchResult.CONTINUE
+    spec = mcp_loader.find_spec(name)
+    if spec is None or not spec.is_http:
+        print_error(f"MCP '{name}' não é um servidor HTTP configurado em .alpha/mcp.json.")
+        return DispatchResult.CONTINUE
+    if sub == "logout":
+        gone = oauth.forget(spec.url)
+        print(c(C.GRAY, f"  Token de '{name}' {'removido' if gone else 'não existia'}."))
+        return DispatchResult.CONTINUE
+    if not oauth.interactive_allowed():
+        print_error("OAuth interativo indisponível aqui (sem TTY ou ALPHA_MCP_OAUTH=0).")
+        return DispatchResult.CONTINUE
+    try:
+        oauth.login(spec.url, client_id=spec.client_id or None)
+    except oauth.OAuthError as e:
+        print_error(f"OAuth falhou: {e}")
+        return DispatchResult.CONTINUE
+    print(c(C.GREEN, f"  ✓ '{name}' autorizado. Reconectando…"))
+    try:
+        client = mcp_loader.connect_server(name)
+    except MCPError as e:
+        print_error(str(e))
+        return DispatchResult.CONTINUE
+    print(c(C.GRAY, f"  {name}: {len(client.tools)} tool(s) disponíveis."))
     return DispatchResult.CONTINUE
 
 
@@ -97,6 +138,8 @@ def _handle_agent(ctx: ReplContext, parts: list[str]) -> DispatchResult:
         return DispatchResult.CONTINUE
 
     target = parts[1]
+    prev_agent = ctx.active_agent
+    prev_provider = ctx.provider
     if target in ("none", "clear", "off"):
         ctx.active_agent = None
     else:
@@ -111,7 +154,13 @@ def _handle_agent(ctx: ReplContext, parts: list[str]) -> DispatchResult:
         ctx.provider = ctx.active_agent.provider
     if ctx.active_agent and ctx.active_agent.temperature is not None:
         ctx.temperature = ctx.active_agent.temperature
-    ctx.cfg = get_provider_config(ctx.provider)
+    try:
+        ctx.cfg = get_provider_config(ctx.provider)
+    except RuntimeError as e:
+        print(c(C.RED, f"  Error: {e}"))
+        ctx.provider = prev_provider
+        ctx.active_agent = prev_agent
+        return DispatchResult.CONTINUE
     if ctx.active_agent and ctx.active_agent.model:
         ctx.cfg["model"] = ctx.active_agent.model
     ctx.system_prompt = build_system_prompt(ctx.active_agent)

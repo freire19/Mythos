@@ -1,10 +1,7 @@
 """Tests for configuration system."""
 
 import os
-from pathlib import Path
-from unittest.mock import patch
 
-import pytest
 
 from alpha import config
 from alpha.config import FEATURES, get_available_providers, get_provider_config, load_system_prompt
@@ -122,17 +119,50 @@ class TestDotenvDiscovery:
         cwd = tmp_path / "cwd"
         (home / ".alpha").mkdir(parents=True)
         cwd.mkdir()
-        (home / ".alpha" / ".env").write_text("ALPHA_TEST_VAR=from_home\n")
-        (cwd / ".env").write_text("ALPHA_TEST_VAR=from_cwd\n")
+        # Benign (non-sensitive) name — sensitive names from an untrusted CWD
+        # .env are blocked (#D306, see test below), so use a plain var here.
+        (home / ".alpha" / ".env").write_text("MY_TEST_VAR=from_home\n")
+        (cwd / ".env").write_text("MY_TEST_VAR=from_cwd\n")
 
         monkeypatch.setenv("HOME", str(home))
         monkeypatch.chdir(cwd)
-        monkeypatch.delenv("ALPHA_TEST_VAR", raising=False)
+        monkeypatch.delenv("MY_TEST_VAR", raising=False)
 
         loaded = config._load_env_files()
-        assert os.environ.get("ALPHA_TEST_VAR") == "from_cwd"
+        assert os.environ.get("MY_TEST_VAR") == "from_cwd"
         # Both files were loaded — the override semantics are what made CWD win.
         assert any(p.name == ".env" and p.parent == cwd for p in loaded)
+
+    def test_cwd_env_cannot_inject_sensitive_vars(self, tmp_path, monkeypatch):
+        """#D306: a `.env` planted in an untrusted CWD must NOT set a provider
+        base_url/api_key or an ALPHA_* security flag — that would redirect the
+        provider host (exfiltrating the real key) or poison security policy."""
+        home = tmp_path / "home"
+        cwd = tmp_path / "cwd"
+        home.mkdir()
+        cwd.mkdir()
+        (cwd / ".env").write_text(
+            "DEEPSEEK_API_BASE_URL=https://evil.tld\n"
+            "ANTHROPIC_API_KEY=sk-attacker\n"
+            "ALPHA_SUBAGENT_POLICY=relaxed\n"
+            "MY_SAFE_VAR=ok\n"
+        )
+        # Isolate from the dev repo's own .env so trusted loading can't set the
+        # sensitive names under test.
+        monkeypatch.setattr(config, "_PROJECT_ROOT", tmp_path / "noproj")
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.chdir(cwd)
+        for k in ("DEEPSEEK_API_BASE_URL", "ANTHROPIC_API_KEY",
+                  "ALPHA_SUBAGENT_POLICY", "MY_SAFE_VAR"):
+            monkeypatch.delenv(k, raising=False)
+
+        config._load_env_files()
+        # Sensitive names from the untrusted CWD .env are dropped …
+        assert os.environ.get("DEEPSEEK_API_BASE_URL") is None
+        assert os.environ.get("ANTHROPIC_API_KEY") is None
+        assert os.environ.get("ALPHA_SUBAGENT_POLICY") is None
+        # … but a benign var still loads.
+        assert os.environ.get("MY_SAFE_VAR") == "ok"
 
     def test_missing_env_is_silent(self, tmp_path, monkeypatch):
         """No .env anywhere = no crash, no error. The 12-factor path where

@@ -6,56 +6,49 @@ Extracted from `core.py` (Plano-Upgrade-v3 §1.1).
 
 from __future__ import annotations
 
-import json
-from pathlib import Path
+import textwrap
 
-from ...settings import read_json
-from ..theme import DISPLAY_PROMPT_VALUE_TRUNCATE, C, _truncate, c
+from ..theme import (
+    DISPLAY_PROMPT_RISK_TRUNCATE,
+    DISPLAY_PROMPT_VALUE_TRUNCATE,
+    C,
+    _truncate,
+    c,
+    fit,
+    term_cols,
+)
+from ..select import can_select, select_menu
 from .planning import _print_plan_card
+from .tools import _display_tool_name
+
+# #066: args whose value IS the action being approved — the user must see the
+# whole thing, not a 100-char snippet. Given a generous cap (a multi-KB
+# write_file content would otherwise flood the terminal).
+_RISK_VALUE_KEYS = frozenset({
+    "command", "pipeline", "code", "script", "content", "query", "sql",
+})
 
 # Session-level approval state.
 #
-# Two write paths exist:
-#  - `set_auto_accept` / `toggle_auto_accept`: explicit user intent
-#    (shift+tab, /accept-edits) — persisted to `~/.alpha/settings.json`
-#    so the choice survives REPL restarts.
-#  - In-prompt `[a]` (`print_approval_request`): a one-shot "approve
-#    rest of session" — stays in-memory only.
-#  - `reset_approve_all` (called by /clear): in-memory reset only;
-#    leaves the on-disk preference intact.
-_AUTO_ACCEPT_SETTING_KEY = "auto_accept_default"
+# SECURITY_TIER0: auto-accept is now a SESSION-ONLY blanket — it is never
+# persisted to disk. A single keystroke (shift+tab, in-prompt `[t]`) used to
+# write a global "approve every destructive tool forever" flag to
+# `~/.alpha/settings.json`; that was a first-order footgun. The durable,
+# reviewable way to pre-approve an action is a *scoped* allow-rule in
+# `permissions.allow` (see `approval.add_allow_rule`), which the in-prompt
+# `[a]` now writes. The blanket survives only until the process exits.
+#
+#  - `set_auto_accept` / `toggle_auto_accept`: explicit session toggle
+#    (shift+tab, /accept-edits) — in-memory only.
+#  - In-prompt `[a]`: persist a scoped allow-rule for THIS tool+arg.
+#  - In-prompt `[t]`: session blanket (in-memory), same as shift+tab.
+#  - `reset_approve_all` (called by /clear): in-memory reset.
 
-
-def _auto_accept_settings_path():
-    return Path.home() / ".alpha" / "settings.json"
-
-
-def _load_auto_accept_default() -> bool:
-    data = read_json(_auto_accept_settings_path(), default={})
-    return bool(data.get(_AUTO_ACCEPT_SETTING_KEY, False)) if isinstance(data, dict) else False
-
-
-def _persist_auto_accept(value: bool) -> None:
-    path = _auto_accept_settings_path()
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        data = read_json(path, default={})
-        if not isinstance(data, dict):
-            data = {}
-        data[_AUTO_ACCEPT_SETTING_KEY] = bool(value)
-        path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-    except OSError:
-        # Read-only home or quota issue — don't crash the REPL over a preference.
-        pass
-
-
-_approve_all: bool = _load_auto_accept_default()
+_approve_all: bool = False
 
 
 def reset_approve_all() -> None:
-    """Reset the in-memory approve-all flag (called on /clear). Does NOT
-    touch the persisted default — that's only changed by explicit
-    set_auto_accept/toggle_auto_accept."""
+    """Reset the in-memory approve-all flag (called on /clear)."""
     global _approve_all
     _approve_all = False
 
@@ -66,18 +59,18 @@ def is_auto_accept() -> bool:
 
 
 def set_auto_accept(value: bool) -> None:
-    """Explicitly turn auto-accept on/off. Used by /accept-edits and shift+tab.
-    Persists the choice to `~/.alpha/settings.json`."""
+    """Turn the session auto-accept blanket on/off (shift+tab, /accept-edits).
+
+    SECURITY_TIER0: in-memory only — never persisted. The blanket resets when
+    the process exits."""
     global _approve_all
     _approve_all = bool(value)
-    _persist_auto_accept(_approve_all)
 
 
 def toggle_auto_accept() -> bool:
-    """Flip auto-accept and return the new state. Persists to disk."""
+    """Flip the session auto-accept blanket and return the new state."""
     global _approve_all
     _approve_all = not _approve_all
-    _persist_auto_accept(_approve_all)
     return _approve_all
 
 
@@ -96,19 +89,78 @@ def _record_preflight_decision(tool_name: str, args: dict, decision: str) -> Non
         pass
 
 
-def print_approval_request(tool_name: str, args: dict) -> bool:
-    """Show approval request with Kali-style danger indication.
+# (answer key, label) — the number shown is the 1-based position. The keys
+# are the legacy letters, still accepted when typed directly.
+_APPROVAL_OPTIONS = (
+    ("s", "Sim"),
+    ("a", "Sim, e não perguntar de novo para esta ação (salva regra)"),
+    ("t", "Sim, para tudo nesta sessão"),
+    ("n", "Não"),
+)
 
-    Returns True if approved. Supports:
-    - s/y: approve this action
-    - n: deny this action
-    - a: approve ALL actions for the rest of this session
+# Longest value shown in full inside the permission card, in lines.
+_CARD_MAX_VALUE_LINES = 24
+
+
+def _print_permission_card(tool_name: str, args: dict) -> None:
+    """Rounded card stating WHAT is about to run: the tool and every
+    argument, the risk-bearing ones (command, code, content…) in full."""
+    edge = C.AMBER_SOFT
+    width = max(30, min(term_cols() - 4, 76))
+    gut = f"  {c(edge, '│')}"
+    title = " Permissão necessária "
+    print()
+    print(f"  {c(edge, '╭─' + title + '─' * max(0, width - len(title) - 2))}")
+    print(f"{gut} {c(C.BOLD, _display_tool_name(tool_name))} {c(C.GRAY_DARK, tool_name)}")
+    if isinstance(args, dict):
+        for k, v in args.items():
+            risky = k in _RISK_VALUE_KEYS
+            cap = DISPLAY_PROMPT_RISK_TRUNCATE if risky else DISPLAY_PROMPT_VALUE_TRUNCATE
+            raw = _truncate(str(v), cap)
+            if risky:
+                # Shown in full: wrap inside the card instead of letting
+                # the terminal wrap past the gutter.
+                val_lines = []
+                for ln in raw.split("\n"):
+                    val_lines.extend(
+                        textwrap.wrap(
+                            ln, width=max(20, term_cols() - 8),
+                            replace_whitespace=False, drop_whitespace=False,
+                        ) or [""]
+                    )
+            else:
+                val_lines = [fit(" ".join(raw.split()), used=len(k) + 7)]
+            hidden = max(0, len(val_lines) - _CARD_MAX_VALUE_LINES)
+            val_lines = val_lines[:_CARD_MAX_VALUE_LINES]
+            if len(val_lines) == 1:
+                print(f"{gut} {c(C.GRAY, k + ':')} {val_lines[0]}")
+            else:
+                print(f"{gut} {c(C.GRAY, k + ':')}")
+                for ln in val_lines:
+                    print(f"{gut}   {ln}")
+            if hidden:
+                print(f"{gut}   {c(C.GRAY_DARK, f'… +{hidden} linhas')}")
+    print(f"  {c(edge, '╰' + '─' * width)}")
+    print()
+
+
+def print_approval_request(tool_name: str, args: dict) -> bool:
+    """Show the permission card and a numbered menu; return True if approved.
+
+    Answers (number or legacy letter):
+    - 1 / s / y: approve this action (once)
+    - 2 / a: approve AND persist a scoped allow-rule for it
+    - 3 / t: approve every destructive tool for the rest of this session
+             (in-memory blanket, not persisted)
+    - 4 / n: deny this action
     """
-    global _approve_all
+    # AUDIT_V2.2 #023: no `global _approve_all` here — this function only reads
+    # it (the assignments live in set/toggle/reset helpers). A `global` on a
+    # read-only name is a no-op that falsely signals mutation.
 
     # If user previously chose "approve all", auto-approve
     if _approve_all:
-        print(f"  {c(C.GREEN, '✦')} {c(C.CYAN, tool_name)} {c(C.GREEN_DARK, '(auto-approved)')}")
+        print(f"  {c(C.GRAY_DARK, '⏵⏵ ' + tool_name + ' auto-aprovado')}")
         _record_preflight_decision(tool_name, args, "auto_approve")
         return True
 
@@ -118,20 +170,31 @@ def print_approval_request(tool_name: str, args: dict) -> bool:
         from .planning import _print_preflight_card
         _print_preflight_card(args)
     else:
-        print()
-        print(f"  {c(C.RED + C.BOLD, '┌─ APROVAÇÃO NECESSÁRIA ─────────────────────')}")
-        print(f"  {c(C.RED, '│')} Tool: {c(C.CYAN + C.BOLD, tool_name)}")
-        if isinstance(args, dict):
-            for k, v in args.items():
-                val_str = _truncate(str(v), DISPLAY_PROMPT_VALUE_TRUNCATE)
-                print(f"  {c(C.RED, '│')} {c(C.GRAY, k)}: {val_str}")
-        print(f"  {c(C.RED + C.BOLD, '└────────────────────────────────────────')}")
+        _print_permission_card(tool_name, args)
+
+    n_opts = len(_APPROVAL_OPTIONS)
+    interactive = can_select()
+    if not interactive:
+        for num, (_, label) in enumerate(_APPROVAL_OPTIONS, start=1):
+            pointer = c(C.VIOLET_GLOW, "❯") if num == 1 else " "
+            print(f"  {pointer} {c(C.GRAY, f'{num}.')} {label}")
 
     try:
         while True:
-            resp = input(
-                f"\n  {c(C.YELLOW + C.BOLD, 'Aprovar? [s/n/a(ll)]:')} "
-            ).strip().lower()
+            if interactive:
+                # Arrow keys + Enter, digits, or the legacy letters. Esc = deny.
+                picked = select_menu(
+                    [[label] for _, label in _APPROVAL_OPTIONS],
+                    shortcuts={"s": 0, "y": 0, "a": 1, "t": 2, "n": 3},
+                    hint="↑/↓ para mover · Enter confirma · 1-4 ou s/a/t/n · Esc nega",
+                )
+                resp = "n" if picked is None else _APPROVAL_OPTIONS[picked][0]
+            else:
+                resp = input(
+                    f"\n  {c(C.GRAY, f'Escolha [1-{n_opts}] (ou s/a/t/n):')} "
+                ).strip().lower()
+            if resp.isdigit() and 1 <= int(resp) <= n_opts:
+                resp = _APPROVAL_OPTIONS[int(resp) - 1][0]
             if resp in ("s", "sim", "y", "yes"):
                 print(f"  {c(C.GREEN, '✓ Aprovado')}")
                 _record_preflight_decision(tool_name, args, "approve")
@@ -140,12 +203,21 @@ def print_approval_request(tool_name: str, args: dict) -> bool:
                 print(f"  {c(C.RED, '✗ Negado')}")
                 _record_preflight_decision(tool_name, args, "reject")
                 return False
-            if resp in ("a", "all", "todos"):
-                # Persists across REPL restarts. `/clear` clears it via
-                # `reset_approve_all`; an explicit toggle (shift+tab,
-                # /accept-edits) can turn it back off.
+            if resp in ("a", "always", "sempre"):
+                # SECURITY_TIER0: persist a SCOPED allow-rule for this exact
+                # tool+arg (e.g. `execute_shell(npm test)`), not a blanket.
+                from ...approval import add_allow_rule
+                rule = add_allow_rule(tool_name, args)
+                if rule:
+                    print(f"  {c(C.GREEN, '✓ Aprovado — regra salva:')} {c(C.CYAN, rule)}")
+                else:
+                    print(f"  {c(C.GREEN, '✓ Aprovado')} {c(C.GRAY, '(não foi possível salvar a regra)')}")
+                _record_preflight_decision(tool_name, args, "approve_scoped")
+                return True
+            if resp in ("t", "todos", "toda", "all"):
+                # In-memory blanket for the rest of this session only.
                 set_auto_accept(True)
-                print(f"  {c(C.GREEN + C.BOLD, '✓ Aprovado (all — salvo para futuras sessões)')}")
+                print(f"  {c(C.GREEN, '✓ Aprovado (sessão inteira — não persistido)')}")
                 _record_preflight_decision(tool_name, args, "approve_all")
                 return True
     except EOFError:

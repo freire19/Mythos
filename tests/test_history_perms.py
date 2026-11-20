@@ -7,7 +7,6 @@ prevenindo leak inter-usuario em hosts compartilhados.
 import os
 import stat
 import sys
-from pathlib import Path
 from unittest import mock
 
 import pytest

@@ -17,7 +17,6 @@ from .core import (
     C,
     _format_duration,
     _format_tokens,
-    _hint_for,
     _TODO_STATUS_GLYPH,
     c,
     is_auto_accept,
@@ -29,7 +28,7 @@ logger = logging.getLogger(__name__)
 # ─── Thinking indicator (spinner) ───
 
 _SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
-_FLOWER_FRAMES = ["✻", "✽", "✾", "✿", "❀", "✿", "✾", "✽"]
+_FLOWER_FRAMES = ["·", "✢", "✳", "✶", "✻", "✽", "✻", "✶", "✳", "✢"]
 
 # Switches every ~8s so the user sees motion when the LLM is silent.
 _THINK_VERBS = (
@@ -144,14 +143,19 @@ class ThinkingIndicator:
         self._panel_capacity = self._desired_panel_rows(rows)
         reserved = self._total_reserved()
         scroll_bottom = rows - reserved
-        # Save the cursor (DECSC), push blank lines so content above
-        # scrolls up past the soon-to-be-reserved rows, set the scroll
-        # region, then restore the cursor (DECRC). Restoring keeps
-        # output flowing right below the prompt instead of jumping to
-        # the bottom of an otherwise-empty screen.
+        # Make room with RELATIVE moves: push `reserved` blank lines (the
+        # screen scrolls only as far as needed), then step back up the same
+        # amount. That lands the cursor on the line right after the last
+        # output AND guarantees it sits inside the scroll region. The old
+        # DECSC/DECRC pair restored an absolute row — when the cursor
+        # started on the last rows (queued input, resize, todo-panel
+        # growth) it came back BELOW the region, where LF never scrolls, so
+        # every later line overwrote the previous one on the bottom row.
+        # DECSTBM homes the cursor, hence the save/restore around it only.
         out = (
-            "\0337"
-            + "\n" * reserved
+            "\n" * reserved
+            + f"\033[{reserved}A"
+            + "\0337"
             + f"\033[1;{scroll_bottom}r"
             + "\0338"
         )
@@ -168,14 +172,16 @@ class ThinkingIndicator:
             return
         rows = self._term_rows or self._detect_size()[0]
         reserved = self._total_reserved()
-        # Clear all reserved rows (top-down), reset scroll region, and
-        # place the cursor at the bottom for whatever runs next (REPL
-        # prompt, shell, etc.).
+        # Save the cursor (it sits right after the last output, inside the
+        # region), clear the reserved rows, reset the scroll region (which
+        # homes the cursor) and put the cursor back. Whatever runs next —
+        # REPL prompt, a re-setup after a resize — continues from the end
+        # of the content instead of from the reserved rows.
         clears = "".join(
             f"\033[{rows - i};1H\033[K"
             for i in range(reserved - 1, -1, -1)
         )
-        out = clears + "\033[r" + f"\033[{rows};1H"
+        out = "\0337" + clears + "\033[r" + "\0338"
         try:
             sys.stdout.write(out)
             sys.stdout.flush()
@@ -242,29 +248,30 @@ class ThinkingIndicator:
         token_estimate = self._streamed_chars // 4
         if token_estimate > 0:
             parts.append(f"↓ {_format_tokens(token_estimate)} tokens")
-        hint = _hint_for(elapsed)
-        if hint:
-            parts.append(hint)
+        parts.append("ctrl+c to interrupt")
 
         if parts:
             paren = c(C.GRAY, " (" + " · ".join(parts) + ")")
         else:
             paren = ""
 
-        spinner_part = c(C.ORANGE + C.BOLD, frame)
+        spinner_part = c(C.VIOLET_GLOW, frame)
         # Breathe between two close violet shades over a 2-second cycle —
         # alive but not flicker-y. `int(elapsed * 2) % 4` ticks once per
         # 0.5s, giving 1s VIOLET / 1s VIOLET_GLOW.
         verb_color = C.VIOLET_GLOW if int(elapsed * 2) % 4 >= 2 else C.VIOLET
-        verb_part = c(verb_color + C.BOLD, f"{verb}…")
+        verb_part = c(verb_color, f"{verb}…")
+        cols = self._term_cols or self._detect_size()[1]
+        if len(verb) + 4 > cols:
+            return f"{spinner_part} {c(verb_color, verb[: max(1, cols - 4)] + '…')}"
         return f"{spinner_part} {verb_part}{paren}"
 
     # (suffix-shown, plain-text-length used for the column-fit check). Picks
     # the widest variant that fits; empty suffix means just the prefix.
     _STATUS_VARIANTS = (
-        ("(shift+tab to cycle)", len("▸▸ accept edits on (shift+tab to cycle)") + 2),
-        ("(shift+tab)",          len("▸▸ accept edits on (shift+tab)") + 2),
-        ("",                     len("▸▸ accept edits on") + 2),
+        ("(shift+tab to cycle)", len("⏵⏵ accept edits on (shift+tab to cycle)") + 4),
+        ("(shift+tab)",          len("⏵⏵ accept edits on (shift+tab)") + 4),
+        ("",                     len("⏵⏵ accept edits on") + 4),
     )
 
     def _build_status(self) -> str:
@@ -274,8 +281,8 @@ class ThinkingIndicator:
             return ""
         cols = self._term_cols or self._detect_size()[1]
         prefix = (
-            f"{c(C.AMBER_SOFT + C.BOLD, '▸▸')} "
-            f"{c(C.AMBER_SOFT + C.BOLD, 'accept edits on')}"
+            f"  {c(C.AMBER_SOFT, '⏵⏵')} "
+            f"{c(C.AMBER_SOFT, 'accept edits on')}"
         )
         for suffix, min_cols in self._STATUS_VARIANTS:
             if cols >= min_cols:
@@ -347,6 +354,12 @@ class ThinkingIndicator:
             logger.debug("thinking indicator: frame write failed: %s", e)
 
     # ── Public API ──────────────────────────────────────────────
+
+    def is_scroll_active(self) -> bool:
+        """Whether the scroll-region (reserved bottom rows) is currently
+        active. Public accessor so external renderers don't reach into the
+        private `_scroll_active` attribute (#DM072)."""
+        return self._scroll_active
 
     def start(self, label: str | None = None) -> None:
         global _active_indicator
@@ -457,6 +470,27 @@ _pinned_todos: "list[dict] | None" = None
 def get_active_indicator() -> "ThinkingIndicator | None":
     """Return the currently active indicator, if any."""
     return _active_indicator
+
+
+def erase_active_indicator_line() -> None:
+    """Compat shim for callers (main.py) that clear the inline spinner line
+    before printing output. In scroll-region mode the spinner has its own
+    reserved rows and never shares a line with output, so this is a no-op
+    there. Only matters in the inline `\\r` fallback (ALPHA_NO_SCROLL_REGION),
+    where it returns the cursor to column 0 and clears the line."""
+    ind = _active_indicator
+    if (
+        ind is None
+        or not getattr(ind, "_enabled", False)
+        or not getattr(ind, "_running", False)
+        or getattr(ind, "_scroll_active", False)
+    ):
+        return
+    try:
+        sys.stdout.write("\r\033[K")
+        sys.stdout.flush()
+    except Exception:
+        pass
 
 
 def set_pinned_todos(todos: "list[dict] | None") -> None:

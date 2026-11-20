@@ -232,8 +232,10 @@ class TestFormatResultTruncation:
         parsed = json.loads(out)
         assert parsed.get("truncated") is True
         assert "preview" in parsed
-        # Preview field deve ter cortado a string
-        assert len(parsed["preview"]["content"]) <= 1000
+        # Preview field deve ter cortado a string: 1000 chars preservados
+        # (600 head + 400 tail, Issue #005) + marcador de omissão (~55).
+        assert len(parsed["preview"]["content"]) <= 1100
+        assert "chars omitted" in parsed["preview"]["content"]
 
     def test_huge_result_fallback_minimal(self):
         # 100 strings de TOOL_RESULT_MAX_CHARS para forcar fallback

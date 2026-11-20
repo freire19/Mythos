@@ -14,7 +14,23 @@ from pathlib import Path
 
 import httpx
 
+from ._http_singleton import LoopAwareClient
+from ._security_log import sanitize_for_log
+
 logger = logging.getLogger(__name__)
+
+# LoopAwareClient — reusa httpx.AsyncClient entre chamadas OCR e
+# rebuilda automaticamente quando o event loop troca (asyncio.run).
+# Substitui singleton manual que ignorava timeout e crashava em
+# single-shot mode (#029 / code-review).
+_ocr_client = LoopAwareClient(
+    name="ocr",
+    build=lambda: httpx.AsyncClient(
+        timeout=httpx.Timeout(60.0),
+        limits=httpx.Limits(max_keepalive_connections=2, max_connections=10),
+    ),
+)
+
 
 GEMINI_OCR_BASE = "https://generativelanguage.googleapis.com/v1beta/openai"
 # Override via env to trade cost vs quality:
@@ -106,26 +122,37 @@ async def ocr_images(
     }
 
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(timeout)) as client:
-            resp = await client.post(
-                f"{GEMINI_OCR_BASE}/chat/completions",
-                json=payload,
-                headers=headers,
+        client = await _ocr_client.get()
+        # Per-request timeout override — the shared LoopAwareClient was
+        # built with a default 60s, but each caller can specify its own
+        # via the `timeout` parameter. httpx honors per-request timeout
+        # over the client-level default.
+        resp = await client.post(
+            f"{GEMINI_OCR_BASE}/chat/completions",
+            json=payload,
+            headers=headers,
+            timeout=httpx.Timeout(timeout),
+        )
+        if resp.status_code >= 400:
+            # #D132: sanitize the error body before logging — Gemini error
+            # bodies can echo request fragments / keys.
+            logger.error(
+                "Gemini OCR HTTP %d: %s",
+                resp.status_code,
+                sanitize_for_log(resp.text, max_chars=500),
             )
-            if resp.status_code >= 400:
-                logger.error(
-                    "Gemini OCR HTTP %d: %s",
-                    resp.status_code,
-                    resp.text[:500],
-                )
-                return ""
-            data = resp.json()
-            return data["choices"][0]["message"]["content"]
+            return ""
+        data = resp.json()
+        # #D106: a resposta pode trazer content=null (safety block, resposta
+        # vazia). Coagir para "" honra o contrato `-> str` — sem isso, retornar
+        # None quebra qualquer `.strip()`/concatenacao no caller.
+        return data["choices"][0]["message"]["content"] or ""
     except httpx.TimeoutException:
         logger.error("Gemini OCR timeout (%.0fs)", timeout)
         return ""
     except Exception as e:
-        logger.error("Gemini OCR failed: %s", e)
+        # #D106: exc_info preserva o frame onde o parse/index falhou.
+        logger.error("Gemini OCR failed: %s", e, exc_info=True)
         return ""
 
 

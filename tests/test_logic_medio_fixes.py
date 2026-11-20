@@ -6,7 +6,6 @@ Cobre #DL015 (workspace helper), #DL017 (error structure), #DL020
 
 from pathlib import Path
 
-import pytest
 
 from alpha.executor import _annotate_error
 from alpha.tools.workspace import AGENT_WORKSPACE, assert_within_workspace
@@ -74,21 +73,35 @@ class TestLoopDetectionMessageRole:
     """Quando _detect_loop dispara, a mensagem injetada deve ser role=user
     em vez de role=system (#DL020)."""
 
-    def test_loop_message_uses_user_role(self):
-        # Verificacao indireta: ler o codigo-fonte da injecao e checar
-        # que usa role=user. Catches alguem revertendo para role=system.
-        import alpha.agent as agent_mod
-        src = Path(agent_mod.__file__).read_text()
-        # Procura a string `[ALPHA SYSTEM NOTE] Loop detected` (que so aparece
-        # no payload da mensagem, nao no logger).
-        idx = src.find("[ALPHA SYSTEM NOTE] Loop detected")
-        assert idx != -1, "marker da mensagem de loop nao encontrado"
-        # Trecho relevante: ~300 chars antes do marker
-        snippet = src[max(0, idx - 300): idx]
-        assert '"role": "user"' in snippet, (
-            "Loop detection should append role=user "
-            "(role=system tardia confunde providers)"
+    def test_loop_message_uses_user_role(self, monkeypatch):
+        # Verificacao comportamental: roda o caminho de forced-summary com um
+        # LLM stub e confirma que a mensagem injetada (com o marker) entra como
+        # role=user, nao role=system (tardio confunde providers). Robusto a
+        # refactors — checa o efeito, nao a proximidade no codigo-fonte.
+        import asyncio
+        from alpha import agent
+
+        async def fake_stream(messages, tools, temperature, provider=None, **k):
+            yield {"type": "final", "content": "ok", "usage": {}}
+
+        monkeypatch.setattr(agent, "stream_chat_with_tools", fake_stream)
+
+        msgs = [{"role": "system", "content": "sys"}]
+
+        async def run():
+            async for _ in agent._stream_forced_summary(
+                msgs, 0.5, "deepseek", "m", "",
+                "[ALPHA SYSTEM NOTE] Loop detected (x). do it",
+                "loop_detected", "detail", "label",
+            ):
+                pass
+
+        asyncio.run(run())
+        injected = [m for m in msgs if "[ALPHA SYSTEM NOTE]" in str(m.get("content", ""))]
+        assert injected, "mensagem injetada nao encontrada"
+        assert injected[0]["role"] == "user", (
+            "forced-summary deve injetar role=user (role=system tardia confunde providers)"
         )
-        assert '"role": "system"' not in snippet, (
+        assert all(m["role"] != "system" or m is msgs[0] for m in injected), (
             "Regression: role=system reaparecu na injecao"
         )

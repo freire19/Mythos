@@ -300,3 +300,80 @@ class TestPlainTextResponse:
         assert events[-1]["type"] == "done"
         assert events[-1]["reply"] == "Olá. Como posso ajudar?"
         assert state["i"] == 1
+
+
+class TestSessionCapRecheck:
+    """#012: the session cost cap must be re-checked AFTER the streaming turn
+    that recorded usage, BEFORE running that turn's tools — otherwise a turn
+    that breaches the cap still executes its tools (which may delegate and
+    spend more), only aborting at the top of the NEXT iteration."""
+
+    @pytest.mark.asyncio
+    async def test_breach_after_stream_aborts_before_tool_runs(self, monkeypatch):
+        ran = {"tool": False}
+
+        async def _exec(**_kwargs):
+            ran["tool"] = True
+            return {"ok": True}
+
+        tools = {"echo": ToolDefinition(
+            name="echo", description="mock", parameters={"type": "object", "properties": {}},
+            safety=ToolSafety.SAFE, executor=_exec,
+        )}
+
+        # Cost is BELOW the cap at the top-of-iteration gate (1st call) and
+        # ABOVE it on the post-stream recheck (2nd call) — isolating the new
+        # recheck from the pre-existing top gate.
+        calls = {"n": 0}
+
+        def fake_cost():
+            calls["n"] += 1
+            return 0.0 if calls["n"] == 1 else 999.0
+
+        monkeypatch.setattr(agent_mod, "session_cost_usd", fake_cost)
+        monkeypatch.setenv("ALPHA_MAX_SESSION_COST_USD", "1.0")
+
+        turns = [
+            ("tools", "Calling echo.", [
+                {"id": "call_1", "name": "echo", "arguments": "{}"},
+            ]),
+        ]
+        fake, state = _make_mock_stream(turns)
+        _patch_stream(monkeypatch, fake)
+
+        events = await _drain(agent_mod.run_agent(
+            messages=[{"role": "user", "content": "do it"}],
+            user_message="do it",
+            provider="deepseek",
+            get_tool_fn=_get_tool_fn(tools),
+            tools=[],
+        ))
+
+        # Aborted with a cap error...
+        assert events[-1]["type"] == "error"
+        assert "Session cost" in events[-1]["message"]
+        # ...the streaming turn ran once, but its tool never executed.
+        assert state["i"] == 1
+        assert ran["tool"] is False
+        assert "tool_result" not in [e["type"] for e in events]
+
+    @pytest.mark.asyncio
+    async def test_top_gate_still_aborts_before_any_stream(self, monkeypatch):
+        # The pre-existing top-of-iteration gate must still fire on turn 0.
+        monkeypatch.setattr(agent_mod, "session_cost_usd", lambda: 999.0)
+        monkeypatch.setenv("ALPHA_MAX_SESSION_COST_USD", "1.0")
+
+        fake, state = _make_mock_stream([("text", "should never stream")])
+        _patch_stream(monkeypatch, fake)
+
+        events = await _drain(agent_mod.run_agent(
+            messages=[{"role": "user", "content": "hi"}],
+            user_message="hi",
+            provider="deepseek",
+            get_tool_fn=lambda n: None,
+            tools=[],
+        ))
+        assert events[-1]["type"] == "error"
+        assert "Session cost" in events[-1]["message"]
+        # No stream consumed — aborted before the first LLM call.
+        assert state["i"] == 0

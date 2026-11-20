@@ -101,11 +101,18 @@ def _build_key_bindings(attached: dict[int, Path]) -> KeyBindings:
     def _(event):
         _attach_clipboard_image(event.current_buffer, attached)
 
-    @kb.add("s-tab")  # Shift+Tab toggles auto-accept-edits mode
+    @kb.add("s-tab")  # Shift+Tab cycles: normal → accept-edits → plan → normal
     def _(event):
-        from .display import toggle_auto_accept
+        from . import plan_mode
+        from .display import is_auto_accept, set_auto_accept
 
-        toggle_auto_accept()
+        if plan_mode.is_active():
+            plan_mode.set_active(False)          # plan → normal
+        elif is_auto_accept():
+            set_auto_accept(False)
+            plan_mode.set_active(True)           # accept-edits → plan
+        else:
+            set_auto_accept(True)                # normal → accept-edits
         event.app.invalidate()  # redraw bottom toolbar
 
     @kb.add("c-c")
@@ -126,7 +133,7 @@ def _build_key_bindings(attached: dict[int, Path]) -> KeyBindings:
 def _frame_border() -> str:
     """Horizontal rule used as the top/bottom frame around the prompt."""
     from .display import C, c
-    cols = max(40, shutil.get_terminal_size((80, 24)).columns - 4)
+    cols = max(20, shutil.get_terminal_size((80, 24)).columns)
     return c(C.GRAY_DARK, "─" * cols)
 
 
@@ -134,23 +141,21 @@ def _bottom_toolbar() -> "ANSI":
     """Bottom frame: closing border, blank spacer, then accept-edits status.
     Matches Claude Code's framed input zone — the prompt sits between this
     block and the top border printed by `read_input` before session.prompt."""
+    from . import plan_mode
     from .display import C, c, is_auto_accept
 
-    if is_auto_accept():
-        status = (
-            f" {c(C.AMBER_SOFT + C.BOLD, '»»')} "
-            f"{c(C.AMBER_SOFT + C.BOLD, 'accept edits on')} "
-            f"{c(C.GRAY, '(shift+tab to cycle) · ctrl+c to interrupt')}"
-        )
+    hint = c(C.GRAY_DARK, "(shift+tab to cycle)")
+    if plan_mode.is_active():
+        status = f"  {c(C.CYAN, '⏸ plan mode on')} {hint}"
+    elif is_auto_accept():
+        status = f"  {c(C.AMBER_SOFT, '⏵⏵ accept edits on')} {hint}"
     else:
-        status = (
-            f" {c(C.GRAY, '»»')} "
-            f"{c(C.GRAY, 'accept edits off')} "
-            f"{c(C.GRAY_DARK, '(shift+tab to enable) · ctrl+c to interrupt')}"
+        status = "  " + c(
+            C.GRAY_DARK, "/help for commands · shift+tab to cycle modes"
         )
-    # Bottom border + blank spacer + status (3 lines, prompt_toolkit renders
-    # bottom_toolbar as multi-line when ANSI string contains newlines).
-    text = f"  {_frame_border()}\n\n{status}"
+    # Closing border + status line (prompt_toolkit renders bottom_toolbar
+    # as multi-line when the ANSI string contains newlines).
+    text = f"{_frame_border()}\n{status}"
     return ANSI(text)
 
 
@@ -171,24 +176,20 @@ def _resolve_placeholders(text: str, attached: dict[int, Path]) -> tuple[str, li
     return text, paths
 
 
-_BUILTIN_COMMANDS: list[tuple[str, str]] = [
-    ("/init", "Draft an ALPHA.md for this project"),
-    ("/clear", "Clear history and screen"),
-    ("/history", "Show conversation history"),
-    ("/save", "Save current session"),
-    ("/load", "Load a previous session"),
-    ("/continue", "Resume from last session"),
-    ("/sessions", "List saved sessions"),
-    ("/tools", "List available tools"),
-    ("/skills", "List registered skills (ready vs inactive)"),
-    ("/mcp", "List connected MCP servers"),
-    ("/image", "Attach an image (Ctrl+V also works)"),
-    ("/agents", "List named agents"),
-    ("/agent", "Show/switch active agent"),
-    ("/model", "Show/switch provider & model"),
-    ("/help", "Show all commands"),
-    ("/exit", "Exit"),
-]
+def _builtin_commands() -> list[tuple[str, str]]:
+    """Builtin ``(command, description)`` pairs for the autocomplete.
+
+    #DM068: derived from the single-source catalogue in
+    ``alpha.cli.commands`` instead of a hand-kept copy that drifts.
+    Imported lazily (and only once per cache build, see #DP021 below)
+    so keystrokes never pay the import cost of the commands package.
+    """
+    try:
+        from alpha.cli.commands import iter_commands
+        return iter_commands()
+    except Exception as e:
+        logger.debug("command catalogue unavailable for slash completer: %s", e)
+        return []
 
 
 class _SlashCompleter(Completer):
@@ -202,7 +203,7 @@ class _SlashCompleter(Completer):
     # DEEP_PERFORMANCE #D029: cache de entries para evitar list_skills()
     # (que itera o filesystem) a cada keystroke. Invalidado quando skills
     # são recarregadas via invalidate_skill_entries_cache().
-    _entries_cache: list[tuple[str, str]] | None = None
+    _entries_cache: list[tuple[str, str, str]] | None = None
 
     @classmethod
     def invalidate_cache(cls) -> None:
@@ -216,12 +217,15 @@ class _SlashCompleter(Completer):
         # Skills are imported lazily so this module stays import-cheap and
         # doesn't pull the registry at definition time.
         if _SlashCompleter._entries_cache is None:
-            entries: list[tuple[str, str]] = list(_BUILTIN_COMMANDS)
+            entries: list[tuple[str, str, str]] = [
+                (cmd, desc, cmd[1:].lower()) for cmd, desc in _builtin_commands()
+            ]
             try:
                 from .skills import list_skills
                 for s in list_skills():
                     meta = (s.description or "").strip().split("\n", 1)[0]
-                    entries.append((f"/{s.name}", meta[:80] or "skill"))
+                    name = f"/{s.name}"
+                    entries.append((name, meta[:80] or "skill", name[1:].lower()))
             except Exception as e:
                 # #DM043: silencioso engole skill listing — debug log preserva
                 # diagnostico sem poluir terminal (skills sao opcionais).
@@ -237,17 +241,17 @@ class _SlashCompleter(Completer):
         if not needle:
             ordered = entries
         else:
-            prefix_hits: list[tuple[str, str]] = []
-            substr_hits: list[tuple[str, str]] = []
-            for cmd, desc in entries:
-                name = cmd[1:].lower()
+            prefix_hits: list[tuple[str, str, str]] = []
+            substr_hits: list[tuple[str, str, str]] = []
+            for entry in entries:
+                name = entry[2]
                 if name.startswith(needle):
-                    prefix_hits.append((cmd, desc))
+                    prefix_hits.append(entry)
                 elif needle in name:
-                    substr_hits.append((cmd, desc))
+                    substr_hits.append(entry)
             ordered = prefix_hits + substr_hits
 
-        for cmd, desc in ordered:
+        for cmd, desc, _name in ordered:
             yield Completion(
                 cmd,
                 start_position=-len(line),
@@ -413,16 +417,16 @@ def _patch_completions_menu(session: PromptSession) -> None:
 _SESSION: PromptSession | None = None
 
 
-# Style applied to the user-typed text so it's visually distinct from the
-# prompt arrow and from agent output. Bright neon green + bold mirrors the
-# Alpha brand and matches the indicator/prompt arrow tint.
+# Typed text uses the terminal's default foreground: the frame and the `❯`
+# arrow already mark the input area, and once submitted the message is
+# re-printed on a gray band (`format_user_echo`).
 _INPUT_STYLE = Style.from_dict({
-    "": "fg:#5fff5f bold",  # the empty class styles unstyled buffer text
-    # prompt_toolkit gives bottom-toolbar a reversed bg by default, which
-    # turns our ANSI greens into hard-to-read fg-on-light. Force a dark bg
-    # + neutral fg so the embedded ANSI escapes (from _bottom_toolbar) win.
-    "bottom-toolbar": "bg:#1a1a1a fg:#cccccc noreverse",
-    "bottom-toolbar.text": "bg:#1a1a1a fg:#cccccc noreverse",
+    # prompt_toolkit gives bottom-toolbar a reversed bg by default. Drop the
+    # reverse and keep the terminal's own background, so the frame looks
+    # the same on any color scheme and the embedded ANSI escapes (from
+    # _bottom_toolbar) win.
+    "bottom-toolbar": "noreverse bg:default fg:default",
+    "bottom-toolbar.text": "noreverse bg:default fg:default",
     # Slash-autocomplete menu — match Claude Code's look: terminal-dark bg,
     # discreet text colors, subtle selection highlight (no bright gray bar).
     "completion-menu": "bg:#0c0c0c",
@@ -436,6 +440,10 @@ _INPUT_STYLE = Style.from_dict({
 })
 
 
+# Rows opened under the prompt for the slash-command completion menu.
+_MENU_ROWS = 8
+
+
 def _get_session() -> PromptSession:
     global _SESSION
     if _SESSION is None:
@@ -444,9 +452,24 @@ def _get_session() -> PromptSession:
             complete_while_typing=True,
             bottom_toolbar=_bottom_toolbar,
             style=_INPUT_STYLE,
+            # The live prompt (frame + toolbar) is erased on submit and
+            # replaced by a compact echo — see `read_input`.
+            erase_when_done=True,
             include_default_pygments_style=False,
+            # prompt_toolkit keeps 8 empty rows under the prompt for the
+            # completion menu by default, which pushes the closing border
+            # and the status line far below the input. Reserve them only
+            # while a slash command is being typed (see below).
+            reserve_space_for_menu=0,
         )
         _patch_completions_menu(_SESSION)
+
+        def _reserve_for_slash_menu(buff) -> None:
+            _SESSION.reserve_space_for_menu = (
+                _MENU_ROWS if buff.text.lstrip().startswith("/") else 0
+            )
+
+        _SESSION.default_buffer.on_text_changed += _reserve_for_slash_menu
     return _SESSION
 
 
@@ -466,6 +489,77 @@ def _read_input_simple(prompt_ansi: str) -> tuple[str, list[Path]]:
     return text, []
 
 
+# ── /loop integration ─────────────────────────────────────────────
+# A scheduled prompt is delivered THROUGH read_input so the REPL treats it
+# exactly like typed input. The sentinel is what the prompt_toolkit app
+# returns when the timer exits it; it can't be typed (contains NUL).
+_SCHEDULE_SENTINEL = "\x00__alpha_schedule_due__"
+_IDLE_RECHECK_S = 5.0
+
+
+def _pop_scheduled() -> str | None:
+    """Return the next due scheduled prompt (echoed), or None."""
+    from . import scheduler
+    from .display import C, c
+
+    # One prompt per read: anything else that is due fires on the next
+    # read_input call (after this one's turn finishes).
+    due = scheduler.pop_one_due()
+    if due is None:
+        return None
+    sid, prompt = due
+    sys.stdout.write(f"\n  {c(C.AMBER_SOFT, '⏰')} {c(C.GRAY, f'loop #{sid}:')} {prompt}\n")
+    sys.stdout.flush()
+    return prompt
+
+
+def _arm_schedule_timer(session: "PromptSession"):
+    """Start a daemon timer that exits the running prompt when the next
+    schedule is due and the input buffer is empty. Returns the timer (or
+    None when nothing is scheduled) — caller cancels it in `finally`."""
+    import threading
+
+    from . import scheduler
+
+    delay = scheduler.next_due_in()
+    if delay is None:
+        return None
+    state = {"timer": None}
+
+    def _exit_if_idle() -> None:
+        app = session.app
+        if not app.is_running:
+            return
+        if app.current_buffer.text.strip():
+            # User is composing — try again later rather than eating it.
+            _schedule(_IDLE_RECHECK_S)
+            return
+        app.exit(result=_SCHEDULE_SENTINEL)
+
+    def _fire() -> None:
+        app = session.app
+        loop = getattr(app, "loop", None)
+        if loop is None or loop.is_closed():
+            return
+        loop.call_soon_threadsafe(_exit_if_idle)
+
+    def _schedule(after: float) -> None:
+        t = threading.Timer(max(0.05, after), _fire)
+        t.daemon = True
+        state["timer"] = t
+        t.start()
+
+    _schedule(delay)
+
+    class _Handle:
+        def cancel(self) -> None:
+            t = state.get("timer")
+            if t is not None:
+                t.cancel()
+
+    return _Handle()
+
+
 def read_input(prompt_ansi: str) -> tuple[str, list[Path]]:
     """Read a line from the user. Returns (text, image_paths).
 
@@ -473,21 +567,57 @@ def read_input(prompt_ansi: str) -> tuple[str, list[Path]]:
     at the prompt clears the current input instead of exiting — many
     terminals deliver Ctrl+Shift+C as Ctrl+C, and stray copy attempts
     from adjacent windows would otherwise close the session by accident.
+
+    `/loop` schedules that are already due are returned here instead of
+    blocking; while blocked, a timer wakes the prompt when one becomes due
+    (framed input only — the `input()` fallback can't be interrupted, so
+    there schedules fire at the next turn boundary).
     """
+    scheduled = _pop_scheduled()
+    if scheduled is not None:
+        _echo(scheduled, note="(/loop)")
+        return scheduled, []
+
     if use_simple_input():
         return _read_input_simple(prompt_ansi)
 
     # Top frame border + spacer above the prompt — pairs with the bottom
     # border emitted via `_bottom_toolbar` to give the input area a
     # demarcated "input box" feel (mirrors Claude Code's frame).
-    sys.stdout.write(f"\n  {_frame_border()}\n")
+    sys.stdout.write(f"\n{_frame_border()}\n")
     sys.stdout.flush()
 
     attached: dict[int, Path] = {}
     kb = _build_key_bindings(attached)
     session = _get_session()
-    text = session.prompt(ANSI(prompt_ansi), key_bindings=kb)
+    timer = _arm_schedule_timer(session)
+    try:
+        text = session.prompt(ANSI(prompt_ansi), key_bindings=kb)
+    finally:
+        if timer is not None:
+            timer.cancel()
+        # `erase_when_done` removed the prompt and toolbar and left the
+        # cursor on the prompt's first row. Remove our own two rows above
+        # it (spacer + top border) too, so the frame leaves no trace.
+        sys.stdout.write("\033[2A\r\033[J")
+        sys.stdout.flush()
+    if text == _SCHEDULE_SENTINEL:
+        scheduled = _pop_scheduled()
+        if scheduled:
+            _echo(scheduled, note="(/loop)")
+        return (scheduled or ""), []
+    _echo(text)
     return _resolve_placeholders(text, attached)
+
+
+def _echo(text: str, note: str = "") -> None:
+    """Leave the submitted message in the transcript (`❯ text` on a gray
+    band). Empty submissions leave nothing behind."""
+    if not text.strip():
+        return
+    from .display import format_user_echo
+
+    print(format_user_echo(text.strip("\n"), note=note))
 
 
 def cleanup_temp_images() -> None:

@@ -13,8 +13,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - id: release
-        uses: googleapis/release-please-action@v4
+        uses: googleapis/release-please-action@5c625bfb5d1ff62eadeeb3772007f7f66fdcf071  # v4.4.1
         with:
+          # #701: com `--auto` o merge acontece DEPOIS deste run (quando os
+          # checks passam); a tag é criada pelo run seguinte NESTE step — que
+          # portanto precisa do mesmo PAT do #031, senão a tag sai com o
+          # GITHUB_TOKEN e publish-pypi/build-binary não disparam.
+          token: ${{ secrets.RELEASE_PLEASE_PAT || secrets.GITHUB_TOKEN }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
       - name: Merge release PR
@@ -22,12 +27,28 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_JSON: ${{ steps.release.outputs.pr }}
+        # AUDIT_V2.3 #701: `--auto` respeita os required status checks do
+        # branch protection — o merge imediato antigo publicava no PyPI sem
+        # NENHUM job de CI precisar passar (Actions não faz gate
+        # cross-workflow por default). Requisitos no GitHub (Settings):
+        #   1. "Allow auto-merge" habilitado no repo;
+        #   2. branch protection em master exigindo os checks do ci.yml.
+        # Sem isso o passo falha alto (release trava com mensagem clara) em
+        # vez de shipar sem CI — fail-closed deliberado.
         run: |
           PR_NUMBER=$(echo "$PR_JSON" | jq -r .number)
-          gh pr merge --squash "$PR_NUMBER" --repo "$GITHUB_REPOSITORY"
+          gh pr merge --squash --auto "$PR_NUMBER" --repo "$GITHUB_REPOSITORY"
       - name: Create release tag after merge
         if: ${{ steps.release.outputs.pr }}
-        uses: googleapis/release-please-action@v4
+        uses: googleapis/release-please-action@5c625bfb5d1ff62eadeeb3772007f7f66fdcf071  # v4.4.1
         with:
+          # AUDIT_V2.2 #031: a tag pushed with the default GITHUB_TOKEN does
+          # NOT trigger other workflows (GitHub's anti-recursion rule), so
+          # publish-pypi.yml / build-binary.yml (on: push tags) never fired —
+          # releases were silently stuck without PyPI/binary artifacts. Push
+          # the tag with a PAT so those tag-triggered workflows run. Falls back
+          # to GITHUB_TOKEN when the secret is absent (no behavior change until
+          # `RELEASE_PLEASE_PAT` is provisioned in repo/org secrets).
+          token: ${{ secrets.RELEASE_PLEASE_PAT || secrets.GITHUB_TOKEN }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json

@@ -13,6 +13,12 @@ from .safe_env import get_safe_env
 
 logger = logging.getLogger(__name__)
 
+# #DM062: caps únicos de truncagem da saída das tools de subprocess/rede.
+# Antes: 15000/5000 hardcodados em 15+ sites (shell/git/code/pipeline/network),
+# com git divergindo em 3000 para stderr. Tunar o orçamento de saída = editar aqui.
+STDOUT_CAP = 15000
+STDERR_CAP = 5000
+
 
 class SubprocessResult:
     """Result of run_subprocess_safe()."""

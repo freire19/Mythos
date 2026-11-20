@@ -8,16 +8,19 @@ SECURITY: Only operates within AGENT_WORKSPACE. Destructive operations
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import re
 import shlex
 from pathlib import Path
 
 from . import ToolCategory, ToolDefinition, ToolSafety, register_tool
-from ._subprocess_helpers import SubprocessTimeoutError, run_subprocess_safe
+from ._subprocess_helpers import (
+    STDERR_CAP,
+    STDOUT_CAP,
+    SubprocessTimeoutError,
+    run_subprocess_safe,
+)
 from ..config import TOOL_TIMEOUTS
-from .safe_env import get_safe_env
 from .workspace import AGENT_WORKSPACE, assert_within_workspace
 
 # #D006: pre-compilada no module level. Antes era recompilada em cada
@@ -104,8 +107,9 @@ async def _run_git(args: list[str], cwd: str, timeout: int | None = None) -> dic
 
     return {
         "exit_code": r.returncode,
-        "stdout": r.stdout.decode(errors="replace")[:15000],
-        "stderr": r.stderr.decode(errors="replace")[:3000],
+        "stdout": r.stdout.decode(errors="replace")[:STDOUT_CAP],
+        # #DM062: alinhado ao STDERR_CAP global (era 3000, divergente das demais tools).
+        "stderr": r.stderr.decode(errors="replace")[:STDERR_CAP],
     }
 
 
@@ -430,11 +434,11 @@ def _validate_user_inputs(branch, message, files) -> str | None:
 
 async def _git_operation(
     action: str,
-    path: str = None,
-    message: str = None,
-    branch: str = None,
-    files: list = None,
-    args: str = None,
+    path: str | None = None,
+    message: str | None = None,
+    branch: str | None = None,
+    files: list | None = None,
+    args: str | None = None,
 ) -> dict:
     """Execute a structured git operation via dispatch table (#DM044)."""
     action = action.lower().strip()
@@ -462,40 +466,40 @@ register_tool(
     ToolDefinition(
         name="git_operation",
         description=(
-            "Executar operações git de forma segura e estruturada. "
-            "Ações de leitura: status, diff, log, branch, show, blame, stash_list, remote, tag. "
-            "Ações de escrita: add, commit, checkout, branch_create, branch_delete, stash, "
+            "Run git operations safely and in a structured way. "
+            "Read actions: status, diff, log, branch, show, blame, stash_list, remote, tag. "
+            "Write actions: add, commit, checkout, branch_create, branch_delete, stash, "
             "stash_pop, pull, push, merge, rebase, reset, clean, tag_create. "
-            "Force push em main/master é bloqueado."
+            "Force push to main/master is blocked."
         ),
         parameters={
             "type": "object",
             "properties": {
                 "action": {
                     "type": "string",
-                    "description": "Ação git a executar",
+                    "description": "Git action to run",
                     "enum": sorted(_ALL_ACTIONS),
                 },
                 "path": {
                     "type": "string",
-                    "description": "Caminho do repositório (opcional, usa workspace padrão)",
+                    "description": "Repository path (optional, uses the default workspace)",
                 },
                 "message": {
                     "type": "string",
-                    "description": "Mensagem para commit, stash ou tag",
+                    "description": "Message for commit, stash or tag",
                 },
                 "branch": {
                     "type": "string",
-                    "description": "Nome da branch (para checkout, merge, rebase, branch_create, branch_delete)",
+                    "description": "Branch name (for checkout, merge, rebase, branch_create, branch_delete)",
                 },
                 "files": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "Lista de arquivos (para add, blame)",
+                    "description": "List of files (for add, blame)",
                 },
                 "args": {
                     "type": "string",
-                    "description": "Argumentos extras como string (para diff, log, push, reset, show, tag_create)",
+                    "description": "Extra arguments as a string (for diff, log, push, reset, show, tag_create)",
                 },
             },
             "required": ["action"],

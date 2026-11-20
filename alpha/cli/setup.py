@@ -56,9 +56,20 @@ For file reads/writes/edits, prefer the dedicated tools (`read_file`, `write_fil
 """
 
 
+def _agent_skill_filter(agent: AgentScope | None):
+    """The skill-name filter for an agent, or None when the agent imposes no
+    skill scope. Shared by `build_system_prompt` (skill index) and
+    `get_tools_for_agent` (load_skill description) so both narrow the same way."""
+    if agent is not None and (agent.skills_allow or agent.skills_deny):
+        return agent.filter_skills
+    return None
+
+
 def build_system_prompt(agent: AgentScope | None = None) -> str:
-    """Load base prompt, apply agent extras, inject skill index, append ALPHA.md."""
+    """Load base prompt, apply agent extras, inject skill index, append
+    ALPHA.md, then the cross-session memory (global + this workspace)."""
     from alpha._platform import IS_WINDOWS
+    from alpha.memory import inject_memory
     from alpha.project_context import inject_project_context, load_project_context
 
     load_all_skills()
@@ -67,13 +78,12 @@ def build_system_prompt(agent: AgentScope | None = None) -> str:
         base = f"{base}\n{_WINDOWS_PROMPT_ADDENDUM}"
     if agent is not None and agent.system_prompt_extra:
         base = f"{base}\n\n# AGENT PROFILE: {agent.name}\n{agent.system_prompt_extra}"
-    skill_filter = (
-        agent.filter_skills
-        if agent is not None and (agent.skills_allow or agent.skills_deny)
-        else None
-    )
-    base = inject_skill_index(base, name_filter=skill_filter)
-    return inject_project_context(base, load_project_context())
+    base = inject_skill_index(base, name_filter=_agent_skill_filter(agent))
+    base = inject_project_context(base, load_project_context())
+    # Memory goes LAST: it is the most volatile layer (changes every time
+    # the agent records something), so keeping it at the tail preserves
+    # the cacheable prefix above it.
+    return inject_memory(base)
 
 
 def get_tools_for_agent(agent: AgentScope | None):
@@ -82,6 +92,16 @@ def get_tools_for_agent(agent: AgentScope | None):
         from alpha.tools import get_openai_tools, get_tool, load_all_tools
 
         load_all_tools()
+        # DEEP_PERFORMANCE #DP025: the load_skill tool registers with a static
+        # description (no disk walk at import). Inject the available skill names
+        # now — skills were already loaded by build_system_prompt — using the
+        # same skill filter the system prompt index used.
+        try:
+            from alpha.tools.skill_tools import refresh_load_skill_description
+
+            refresh_load_skill_description(_agent_skill_filter(agent))
+        except Exception as e:
+            logging.getLogger(__name__).debug("load_skill desc refresh skipped: %s", e)
         # MCP tools register into the same registry; load them after the
         # built-in tools so a misbehaving MCP server can't shadow native ones.
         try:
@@ -151,8 +171,35 @@ def resolve_active_agent() -> AgentScope | None:
 
 
 def approval_callback(tool_name: str, args: dict) -> bool:
-    """Synchronous approval callback for the REPL."""
-    return print_approval_request(tool_name, args)
+    """Synchronous approval callback for the REPL.
+
+    Pauses the concurrent input reader (when active) so the cooked-mode
+    `input()` inside `print_approval_request` doesn't race the reader
+    thread for stdin bytes.
+    """
+    from ..repl_concurrent import paused
+    from .. import notify as _notify
+
+    try:
+        _notify.approval_needed(tool_name)
+    except Exception:  # pragma: no cover - a nudge must never block approval
+        pass
+    with paused():
+        approved = print_approval_request(tool_name, args)
+
+    # Aprovar o plano encerra o plan mode — o REPL enfileira a execução
+    # com as tools completas no próximo ciclo (main.run_repl).
+    if approved and tool_name == "present_plan":
+        from .. import plan_mode
+
+        if plan_mode.is_active():
+            plan_mode.set_active(False)
+            print(
+                f"  {c(C.CYAN, '◆')} "
+                f"{c(C.CYAN, 'plan mode OFF')} "
+                f"{c(C.GRAY, '— plano aprovado, execução liberada')}"
+            )
+    return approved
 
 
 __all__ = [

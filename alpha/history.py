@@ -17,6 +17,7 @@ import time
 from pathlib import Path
 
 from ._json_utils import load_json_file
+from .settings import atomic_write_text
 
 # Session IDs come from `generate_session_id()` (timestamp_hex8) but the REPL
 # also accepts user input via `/load <id>`. Without validation, an id like
@@ -32,6 +33,13 @@ logger = logging.getLogger(__name__)
 
 _HISTORY_DIR = Path.home() / ".alpha_code" / "history"
 _MAX_SESSIONS = 50  # keep last N sessions on disk
+
+# #DM075: caps do resumo de sessão (`_build_session_summary`) — por papel.
+# Antes eram literais soltos (500/300/200/40) espalhados pela função.
+_SUMMARY_LONG_CAP = 500    # [previous context] e conclusão do assistant
+_SUMMARY_USER_CAP = 300    # pedido do usuário
+_SUMMARY_TOOL_CAP = 200    # preview de tool result
+_SUMMARY_MAX_PARTS = 40    # nº máximo de entradas mantidas (as últimas)
 
 
 def _ensure_dir() -> Path:
@@ -67,24 +75,30 @@ def _ensure_dir() -> Path:
 
 
 def _atomic_write(path: Path, data: str) -> None:
-    """Write file with mode 0o600 from creation, no follow-symlink.
+    """Atomically write `path` with mode 0o600 via temp-file + rename.
 
     Substitui `path.write_text(...)` que herda umask (default 0o644),
     expondo o conteudo entre usuarios em hosts compartilhados.
+
+    #D110: a versao anterior abria o alvo com `O_TRUNC` e fazia um unico
+    `os.write` cujo retorno era ignorado — uma escrita parcial (FS lento,
+    sinal) ou um crash no meio deixavam o arquivo de sessao truncado/ilegivel.
+    Agora escrevemos num temp no MESMO diretorio (mesmo filesystem → rename
+    atomico) com `os.fdopen(...).write()` (itera ate gravar tudo) e
+    promovemos via `os.replace`. Um crash so pode deixar um `.tmp` orfao,
+    nunca um alvo corrompido. `mkstemp` cria com 0o600 e nome unico, evitando
+    seguir symlink no alvo (o rename substitui o symlink, nao o segue).
     """
-    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
-    fd = os.open(str(path), flags, 0o600)
-    try:
-        os.write(fd, data.encode("utf-8"))
-    finally:
-        os.close(fd)
-    # Idempotente caso o arquivo ja existisse com perms erradas.
-    try:
-        os.chmod(path, 0o600)
-    except OSError:
-        pass
+    # Preserva a defesa anti-symlink do O_NOFOLLOW original (#D109): recusa
+    # escrever se o alvo ja e um symlink (ataque apontando pra fora do dir).
+    # O temp+rename por si so nao seguiria o symlink (o substituiria), mas
+    # manter a recusa explicita preserva o controle de seguranca documentado.
+    if os.path.islink(path):
+        raise OSError(f"history: refusing to write through symlink: {path}")
+    # #DM066: a mecânica temp+fsync+fchmod+replace foi promovida para
+    # `settings.atomic_write_text` (modelada nesta função); aqui fica só
+    # a recusa de symlink, que é contrato específico da history (#D109).
+    atomic_write_text(path, data, fsync=True, mode=0o600)
 
 
 def _session_path(session_id: str) -> Path:
@@ -146,9 +160,9 @@ def _build_session_summary(messages: list[dict]) -> str:
                 text = text.split("\n", 1)[-1] if "\n" in text else text
             if text.startswith("[CONTEXT SUMMARY"):
                 # Already a summary — include as-is
-                parts.append(f"[previous context]: {text[:500]}")
+                parts.append(f"[previous context]: {text[:_SUMMARY_LONG_CAP]}")
             else:
-                parts.append(f"[user]: {text[:300]}")
+                parts.append(f"[user]: {text[:_SUMMARY_USER_CAP]}")
 
         elif role == "assistant":
             if msg.get("tool_calls"):
@@ -159,14 +173,14 @@ def _build_session_summary(messages: list[dict]) -> str:
                 parts.append(f"[assistant called: {', '.join(tc_names)}]")
             if content:
                 # Keep last assistant response more fully (it's the conclusion)
-                parts.append(f"[assistant]: {content[:500]}")
+                parts.append(f"[assistant]: {content[:_SUMMARY_LONG_CAP]}")
 
         elif role == "tool":
             # Very brief tool result summary
-            preview = content[:200] if content else "(empty)"
+            preview = content[:_SUMMARY_TOOL_CAP] if content else "(empty)"
             parts.append(f"[tool result]: {preview}")
 
-    return "\n".join(parts[-40:])  # keep last 40 entries max
+    return "\n".join(parts[-_SUMMARY_MAX_PARTS:])  # keep last N entries max
 
 
 def _sanitize_for_save(messages: list[dict]) -> list[dict]:
@@ -177,52 +191,48 @@ def _sanitize_for_save(messages: list[dict]) -> list[dict]:
     com `assistant.tool_calls` sem responses (ou `tool` orfa) e o proximo
     `/load` quebra com HTTP 400 porque a API valida o emparelhamento.
 
-    Estrategia:
-    - Drop `tool` messages cujo `tool_call_id` nao bate com nenhum
-      `assistant.tool_calls` anterior nao-respondido.
-    - Drop o ultimo `assistant.tool_calls` se nao tiver respostas
-      correspondentes ainda.
+    Estrategia (#DL-003): a versao anterior rastreava `pending_ids` num unico
+    set que era SOBRESCRITO a cada `assistant.tool_calls`, entao so o ULTIMO
+    assistant era saneado — um assistant ANTERIOR com respostas parciais
+    (ex: Ctrl+C duplo) deixava tool_calls orfas que quebravam o `/load`. Agora
+    saneamos em duas passadas, cobrindo TODOS os assistants:
+    - Pass 1: que `tool_call_id`s realmente tem uma `tool` response.
+    - Pass 2: dropar qualquer `assistant.tool_calls` que tenha QUALQUER id sem
+      response (a API exige uma response por id).
+    - Pass 3: dropar `tool` messages cujo id nao mapeia a um assistant
+      sobrevivente (orfa, ou response parcial de assistant dropado).
     """
     if not messages:
         return messages
 
-    cleaned: list[dict] = []
-    pending_ids: set[str] = set()
+    # Pass 1 — ids that have a tool response anywhere in the transcript.
+    responded = {
+        m.get("tool_call_id")
+        for m in messages
+        if m.get("role") == "tool" and m.get("tool_call_id")
+    }
 
+    # Pass 2 — keep an assistant.tool_calls only if EVERY id was responded.
+    kept: list[dict] = []
     for m in messages:
-        role = m.get("role")
-        if role == "assistant" and m.get("tool_calls"):
-            cleaned.append(m)
-            pending_ids = {tc.get("id") for tc in m["tool_calls"] if tc.get("id")}
-        elif role == "tool":
-            tc_id = m.get("tool_call_id")
-            if tc_id in pending_ids:
-                cleaned.append(m)
-                pending_ids.discard(tc_id)
-            # tool com id desconhecido: ja era orfa antes do save — drop.
-        else:
-            cleaned.append(m)
+        if m.get("role") == "assistant" and m.get("tool_calls"):
+            tc_ids = {tc.get("id") for tc in m["tool_calls"] if tc.get("id")}
+            if tc_ids - responded:  # at least one call has no response
+                continue  # orphan assistant — drop it
+        kept.append(m)
 
-    # Drop final assistant.tool_calls sem responses correspondentes.
-    # Also drop tool responses that belonged to the removed assistant
-    # (DL023: multi-call assistant with partial responses — e.g. 3 tcs,
-    # 2 responded, 1 Ctrl+C. Dropping assistant alone leaves orphan tool
-    # messages for the 2 responded ids).
-    if pending_ids:
-        for i in range(len(cleaned) - 1, -1, -1):
-            entry = cleaned[i]
-            if entry.get("role") == "assistant" and entry.get("tool_calls"):
-                tc_ids = {tc.get("id") for tc in entry["tool_calls"] if tc.get("id")}
-                if tc_ids & pending_ids:
-                    cleaned.pop(i)
-                    cleaned[:] = [
-                        m for m in cleaned
-                        if not (
-                            m.get("role") == "tool"
-                            and m.get("tool_call_id") in tc_ids
-                        )
-                    ]
-                    break
+    # Pass 3 — drop tool responses with no surviving assistant (orphan tool,
+    # or a partial response whose assistant was just dropped).
+    valid_ids = {
+        tc.get("id")
+        for m in kept
+        if m.get("role") == "assistant" and m.get("tool_calls")
+        for tc in m["tool_calls"] if tc.get("id")
+    }
+    cleaned = [
+        m for m in kept
+        if not (m.get("role") == "tool" and m.get("tool_call_id") not in valid_ids)
+    ]
     return cleaned
 
 
@@ -311,13 +321,32 @@ def _load_session_data(session_id: str, caller: str) -> dict | None:
         return None
     if not path.exists():
         return None
-    return load_json_file(path, default=None, logger=logger)
+    data = load_json_file(path, default=None, logger=logger)
+    # #D809: JSON com topo não-dict (array/string/número editado à mão) não
+    # pode virar AttributeError nos `.get(...)` dos callers.
+    if data is not None and not isinstance(data, dict):
+        logger.warning(
+            f"{caller}: session {session_id} has non-dict top-level JSON; ignoring"
+        )
+        return None
+    return data
 
 
 def load_session(session_id: str) -> list[dict] | None:
-    """Load conversation messages from disk. Returns None if not found."""
+    """Load conversation messages from disk. Returns None if not found.
+
+    AUDIT_V2.3 #303: mesma defesa do save — um arquivo legado (anterior ao
+    sanitizador), editado à mão ou gerado externamente não pode derrubar o
+    próximo turno com HTTP 400 por `assistant.tool_calls` órfãos.
+    """
     data = _load_session_data(session_id, "load_session")
-    return None if data is None else data.get("messages", [])
+    if data is None:
+        return None
+    raw = data.get("messages", [])
+    # #700(a): entrada não-dict (arquivo editado à mão) não pode explodir o
+    # sanitizador nem os consumidores — descarta antes.
+    messages = [m for m in raw if isinstance(m, dict)] if isinstance(raw, list) else []
+    return _sanitize_for_save(messages)
 
 
 def load_session_summary(session_id: str) -> str | None:
@@ -328,7 +357,14 @@ def load_session_summary(session_id: str) -> str | None:
 
 def get_last_session_id() -> str | None:
     """Get the most recent session ID, or None if no sessions exist."""
-    history_dir = _ensure_dir()
+    # #D111: persistence must never crash the REPL — a read-only FS or a
+    # non-creatable ~/.alpha_code/history makes _ensure_dir() raise OSError.
+    # Degrade to "no sessions" like the rest of the module does.
+    try:
+        history_dir = _ensure_dir()
+    except OSError as exc:
+        logger.debug("history: get_last_session_id _ensure_dir failed: %s", exc)
+        return None
     files = sorted(history_dir.glob("*.json"), reverse=True)
     if not files:
         return None
@@ -348,7 +384,14 @@ def list_sessions(limit: int = 20) -> list[dict]:
     corretamente porque o JSON parser precisa do objeto completo; entao
     fallback para read completo se o partial parse falhar.
     """
-    history_dir = _ensure_dir()
+    # #D111: degrade to an empty list if the history dir can't be created
+    # (read-only FS / permission denied), consistent with the REPL-never-
+    # crashes-on-persistence invariant.
+    try:
+        history_dir = _ensure_dir()
+    except OSError as exc:
+        logger.debug("history: list_sessions _ensure_dir failed: %s", exc)
+        return []
     sessions = []
     _PARTIAL_BYTES = 8192
 
@@ -369,9 +412,19 @@ def list_sessions(limit: int = 20) -> list[dict]:
                 # Fallback: read completo
                 data = json.loads(path.read_text(encoding="utf-8"))
 
+            # #D809: topo não-dict ou `messages` não-lista não podem derrubar
+            # a listagem inteira — pula o arquivo ruim e segue.
+            if not isinstance(data, dict):
+                continue
+            raw_msgs = data.get("messages", [])
+            if not isinstance(raw_msgs, list):
+                raw_msgs = []
+
             # Find first user message as preview
             preview = ""
-            for msg in data.get("messages", []):
+            for msg in raw_msgs:
+                if not isinstance(msg, dict):
+                    continue
                 if msg.get("role") == "user":
                     content = msg.get("content", "")
                     # AUDIT_V1.8 #004: sessoes salvas com multimodal vem como
@@ -379,6 +432,8 @@ def list_sessions(limit: int = 20) -> list[dict]:
                     if isinstance(content, list):
                         from .attachments import extract_text
                         content = extract_text(content)
+                    if not isinstance(content, str):
+                        content = ""
                     # Strip CWD prefix
                     if content.startswith("[CWD:"):
                         content = content.split("\n", 1)[-1]
@@ -391,7 +446,7 @@ def list_sessions(limit: int = 20) -> list[dict]:
                 "message_count": data.get("message_count", 0),
                 "preview": preview,
             })
-        except (json.JSONDecodeError, KeyError, OSError):
+        except (json.JSONDecodeError, KeyError, OSError, AttributeError, TypeError):
             continue
 
     return sessions

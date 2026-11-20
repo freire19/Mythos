@@ -12,8 +12,7 @@ Cobre:
 - #D030 — verificacao do _CATEGORY_ICONS ainda em uso
 """
 
-import inspect
-from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -48,15 +47,51 @@ class TestCalcBackoffJitterCap:
 
 
 class TestSQLiteUriQuoted:
-    def test_path_with_special_chars_quoted(self, tmp_path):
-        # Cria um db com `?` no nome (raro mas valido em Linux)
-        from alpha.tools.workspace import AGENT_WORKSPACE  # noqa: F401
-        from alpha.tools import database_tools
+    @pytest.mark.asyncio
+    async def test_read_only_query_with_question_mark_in_name(self, tmp_path, monkeypatch):
+        # #D024: filename com `?` (valido em Linux) quebraria a URI sem
+        # url-encoding — o segundo `?` viraria query continuation. O fix
+        # usa quote(...) entao a query read-only deve funcionar normalmente.
+        import sqlite3
 
-        # Verificacao via source: `quote(str(resolved))` no caminho de URI
-        src = inspect.getsource(database_tools._query_sqlite)
-        assert "quote(" in src
-        assert "mode=ro" in src
+        from alpha.tools import database_tools, workspace as ws_module
+
+        db_path = tmp_path / "weird?name.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.execute("CREATE TABLE t (id INTEGER, name TEXT)")
+        conn.execute("INSERT INTO t VALUES (1, 'alpha')")
+        conn.commit()
+        conn.close()
+
+        monkeypatch.setattr(ws_module, "AGENT_WORKSPACE", tmp_path)
+        monkeypatch.setattr(database_tools, "AGENT_WORKSPACE", tmp_path, raising=False)
+
+        result = await database_tools._query_sqlite(str(db_path), "SELECT * FROM t", read_only=True)
+        assert "error" not in result, result
+        assert result["row_count"] == 1
+        assert result["rows"][0]["name"] == "alpha"
+
+    @pytest.mark.asyncio
+    async def test_read_only_blocks_writes(self, tmp_path, monkeypatch):
+        # mode=ro deve impedir escrita mesmo apos approval do tool.
+        import sqlite3
+
+        from alpha.tools import database_tools, workspace as ws_module
+
+        db_path = tmp_path / "ro.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.execute("CREATE TABLE t (id INTEGER)")
+        conn.commit()
+        conn.close()
+
+        monkeypatch.setattr(ws_module, "AGENT_WORKSPACE", tmp_path)
+        monkeypatch.setattr(database_tools, "AGENT_WORKSPACE", tmp_path, raising=False)
+
+        result = await database_tools._query_sqlite(
+            str(db_path), "INSERT INTO t VALUES (1)", read_only=True
+        )
+        assert "error" in result
+        assert "readonly" in result["error"].lower() or "read-only" in result["error"].lower()
 
 
 # ─── #D027 — ALLOWED_COMMANDS removed ──────────────────────────────
@@ -71,12 +106,12 @@ class TestAllowedCommandsRemoved:
         assert not hasattr(shell_tools, "ALLOWED_COMMANDS")
 
     def test_pipeline_tools_no_longer_imports_it(self):
-        import inspect
-
         from alpha.tools import pipeline_tools
 
-        src = inspect.getsource(pipeline_tools)
-        assert "ALLOWED_COMMANDS" not in src
+        # Um `from ...shell_tools import ALLOWED_COMMANDS` deixaria o nome
+        # ligado no namespace do modulo. Ausencia do atributo prova que o
+        # import morto sumiu.
+        assert not hasattr(pipeline_tools, "ALLOWED_COMMANDS")
 
     def test_hard_blocked_still_works(self):
         from alpha.tools.shell_tools import _validate_command
@@ -107,20 +142,6 @@ class TestShellDescriptionAccurate:
 
 
 class TestGitPushForceCheckRemoved:
-    def test_no_dead_force_check_in_push_branch(self):
-        import inspect
-
-        from alpha.tools import git_tools
-
-        # #DM044: o elif chain virou dispatch dict. O check vivia em
-        # _git_operation antes; agora cada acao tem handler proprio.
-        # `_git_push` deve conter a explicacao mas nao o check dead.
-        src = inspect.getsource(git_tools._git_push)
-        # O check `if "--force" in extra or "-f" in extra:` era dead code.
-        # _sanitize_git_args ja rejeita essas flags antes.
-        # O fix removeu o check redundante mas mantem comentario explicativo.
-        assert "--force" not in src or "lembrar" in src.lower()
-
     def test_sanitize_still_rejects_force(self):
         from alpha.tools.git_tools import _sanitize_git_args
 
@@ -134,12 +155,38 @@ class TestGitPushForceCheckRemoved:
 
 class TestGlobWorkspaceFilter:
     @pytest.mark.asyncio
-    async def test_glob_uses_relative_to_filter(self):
-        # Verifica via source que glob agora valida cada match contra workspace.
-        from alpha.tools import file_tools
+    async def test_glob_filters_symlink_escaping_workspace(self, tmp_path, monkeypatch):
+        # #D025: glob que segue um symlink apontando para fora do workspace
+        # NAO deve vazar o filename externo — assert_within_workspace por
+        # match descarta esses e contabiliza skipped_outside_workspace.
+        from alpha.tools import file_tools, path_helpers, workspace as ws_module
 
-        src = inspect.getsource(file_tools._glob_files)
-        assert "assert_within_workspace" in src
+        workspace = tmp_path / "ws"
+        workspace.mkdir()
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        secret = outside / "secret.py"
+        secret.write_text("password=1")
+
+        # Arquivo legitimo dentro do workspace.
+        (workspace / "real.py").write_text("ok")
+        # Symlink dentro do workspace apontando pro arquivo externo.
+        link = workspace / "leak.py"
+        try:
+            link.symlink_to(secret)
+        except OSError:
+            pytest.skip("symlinks nao suportados neste FS")
+
+        monkeypatch.setattr(ws_module, "AGENT_WORKSPACE", workspace)
+        monkeypatch.setattr(file_tools, "AGENT_WORKSPACE", workspace)
+        monkeypatch.setattr(path_helpers, "AGENT_WORKSPACE", workspace)
+
+        result = await file_tools._glob_files("*.py", str(workspace))
+        paths = [m["path"] for m in result["matches"]]
+        # real.py aparece; leak.py (resolve pra fora) e filtrado.
+        assert any(p.endswith("real.py") for p in paths)
+        assert not any("secret.py" in p for p in paths)
+        assert result.get("skipped_outside_workspace", 0) >= 1
 
     @pytest.mark.asyncio
     async def test_normal_glob_still_works(self, tmp_path, monkeypatch):
@@ -161,25 +208,53 @@ class TestGlobWorkspaceFilter:
 
 
 class TestApifyDefensiveParse:
-    def test_run_actor_uses_get_chain(self):
-        import inspect
-
+    @pytest.mark.asyncio
+    async def test_run_actor_handles_unexpected_shape(self, monkeypatch):
+        # #D026: payload com shape inesperado (token expirado, breaking change)
+        # retorna erro estruturado em vez de KeyError cru.
         from alpha.tools import apify_tools
 
-        src = inspect.getsource(apify_tools._run_actor)
-        # Antes era resp.json()["data"]["status"] direto — KeyError cru.
-        # Agora usa .get() chain + valida shape.
-        assert ".get(\"data\"" in src or "payload.get" in src
-        assert "isinstance" in src
+        monkeypatch.setenv("APIFY_API_TOKEN", "fake-token")
 
-    def test_list_actors_uses_safe_parse(self):
-        import inspect
+        class FakeClient:
+            async def post(self, url, **kw):
+                resp = MagicMock()
+                resp.raise_for_status = MagicMock()
+                # "data" ausente / nao-dict — antes do fix: KeyError.
+                resp.json = MagicMock(return_value={"unexpected": "shape"})
+                return resp
 
+        async def fake_get_client(timeout=30.0):
+            return FakeClient()
+
+        monkeypatch.setattr(apify_tools, "_get_apify_client", fake_get_client)
+
+        # Nao deve levantar — retorna dict de erro.
+        result = await apify_tools._run_actor("my-actor")
+        assert "error" in result
+        assert "inesperada" in result["error"].lower() or "shape" in result["error"].lower()
+
+    @pytest.mark.asyncio
+    async def test_list_actors_handles_malformed_payload(self, monkeypatch):
+        # #D026: payload sem "data"/items nao deve estourar — lista vazia.
         from alpha.tools import apify_tools
 
-        src = inspect.getsource(apify_tools._list_actors)
-        assert ".get(" in src
-        assert "ValueError" in src or "isinstance" in src
+        monkeypatch.setenv("APIFY_API_TOKEN", "fake-token")
+
+        class FakeClient:
+            async def get(self, url, **kw):
+                resp = MagicMock()
+                resp.raise_for_status = MagicMock()
+                resp.json = MagicMock(return_value={"data": "not-a-dict"})
+                return resp
+
+        async def fake_get_client(timeout=15.0):
+            return FakeClient()
+
+        monkeypatch.setattr(apify_tools, "_get_apify_client", fake_get_client)
+
+        result = await apify_tools._list_actors(search="x")
+        assert result == {"total": 0, "actors": []}
 
 
 # ─── #D022 — error paths use _format_result ─────────────────────────
@@ -209,13 +284,25 @@ class TestErrorPathsTruncated:
 
 
 class TestCategoryIconsInUse:
-    def test_icons_referenced_in_print_tools_list(self):
-        import inspect
-
+    def test_icons_rendered_in_print_tools_list(self, capsys):
+        # #D030: _CATEGORY_ICONS nao e orfao — print_tools_list usa o icone
+        # da categoria na saida. Renderizamos uma tool git e conferimos que
+        # o icone correspondente aparece (prova de consumo, nao so presenca).
         from alpha.display import core
 
-        src = inspect.getsource(core)
-        # _CATEGORY_ICONS aparece em print_tools_list (uso real, nao orfo)
-        assert "_CATEGORY_ICONS" in src
-        # Tambem ha uma referencia de uso (.get / lookup)
-        assert "_CATEGORY_ICONS.get(" in src or "_CATEGORY_ICONS[" in src
+        git_icon = core._CATEGORY_ICONS["git"]
+        tools = [{"function": {"name": "git_status", "description": "show status"}}]
+        core.print_tools_list(tools)
+
+        out = capsys.readouterr().out
+        assert "GIT" in out
+        assert git_icon in out, "icone da categoria nao foi renderizado"
+
+    def test_unknown_category_falls_back_to_default_icon(self, capsys):
+        # Categoria sem icone dedicado usa o fallback "◆ ".
+        from alpha.display import core
+
+        tools = [{"function": {"name": "totally_unknown_xyz", "description": "x"}}]
+        core.print_tools_list(tools)
+        out = capsys.readouterr().out
+        assert "◆" in out

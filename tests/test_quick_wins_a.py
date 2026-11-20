@@ -11,7 +11,6 @@ Cobre:
 
 from __future__ import annotations
 
-import inspect
 import os
 from pathlib import Path
 
@@ -22,35 +21,64 @@ import pytest
 
 
 class TestCompositeImportsAtTop:
-    def test_no_inline_imports_in_run_tool(self):
-        """Executor imports now live in _composite_helpers.py (post #030 split)."""
-        import inspect
-
+    def test_executor_symbols_bound_at_module_level(self):
+        """Executor imports now live at the top of _composite_helpers.py
+        (post #030 split). Structural proof: the imported names are bound as
+        module-level attributes — they would be missing if the import were
+        inline inside _run_tool."""
         from alpha.tools import _composite_helpers
 
-        src = inspect.getsource(_composite_helpers)
-        top_block, _, body = src.partition("\nasync def _run_tool")
-        assert "from ..executor import" in top_block
+        for name in (
+            "TOOL_EXECUTION_TIMEOUT",
+            "_SLOW_TOOL_TIMEOUT",
+            "_SLOW_TOOLS",
+            "_annotate_error",
+        ):
+            assert hasattr(_composite_helpers, name), name
 
-    def test_no_inline_executor_import_in_function_body(self):
-        """Executor import exists exactly once in _composite_helpers (not inline)."""
-        import inspect
+    @pytest.mark.asyncio
+    async def test_run_tool_uses_top_level_annotate_error(self):
+        """Behavioral proof that the top-level executor import is wired:
+        _run_tool on an unknown tool routes through `_annotate_error` and
+        returns the executor's `{ok: False, category}` invariant. If the
+        import regressed to inline-only, this path would still work, but a
+        broken/missing top-level import would surface here at call time."""
+        from alpha.tools._composite_helpers import _run_tool
 
-        from alpha.tools import _composite_helpers
-
-        src = inspect.getsource(_composite_helpers)
-        assert src.count("from ..executor import") == 1
+        result = await _run_tool("definitely_not_a_real_tool_xyz")
+        assert result["ok"] is False
+        assert result["category"] == "unknown_tool"
 
 
 # ─── #DM015 — yaml.safe_dump no wizard ─────────────────────────────
 
 
 class TestWizardYamlSafeDump:
-    def test_uses_yaml_safe_dump(self):
+    def test_step_create_agent_writes_parseable_yaml(self, tmp_path, monkeypatch):
+        """Behavioral: an "aggressive" description with `:` and embedded quotes
+        must survive a write→read round-trip. An f-string would emit broken
+        YAML (`description: Use when: ...` parses as a nested dict); safe_dump
+        quotes it. This fails if step_create_agent stops using safe_dump."""
+        import yaml
+
         from alpha.wizard import steps
 
-        src = inspect.getsource(steps.step_create_agent)
-        assert "yaml.safe_dump" in src
+        nasty = "Use when: handle 'edge' \"cases\" — a: b"
+        monkeypatch.setattr(steps, "_agents_dir", lambda: tmp_path)
+
+        answers = iter(["my agent", nasty])
+        monkeypatch.setattr(steps, "ask", lambda *a, **k: next(answers))
+        monkeypatch.setattr(steps, "ask_yes_no", lambda *a, **k: True)
+
+        out = steps.step_create_agent(
+            {"id": "openai"}, "gpt-4o", ""
+        )
+        assert out is not None and out.exists()
+
+        loaded = yaml.safe_load(out.read_text(encoding="utf-8"))
+        assert loaded["name"] == "my-agent"
+        assert loaded["description"] == nasty
+        assert loaded["model"] == {"provider": "openai", "id": "gpt-4o"}
 
     def test_serialization_quotes_special_chars(self):
         """Description com `:` ou aspas DEVE ser escapada."""
@@ -72,13 +100,11 @@ class TestWizardYamlSafeDump:
 
 
 class TestEnvWritePerms:
-    def test_env_module_uses_atomic_write(self):
-        from alpha.wizard import env
-
-        src = inspect.getsource(env.write_env)
-        # tempfile.mkstemp + os.replace = atomico em POSIX
-        assert "tempfile.mkstemp" in src
-        assert "os.replace" in src
+    # NB: the former `test_env_module_uses_atomic_write` source-grep was
+    # removed — `test_write_env_creates_0o600_file` (observable perms) and
+    # `test_write_env_is_atomic_no_partial_on_crash` (mocks os.replace to
+    # raise and asserts no partial write + no tempfile leak) already prove
+    # both the atomic-write and the 0o600 behaviors end-to-end.
 
     def test_env_mode_constant_is_0o600(self):
         from alpha.wizard import env
@@ -91,7 +117,7 @@ class TestEnvWritePerms:
 
         env_path = tmp_path / ".env"
         monkeypatch.setattr(env, "ENV_PATH", env_path)
-        monkeypatch.setattr(env, "_PROJECT_ROOT", tmp_path)
+        monkeypatch.setattr(env, "PROJECT_ROOT", tmp_path)
 
         result = env.write_env({"FOO": "bar"})
         assert result == env_path
@@ -111,7 +137,7 @@ class TestEnvWritePerms:
         env_path.write_text("OLD_KEY=keep_me\n")
         env_path.chmod(0o600)
         monkeypatch.setattr(env, "ENV_PATH", env_path)
-        monkeypatch.setattr(env, "_PROJECT_ROOT", tmp_path)
+        monkeypatch.setattr(env, "PROJECT_ROOT", tmp_path)
 
         # Simula crash apos escrever no tmp mas antes do replace.
         original_replace = os.replace
@@ -151,16 +177,21 @@ class TestSharedLLMClient:
         assert hasattr(llm, "_shared_llm_client")
         assert isinstance(llm._shared_llm_client, LoopAwareClient)
 
-    def test_no_per_call_AsyncClient_in_stream(self):
-        """A funcao stream_chat_with_tools NAO deve mais criar AsyncClient
-        inline a cada attempt — deve usar o helper compartilhado."""
+    @pytest.mark.asyncio
+    async def test_shared_client_is_reused_across_calls(self):
+        """Behavioral: the LLM client is a per-loop singleton, not built
+        per-call. Two `_get_shared_llm_client()` calls in the same loop must
+        return the very same httpx.AsyncClient instance (the old code created
+        a fresh `httpx.AsyncClient(...)` per attempt and threw it away)."""
+        import httpx
+
         from alpha import llm
 
-        src = inspect.getsource(llm.stream_chat_with_tools)
-        # Antes: `async with httpx.AsyncClient(...) as client:`. Agora:
-        # `client = await _get_shared_llm_client()`.
-        assert "_get_shared_llm_client()" in src
-        assert "httpx.AsyncClient(" not in src
+        c1 = await llm._get_shared_llm_client()
+        c2 = await llm._get_shared_llm_client()
+        assert isinstance(c1, httpx.AsyncClient)
+        assert c1 is c2
+        assert not c1.is_closed
 
 
 # ─── #D008 PERF — shared aiohttp session ───────────────────────────
@@ -174,14 +205,21 @@ class TestSharedAiohttpSession:
         assert hasattr(network_tools, "_shared_aiohttp_session")
         assert hasattr(network_tools, "_aiohttp_session_loop")
 
-    def test_no_per_call_session_in_http_request(self):
+    @pytest.mark.asyncio
+    async def test_shared_session_is_reused_across_calls(self):
+        """Behavioral: the aiohttp session is a per-loop singleton, not built
+        per-request. Two calls in the same loop return the same, open session
+        (the old code did `async with aiohttp.ClientSession()` per request)."""
+        aiohttp = pytest.importorskip("aiohttp")
+
         from alpha.tools import network_tools
 
-        src = inspect.getsource(network_tools._http_request)
-        # Antes: `async with aiohttp.ClientSession() as session:`.
-        # Agora: `session = await _get_shared_aiohttp_session()`.
-        assert "_get_shared_aiohttp_session()" in src
-        assert "aiohttp.ClientSession()" not in src
+        s1 = await network_tools._get_shared_aiohttp_session()
+        s2 = await network_tools._get_shared_aiohttp_session()
+        assert isinstance(s1, aiohttp.ClientSession)
+        assert s1 is s2
+        assert not s1.closed
+        await s1.close()
 
 
 # ─── #025/#026 SEC — pytest pin ─────────────────────────────────────

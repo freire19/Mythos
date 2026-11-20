@@ -14,10 +14,8 @@ underscore separators that match the typical SCREAMING_SNAKE env var.
 
 from __future__ import annotations
 
-import os
 import pytest
 
-from alpha.tools import safe_env
 from alpha.tools.safe_env import (
     _EXPLICIT_KEYS,
     _SENSITIVE_PATTERNS,

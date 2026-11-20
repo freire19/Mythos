@@ -167,3 +167,60 @@ class TestSessionIdValidation:
         # Nothing under tmpdir, and nothing one level above either.
         assert not list(Path(self.tmpdir).rglob("*leaked*"))
         assert not (Path(self.tmpdir).parent / "leaked.json").exists()
+
+
+class TestLoadSanitization:
+    """AUDIT_V2.3 #303/#700(a): load_session sanitiza tool_calls órfãos e
+    descarta entradas não-dict — o invariante que o CLAUDE.md documentava
+    mas só existia no save."""
+
+    def setup_method(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self._patcher = patch("alpha.history._HISTORY_DIR", Path(self.tmpdir))
+        self._patcher.start()
+
+    def teardown_method(self):
+        self._patcher.stop()
+
+    def _write_raw(self, session_id: str, messages) -> None:
+        """Grava direto no disco, PULANDO o sanitize do save_session —
+        simula arquivo legado/editado à mão."""
+        path = Path(self.tmpdir) / f"{session_id}.json"
+        path.write_text(json.dumps({"messages": messages}), encoding="utf-8")
+
+    def test_orphan_tool_calls_dropped_on_load(self):
+        self._write_raw("legacy1", [
+            {"role": "user", "content": "oi"},
+            {"role": "assistant", "content": None,
+             "tool_calls": [{"id": "t1", "type": "function",
+                             "function": {"name": "x", "arguments": "{}"}}]},
+            # sem a tool response de t1 — órfão que dava HTTP 400
+            {"role": "assistant", "content": "fim"},
+        ])
+        loaded = load_session("legacy1")
+        assert loaded is not None
+        assert not any(m.get("tool_calls") for m in loaded)
+
+    def test_orphan_tool_response_dropped_on_load(self):
+        self._write_raw("legacy2", [
+            {"role": "user", "content": "oi"},
+            {"role": "tool", "tool_call_id": "fantasma", "content": "x"},
+        ])
+        loaded = load_session("legacy2")
+        assert loaded == [{"role": "user", "content": "oi"}]
+
+    def test_non_dict_entries_dropped_on_load(self):
+        self._write_raw("legacy3", [
+            "string solta",
+            42,
+            {"role": "user", "content": "oi"},
+            {"content": "sem role"},
+        ])
+        loaded = load_session("legacy3")
+        assert {"role": "user", "content": "oi"} in loaded
+        assert all(isinstance(m, dict) for m in loaded)
+
+    def test_messages_not_a_list(self):
+        path = Path(self.tmpdir) / "legacy4.json"
+        path.write_text(json.dumps({"messages": "corrompido"}), encoding="utf-8")
+        assert load_session("legacy4") == []

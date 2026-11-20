@@ -75,6 +75,77 @@ async def _web_search(
         return {"error": str(e)}
 
 
+async def _web_fetch(url: str, max_chars: int = 20_000) -> dict:
+    """Fetch a single URL and extract its main text content."""
+    from urllib.parse import urlparse
+
+    from ..web_search import extract_page_content
+
+    scheme = urlparse(url).scheme.lower()
+    if scheme not in ("http", "https"):
+        return {"error": f"Esquema não suportado: {scheme or '(vazio)'}. Use http/https."}
+
+    try:
+        max_chars = int(max_chars)
+    except (TypeError, ValueError):
+        return {"error": f"max_chars inválido: {max_chars!r} (esperado número inteiro)"}
+    max_chars = max(1, min(max_chars, _MAX_CONTEXT_CHARS))
+    try:
+        content = await extract_page_content(url, max_chars=max_chars)
+    except Exception as e:
+        logger.warning(f"web_fetch tool error: {e}")
+        return {"error": str(e)}
+
+    if not content:
+        return {
+            "error": (
+                "Não foi possível extrair conteúdo da URL "
+                "(bloqueada por SSRF, erro HTTP, ou página vazia)."
+            ),
+            "url": url,
+        }
+
+    return {
+        "url": url,
+        "content": content,
+        "chars": len(content),
+        "truncated": len(content) >= max_chars,
+    }
+
+
+register_tool(
+    ToolDefinition(
+        name="web_fetch",
+        description=(
+            "Fetch a single URL and extract its main text content "
+            "(readability-style). Use this to read a specific page the user "
+            "or a search result pointed to, without running a new search."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "url": {
+                    "type": "string",
+                    "description": "http(s) URL to fetch",
+                },
+                "max_chars": {
+                    "type": "integer",
+                    "description": (
+                        "Maximum characters of extracted text "
+                        "(default: 20000, max: 40000)"
+                    ),
+                    "default": 20_000,
+                },
+            },
+            "required": ["url"],
+        },
+        safety=ToolSafety.SAFE,
+        executor=_web_fetch,
+        category=ToolCategory.SEARCH,
+    )
+)
+
+
 register_tool(
     ToolDefinition(
         name="web_search",

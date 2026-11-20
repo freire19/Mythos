@@ -38,6 +38,13 @@ class TestPriceFor:
     def test_empty_string(self):
         assert cost._price_for("") == (0.0, 0.0)
 
+    def test_deepseek_v4_default_models_priced(self):
+        # #200: the default provider model (deepseek-v4-pro) must have a price,
+        # else /cost, the session cost cap and pre_flight are silently inert.
+        for model in ("deepseek-v4-pro", "deepseek-v4-flash", "deepseek-v4"):
+            p_in, p_out = cost._price_for(model)
+            assert p_in > 0 and p_out > 0, model
+
 
 class TestRecordUsage:
     def test_records_openai_style(self):
@@ -128,3 +135,48 @@ class TestFormatSessionLine:
         assert "1,000 in" in line
         assert "500 out" in line
         assert "$" in line
+
+
+class TestCacheAwarePricingTier1:
+    """Tier 1: Anthropic prompt-cache tokens are tracked and priced —
+    reads at 0.1x input, writes at 1.25x input."""
+
+    def setup_method(self):
+        cost.reset_session()
+
+    def teardown_method(self):
+        cost.reset_session()
+
+    def test_cache_tokens_recorded_separately(self):
+        cost.record_usage("anthropic", "claude-sonnet-4-6", {
+            "input_tokens": 100,
+            "output_tokens": 50,
+            "cache_read_input_tokens": 2000,
+            "cache_creation_input_tokens": 500,
+        })
+        s = cost.session_summary()
+        # Uncached input unchanged; cache tokens tracked apart.
+        assert s["tokens_in"] == 100
+        assert s["cache_read_tokens"] == 2000
+        assert s["cache_creation_tokens"] == 500
+
+    def test_cache_read_is_cheaper_than_fresh_input(self):
+        # 1000 cached-read tokens must cost 0.1x of 1000 fresh input tokens.
+        cost.reset_session()
+        cost.record_usage("anthropic", "claude-sonnet-4-6",
+                          {"input_tokens": 1000, "output_tokens": 0})
+        fresh = cost.session_cost_usd()
+        cost.reset_session()
+        cost.record_usage("anthropic", "claude-sonnet-4-6",
+                          {"input_tokens": 0, "output_tokens": 0,
+                           "cache_read_input_tokens": 1000})
+        cached = cost.session_cost_usd()
+        assert cached == pytest.approx(fresh * 0.1, rel=1e-6)
+
+    def test_cache_only_usage_is_recorded_not_dropped(self):
+        # A turn that is entirely cache-read (input_tokens=0) is still billable.
+        cost.record_usage("anthropic", "claude-sonnet-4-6",
+                          {"cache_read_input_tokens": 5000, "output_tokens": 10})
+        s = cost.session_summary()
+        assert s["calls"] == 1
+        assert s["cache_read_tokens"] == 5000

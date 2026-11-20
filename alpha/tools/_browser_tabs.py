@@ -10,19 +10,21 @@ from __future__ import annotations
 
 import logging
 
-from .browser_session import BrowserSession, validate_browser_url
-from .browser_tools import _check_available, _domain_allowed, _ensure_session
+from .browser_session import validate_browser_url
+from .browser_tools import (
+    _check_available,
+    _domain_allowed,
+    _ensure_session,
+    _require_session,
+)
 
 logger = logging.getLogger(__name__)
 
 
 async def _browser_list_tabs() -> dict:
-    err = _check_available()
+    session, err = await _require_session()
     if err:
         return err
-    session = await BrowserSession.get()
-    if not session.is_open():
-        return {"error": "Sessão não aberta."}
     tabs = []
     for i, p in enumerate(session.pages):
         try:
@@ -53,8 +55,10 @@ async def _browser_new_tab(url: str | None = None) -> dict:
     try:
         session = await _ensure_session()
         page = await session.context.new_page()
-        if page not in session.pages:
-            session.pages.append(page)
+        # adopt_page is idempotent (the context "page" listener already did it
+        # in our own contexts) and is the ONLY registration path in attach
+        # mode, where it also wires the navigation guard.
+        session.adopt_page(page)
         session.active_idx = session.pages.index(page)
         result = {"index": session.active_idx, "tab_count": len(session.pages)}
         if url:
@@ -67,12 +71,9 @@ async def _browser_new_tab(url: str | None = None) -> dict:
 
 
 async def _browser_switch_tab(index: int) -> dict:
-    err = _check_available()
+    session, err = await _require_session()
     if err:
         return err
-    session = await BrowserSession.get()
-    if not session.is_open():
-        return {"error": "Sessão não aberta."}
     if index < 0 or index >= len(session.pages):
         return {"error": f"Índice inválido {index}. Faixa: 0..{len(session.pages) - 1}"}
     session.active_idx = index
@@ -85,12 +86,9 @@ async def _browser_switch_tab(index: int) -> dict:
 
 
 async def _browser_close_tab(index: int | None = None) -> dict:
-    err = _check_available()
+    session, err = await _require_session()
     if err:
         return err
-    session = await BrowserSession.get()
-    if not session.is_open():
-        return {"error": "Sessão não aberta."}
     if index is None:
         index = session.active_idx
     if index < 0 or index >= len(session.pages):

@@ -10,14 +10,14 @@ import logging
 from pathlib import Path
 
 from .._registry import FileBackedRegistry
-from ..config import _PROJECT_ROOT
+from ..config import PROJECT_ROOT
 from .loader import Skill, load_skill_file
 
 logger = logging.getLogger(__name__)
 
 _SEARCH_PATHS = [
     Path.home() / ".alpha" / "skills",
-    _PROJECT_ROOT / "skills",
+    PROJECT_ROOT / "skills",
 ]
 
 _registry: FileBackedRegistry[Skill] = FileBackedRegistry(

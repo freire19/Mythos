@@ -17,15 +17,28 @@ import urllib.request
 from urllib.parse import urlparse, urlunparse
 
 from ..net_utils import (
-    validate_url as _validate_url,
+    validate_url_syntax as _validate_url_syntax,
     resolve_and_validate as _resolve_and_validate,
 )
 from ..config import RETRY, TOOL_TIMEOUTS
+from ._subprocess_helpers import STDERR_CAP, STDOUT_CAP
+from .._loop_lock import LoopAwareLock
 from . import ToolCategory, ToolDefinition, ToolSafety, register_tool
 
 logger = logging.getLogger(__name__)
 
 _MAX_RESPONSE_SIZE = 1_000_000  # 1MB
+_DEFAULT_SSL_CTX: _ssl.SSLContext | None = None
+
+
+def _get_default_ssl_context() -> _ssl.SSLContext:
+    global _DEFAULT_SSL_CTX
+    if _DEFAULT_SSL_CTX is None:
+        _DEFAULT_SSL_CTX = _ssl.create_default_context()
+    return _DEFAULT_SSL_CTX
+
+
+
 _ALLOWED_METHODS = frozenset({"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"})
 
 # Retry config (#DM036): centralizado em config.RETRY["http"].
@@ -41,7 +54,9 @@ _ALLOWED_METHODS = frozenset({"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "
 # CLI cria loop novo a cada invocacao mas o modulo persiste em cache.
 _shared_aiohttp_session = None  # type: ignore[var-annotated]
 _aiohttp_session_loop: object | None = None
-_aiohttp_session_lock = asyncio.Lock()
+# #D044: loop-aware lock — a plain module-level asyncio.Lock() binds to the
+# first loop that contends it and crashes on the next REPL turn's loop.
+_aiohttp_session_lock = LoopAwareLock()
 
 
 async def _get_shared_aiohttp_session():
@@ -58,7 +73,7 @@ async def _get_shared_aiohttp_session():
     ):
         return _shared_aiohttp_session
     # AUDIT_V1.2 #006: lock protects the close() + reassign window.
-    async with _aiohttp_session_lock:
+    async with _aiohttp_session_lock():
         if (
             _shared_aiohttp_session is not None
             and not _shared_aiohttp_session.closed
@@ -71,8 +86,12 @@ async def _get_shared_aiohttp_session():
         ):
             try:
                 await _shared_aiohttp_session.close()
-            except Exception:
-                pass
+            except Exception as e:
+                # AUDIT_V2.2 #018: include the error type so a recurring close
+                # failure (e.g. stuck connections) is diagnosable.
+                logger.debug(
+                    "aiohttp session close failed: %s: %s", type(e).__name__, e
+                )
         _shared_aiohttp_session = aiohttp.ClientSession()
         _aiohttp_session_loop = loop
     return _shared_aiohttp_session
@@ -94,8 +113,8 @@ def _rewrite_url_with_ip(parsed, resolved_ip: str) -> str:
 async def _http_request(
     url: str,
     method: str = "GET",
-    headers: dict = None,
-    body: str = None,
+    headers: dict | None = None,
+    body: str | None = None,
     timeout: int | None = None,
 ) -> dict:
     """Make an HTTP request."""
@@ -108,8 +127,9 @@ async def _http_request(
             "error": f"Método '{method}' não permitido. Use: {', '.join(sorted(_ALLOWED_METHODS))}"
         }
 
-    # Validate URL (SSRF)
-    url_error = _validate_url(url)
+    # Pre-check sintatico (scheme/hostname); a validacao de IP fica na
+    # unica resolucao async (_resolve_and_validate), fora da thread do loop.
+    url_error = _validate_url_syntax(url)
     if url_error:
         return {"error": url_error, "blocked": True}
 
@@ -139,7 +159,7 @@ async def _http_request(
         # nao o IP literal usado na conexao. Ssl context + server_hostname
         # garantem isso.
         is_https = parsed.scheme == "https"
-        ssl_param = _ssl.create_default_context() if is_https else False
+        ssl_param = _get_default_ssl_context() if is_https else False
 
         session = await _get_shared_aiohttp_session()
         req_data = None
@@ -190,14 +210,31 @@ async def _http_request(
                 fixed_redirect = _rewrite_url_with_ip(redirect_parsed, redirect_ip)
                 req_headers["Host"] = redirect_hostname
 
+                # Headers hop-sensitive nao atravessam para outro host.
+                if redirect_hostname.lower() != (hostname or "").lower():
+                    for key in list(req_headers):
+                        if key.lower() in (
+                            "authorization",
+                            "cookie",
+                            "proxy-authorization",
+                        ):
+                            del req_headers[key]
+
+                # 301/302/303: POST vira GET sem body (convencao);
+                # 307/308: metodo E body preservados (RFC 7538).
+                if resp.status in (301, 302, 303) and method == "POST":
+                    method = "GET"
+                    req_data = None
+
                 redirect_is_https = redirect_parsed.scheme == "https"
                 redirect_ssl = (
-                    _ssl.create_default_context() if redirect_is_https else False
+                    _get_default_ssl_context() if redirect_is_https else False
                 )
                 redirect_kwargs = dict(
                     method=method,
                     url=fixed_redirect,
                     headers=req_headers,
+                    data=req_data,
                     allow_redirects=False,
                     timeout=aiohttp.ClientTimeout(total=timeout),
                     ssl=redirect_ssl,
@@ -211,16 +248,24 @@ async def _http_request(
                 old_resp.release()
                 redirect_count += 1
 
-            # Read response with size limit
-            raw = await resp.read()
+            # #D314: lê em streaming abortando ao passar do cap — o antigo
+            # `resp.read()` bufferizava o corpo INTEIRO antes de truncar (OOM
+            # sob prompt-injection para um servidor de corpo gigante).
+            raw = bytearray()
+            truncated = False
+            async for chunk in resp.content.iter_chunked(65536):
+                raw += chunk
+                if len(raw) > _MAX_RESPONSE_SIZE:
+                    truncated = True
+                    break
         finally:
-            # Release also covers the `read()` raising mid-stream.
+            # Release also covers the read raising mid-stream.
             resp.release()
-        if len(raw) > _MAX_RESPONSE_SIZE:
-            body_text = raw[:_MAX_RESPONSE_SIZE].decode(errors="replace")
+        if truncated:
+            body_text = bytes(raw[:_MAX_RESPONSE_SIZE]).decode(errors="replace")
             body_text += f"\n... [truncado: resposta > {_MAX_RESPONSE_SIZE // 1000}KB]"
         else:
-            body_text = raw.decode(errors="replace")
+            body_text = bytes(raw).decode(errors="replace")
 
         resp_headers = dict(resp.headers)
 
@@ -240,7 +285,7 @@ async def _http_request(
                     "etag",
                 )
             },
-            "body": body_text[:15000],
+            "body": body_text[:STDOUT_CAP],
             "url": str(resp.url),
             "method": method,
         }
@@ -259,7 +304,21 @@ async def _http_request(
             "transient": True,
         }
     except Exception as e:
-        return {"error": f"Erro na requisição: {e}"}
+        # AUDIT_V2.2 #014: aiohttp ClientPayloadError / ServerDisconnectedError
+        # subclass ClientError (not OSError), so without this they'd fall here
+        # unmarked and _http_request_with_retry would never retry them on an
+        # idempotent GET. Mark the known-transient ones.
+        out = {"error": f"Erro na requisição: {type(e).__name__}: {e}"}
+        if isinstance(
+            e,
+            (
+                aiohttp.ClientConnectionError,
+                aiohttp.ServerDisconnectedError,
+                aiohttp.ClientPayloadError,
+            ),
+        ):
+            out["transient"] = True
+        return out
 
 
 class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
@@ -313,25 +372,37 @@ async def _http_request_urllib(
         return {
             "status_code": resp.status,
             "headers": dict(resp.headers),
-            "body": resp_body[:15000],
+            "body": resp_body[:STDOUT_CAP],
             "url": url,
             "method": method,
         }
     except urllib.error.HTTPError as e:
+        # #039: reading the error body can itself raise (connection cut
+        # mid-read) — guard it so the handler returns a structured result
+        # instead of propagating a raw exception out of the except block.
+        try:
+            err_body = e.read(_MAX_RESPONSE_SIZE).decode(errors="replace")[:STDERR_CAP]
+        except Exception as read_err:
+            err_body = f"<corpo de erro ilegível: {type(read_err).__name__}>"
         return {
             "status_code": e.code,
             "error": str(e.reason),
-            "body": e.read(_MAX_RESPONSE_SIZE).decode(errors="replace")[:5000],
+            "body": err_body,
         }
+    except (TimeoutError, ConnectionError, OSError) as e:
+        # AUDIT_V2.2 #015: keep the urllib fallback path consistent with the
+        # aiohttp path — surface the type and mark transient so idempotent GETs
+        # can be retried.
+        return {"error": f"{type(e).__name__}: {e}", "transient": True}
     except Exception as e:
-        return {"error": str(e)}
+        return {"error": f"{type(e).__name__}: {e}"}
 
 
 async def _http_request_with_retry(
     url: str,
     method: str = "GET",
-    headers: dict = None,
-    body: str = None,
+    headers: dict | None = None,
+    body: str | None = None,
     timeout: int | None = None,
 ) -> dict:
     """Wrapper do `_http_request` com retry de transientes em metodos seguros.
@@ -352,10 +423,17 @@ async def _http_request_with_retry(
             return result
         last_result = result
         if attempt < RETRY["http"]["max_retries"]:
-            backoff = RETRY["http"]["initial_backoff"] * (2 ** attempt) * (1 + random.random() * 0.3)
+            # #032: cap the exponential growth at max_backoff before applying
+            # jitter, so a future bump to max_retries can't produce an
+            # unbounded sleep. Jitter (≤+30%) still desyncs concurrent retries.
+            base = min(
+                RETRY["http"]["initial_backoff"] * (2 ** attempt),
+                RETRY["http"]["max_backoff"],
+            )
+            backoff = base * (1 + random.random() * 0.3)
             logger.warning(
                 f"http_request transient error on {url} "
-                f"(attempt {attempt + 1}/{RETRY["http"]["max_retries"] + 1}), "
+                f"(attempt {attempt + 1}/{RETRY['http']['max_retries'] + 1}), "
                 f"retrying in {backoff:.2f}s"
             )
             await asyncio.sleep(backoff)
@@ -368,34 +446,34 @@ register_tool(
     ToolDefinition(
         name="http_request",
         description=(
-            "Fazer requisição HTTP (GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS). "
-            "Suporta headers customizados e body. Proteção SSRF: IPs privados bloqueados. "
-            "Útil para testar APIs, verificar endpoints, baixar dados."
+            "Make an HTTP request (GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS). "
+            "Supports custom headers and body. SSRF protection: private IPs are blocked. "
+            "Useful for testing APIs, checking endpoints, downloading data."
         ),
         parameters={
             "type": "object",
             "properties": {
                 "url": {
                     "type": "string",
-                    "description": "URL completa (http:// ou https://)",
+                    "description": "Full URL (http:// or https://)",
                 },
                 "method": {
                     "type": "string",
-                    "description": "Método HTTP",
+                    "description": "HTTP method",
                     "enum": ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
                     "default": "GET",
                 },
                 "headers": {
                     "type": "object",
-                    "description": "Headers HTTP como objeto {chave: valor}",
+                    "description": "HTTP headers as an object {key: value}",
                 },
                 "body": {
                     "type": "string",
-                    "description": "Corpo da requisição (para POST, PUT, PATCH). JSON como string.",
+                    "description": "Request body (for POST, PUT, PATCH). JSON as a string.",
                 },
                 "timeout": {
                     "type": "integer",
-                    "description": "Timeout em segundos (máx 60). Padrão: 30",
+                    "description": "Timeout in seconds (max 60). Default: 30",
                     "default": 30,
                 },
             },

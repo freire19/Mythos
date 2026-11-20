@@ -33,6 +33,8 @@ from collections.abc import Callable
 
 import httpx
 
+from ._loop_lock import LoopAwareLock
+
 logger = logging.getLogger(__name__)
 
 
@@ -54,7 +56,11 @@ class LoopAwareClient:
         self._build = build
         self._client: httpx.AsyncClient | None = None
         self._loop: object | None = None
-        self._lock = asyncio.Lock()
+        # #D048: loop-aware lock. A plain asyncio.Lock() here binds to the
+        # first loop that CONTENDS it (e.g. two delegate_parallel sub-agents
+        # rebuilding the client) and then crashes on the next turn's loop —
+        # defeating the very purpose of this class. Rebind lazily per loop.
+        self._lock = LoopAwareLock()
 
     async def get(self) -> httpx.AsyncClient:
         """Return the shared client, rebuilding if loop changed or closed."""
@@ -66,7 +72,7 @@ class LoopAwareClient:
             and self._loop is loop
         ):
             return self._client
-        async with self._lock:
+        async with self._lock():
             # Double-check after lock — another coroutine may have rebuilt
             # while we waited.
             if (

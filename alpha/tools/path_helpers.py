@@ -88,7 +88,8 @@ def _fuzzy_resolve_from_base(base: Path, components: list[str]) -> Path | None:
 # #D005 (V1.0): cache LRU para fuzzy resolve. Cada path miss antes
 # tentava ate 3 bases (home, workspace, cwd) com listdir + match
 # case-insensitive — caro em sessoes que o LLM tenta multiplas variantes
-# do mesmo path. Cache mantem 256 entries; eviction natural via LRU.
+# do mesmo path. Cache mantem 256 entries; eviction LRU (hit renova a
+# posicao na fila — #DM074 corrigiu a implementacao, que era FIFO).
 _SENTINEL = object()
 
 _FUZZY_CACHE_SIZE = 256
@@ -108,6 +109,13 @@ def _fuzzy_resolve(path: str) -> str | None:
     """
     cached = _fuzzy_cache.get(path, _SENTINEL)
     if cached is not _SENTINEL:
+        # #DM074: LRU de verdade — o hit renova a posicao na fila de evicao
+        # (antes era FIFO com rotulo "LRU": hits nao mudavam a ordem).
+        try:
+            _fuzzy_cache_order.remove(path)
+            _fuzzy_cache_order.append(path)
+        except ValueError:  # pragma: no cover — invariante: chave sempre na fila
+            pass
         return cached  # type: ignore[return-value]
 
     result = _fuzzy_resolve_uncached(path)

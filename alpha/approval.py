@@ -20,7 +20,7 @@ from pathlib import Path
 
 from ._platform import IS_WINDOWS
 from .security import PIPELINE_REDIRECT_SPLIT_RE, PIPELINE_SPLIT_RE
-from .settings import find_config_file, read_json
+from .settings import alpha_user_dir, find_config_file, read_json
 
 logger = logging.getLogger(__name__)
 
@@ -34,12 +34,25 @@ AUTO_APPROVE_TOOLS = frozenset(
         "list_directory",
         "search_files",
         "glob_files",
-        "execute_python",
+        # SECURITY_TIER0: `execute_python` foi REMOVIDO daqui. O blocklist AST
+        # de code_tools.py é best-effort por definição (bypass confirmado via
+        # frame introspection: raise → __traceback__.tb_frame.f_builtins) e não
+        # pode ser a única barreira de uma tool com execução arbitrária de
+        # código. Agora requer aprovação humana; quem confia no próprio fluxo
+        # pode re-habilitar com uma allow rule (`"execute_python"`) em
+        # .alpha/settings.json — decisão explícita, não default.
         "search_and_replace",
         "project_overview",
         "run_tests",
         "web_search",
         "todo_write",
+        # Pure user interaction: the tool only shows a menu and returns the
+        # pick. Gating it behind "approve this question?" hid the question
+        # behind a second prompt.
+        "ask_choice",
+        # Lazy tool loading: only pulls schemas into the prompt, zero side
+        # effects (alpha/tool_lazy.py).
+        "tool_search",
         # Browser read-only / navigation
         "browser_open",
         "browser_close",
@@ -60,7 +73,11 @@ AUTO_APPROVE_TOOLS = frozenset(
     }
 )
 
-REQUIRE_APPROVAL_TOOLS = frozenset({"install_package", "docker_run", "delegate_task", "delegate_parallel"})
+REQUIRE_APPROVAL_TOOLS = frozenset({
+    "install_package", "docker_run", "delegate_task", "delegate_parallel",
+    # Resuming a sub-agent spends LLM budget like a new delegation.
+    "agent_message",
+})
 
 # Shell commands safe for auto-approval (desktop control + read-only + dev tools)
 SAFE_SHELL_COMMANDS = frozenset(
@@ -91,16 +108,23 @@ SAFE_SHELL_COMMANDS = frozenset(
         # Filesystem read-only
         "ls", "cat", "head", "tail", "wc", "find", "file", "stat",
         "tree", "grep", "sort", "uniq", "diff", "pwd",
-        # Dev tools — build, test, lint, format
-        "python", "python3", "node", "npm", "npx", "yarn", "pnpm", "bun",
+        # Dev tools — build, test, lint, format. `npx`/`make`/`mvn`/`gradle`
+        # were REMOVED (#D302): they have no read-only subcommand — they run
+        # arbitrary packages / build scripts, so they now always require
+        # approval. `pip`/`npm`/`yarn`/`pnpm`/`bun`/`cargo`/`go` stay but are
+        # gated per-subcommand by `_is_pkgmgr_shell_safe`.
+        "python", "python3", "node", "npm", "yarn", "pnpm", "bun",
         "pip", "pip3", "pytest", "vitest", "jest",
         "ruff", "eslint", "prettier", "mypy", "tsc",
-        "make", "cargo", "go", "rustc", "gcc", "g++", "javac", "java",
-        "mvn", "gradle",
+        "cargo", "go", "rustc", "gcc", "g++", "javac", "java",
         # Version control (read + safe writes)
         "git",
-        # Environment
-        "env", "printenv", "which", "type", "echo", "printf",
+        # Environment. `env` foi REMOVIDO — é command-runner (`env <bin> <args>`
+        # executa binário arbitrário com base_cmd `env`), neutralizando a
+        # allowlist, os guards de interpretador/git e os blocks de curl/wget
+        # (#D300). `printenv` só imprime, então fica. Mesma lógica de cp/mv/rm.
+        # Wrappers nice/nohup/timeout/xargs/stdbuf devem ficar FORA pelo mesmo motivo.
+        "printenv", "which", "type", "echo", "printf",
         # `touch` / `mkdir` create empty artefacts — low risk, kept here.
         # `cp` / `mv` were removed because both can move data ACROSS the
         # workspace boundary without prompt (e.g. `cp /etc/passwd /tmp/x`):
@@ -135,11 +159,13 @@ SAFE_SHELL_COMMANDS_WIN = frozenset(
         # Networking info
         "ipconfig", "ping", "nslookup", "tracert", "pathping", "netstat",
         "Test-Connection", "Test-NetConnection",
-        # Dev tools (mesmos do Unix — sao executaveis cross-platform)
-        "python", "python3", "py", "node", "npm", "npx", "yarn", "pnpm",
+        # Dev tools (mesmos do Unix — sao executaveis cross-platform).
+        # `npx`/`mvn`/`gradle` REMOVIDOS (#D302) — sem subcomando read-only;
+        # pip/npm/yarn/pnpm/bun/cargo/go sao gateados por `_is_pkgmgr_shell_safe`.
+        "python", "python3", "py", "node", "npm", "yarn", "pnpm",
         "bun", "pip", "pip3", "pytest", "vitest", "jest",
         "ruff", "eslint", "prettier", "mypy", "tsc",
-        "cargo", "go", "rustc", "javac", "java", "mvn", "gradle",
+        "cargo", "go", "rustc", "javac", "java",
         # Version control
         "git",
         # NOTA: `cmd`, `powershell`, `pwsh` ficam DE FORA — mesmo motivo
@@ -169,7 +195,100 @@ _DANGEROUS_ARGS = {
     "find": re.compile(r"^-delete$|^-execdir$", re.I),
     "nc": re.compile(r"^-[ec]|^--exec", re.I),
     "ncat": re.compile(r"^-[ec]|^--exec", re.I),
+    # NOTE: `git` is NOT a blocklist entry — it is gated by the dedicated
+    # deny-by-default allowlist `_is_git_shell_safe` below (#D134). A blocklist
+    # leaked (config/filter-branch/submodule/bisect/grep -O all execute code).
 }
+
+# #D134: `git` is on the shell allowlist, but `git_operation` (the dedicated
+# tool) carefully gates destructive/RCE actions while `execute_shell("git ...")`
+# bypassed all of it. A blocklist of dangerous subcommands proved leaky (a
+# code-review found `git config`, `git filter-branch --tree-filter`,
+# `git submodule update`, `git bisect run`, `git grep -O<cmd>` all execute code
+# and slipped it). So `git` is auto-approved ONLY when the subcommand is in a
+# tight READ-ONLY allowlist AND no repo-redirecting/eval global flag precedes
+# it. Everything else (clone/push/reset/clean/checkout/config/filter-branch/
+# fetch/pull/merge/rebase/stash/submodule/…) requires human approval — exactly
+# the posture `git_operation` already enforces.
+_GIT_AUTO_SUBCOMMANDS = frozenset({
+    "status", "log", "diff", "show", "blame", "branch", "tag",
+    "rev-parse", "rev-list", "describe", "shortlog", "reflog",
+    "ls-files", "ls-tree", "ls-remote", "show-ref", "for-each-ref",
+    "symbolic-ref", "cat-file", "name-rev", "merge-base", "whatchanged",
+    "version", "config",  # config is below: only allowed with read-only flags
+})
+# `config` is special — reads (`--get`/`--list`/`--get-all`/`--get-regexp`) are
+# safe, but a write plants alias/fsmonitor/sshCommand/hooksPath → RCE. So a bare
+# or write `git config` is NOT auto-approved.
+_GIT_CONFIG_READ_FLAGS = frozenset({
+    "--get", "--get-all", "--get-regexp", "--get-urlmatch", "-l", "--list",
+})
+# Global flags (before the subcommand) that redirect the repo / run binaries /
+# override config — RCE or sandbox-escape. Force approval if any is present.
+_GIT_DANGEROUS_GLOBAL = re.compile(
+    r"^-c$|^-C$|^--exec-path|^--git-dir|^--work-tree|^--namespace|^--config-env",
+    re.I,
+)
+
+
+def _is_git_shell_safe(args: list[str]) -> bool:
+    """Deny-by-default gate for `git` under execute_shell (#D134).
+
+    Auto-approves only a read-only subcommand with no repo-redirecting/eval
+    global flag. Any other subcommand → human approval.
+    """
+    subcommand = None
+    for a in args:
+        if _GIT_DANGEROUS_GLOBAL.match(a):
+            return False
+        if not a.startswith("-"):
+            subcommand = a.lower()
+            break
+        # a leading flag that takes a value (e.g. `-c k=v`) is matched above;
+        # other leading flags (`--no-pager`, `--paginate`) are harmless.
+    if subcommand is None or subcommand not in _GIT_AUTO_SUBCOMMANDS:
+        return False
+    if subcommand == "config":
+        # only read forms auto-approve (a write plants RCE config)
+        return any(arg in _GIT_CONFIG_READ_FLAGS for arg in args)
+    return True
+
+
+# #D302: package managers are on the shell allowlist so read-only queries
+# (`pip list`, `npm ls`, `cargo tree`) auto-approve — but `install`/`add`/`run`/
+# `build`/`exec` execute arbitrary code from the target (sdist setup.py, npm
+# pre/postinstall, build scripts), bypassing the deliberate `install_package`
+# approval gate. Same deny-by-default posture as `git` (#D134): auto-approve
+# ONLY a read-only subcommand per tool. `npx`/`make`/`mvn`/`gradle` have no safe
+# subcommand and are OFF the allowlist entirely (always require approval).
+_PKGMGR_AUTO_SUBCOMMANDS = {
+    "pip":   frozenset({"list", "show", "freeze", "check"}),
+    "pip3":  frozenset({"list", "show", "freeze", "check"}),
+    "npm":   frozenset({"ls", "list", "outdated", "view", "info", "why"}),
+    "yarn":  frozenset({"list", "outdated", "info", "why"}),
+    "pnpm":  frozenset({"ls", "list", "outdated", "why"}),
+    "bun":   frozenset({"pm", "outdated"}),
+    "cargo": frozenset({"tree", "metadata"}),
+    "go":    frozenset({"version", "env", "list", "doc"}),
+}
+
+
+def _is_pkgmgr_shell_safe(base_cmd: str, args: list[str]) -> bool:
+    """Deny-by-default gate for package managers under execute_shell (#D302).
+
+    Auto-approves only a read-only subcommand; `install`/`add`/`run`/`build`/
+    `exec` and anything unrecognised → human approval (they execute arbitrary
+    code from the package/target, bypassing the `install_package` gate)."""
+    allowed = _PKGMGR_AUTO_SUBCOMMANDS.get(base_cmd, frozenset())
+    subcommand = None
+    for a in args:
+        if not a.startswith("-"):
+            subcommand = a.lower()
+            break
+    if subcommand is None:
+        return True  # no subcommand → prints help/version, performs no action
+    return subcommand in allowed
+
 
 # Commands safe to use after find -exec (read-only / counting)
 _SAFE_EXEC_COMMANDS = frozenset({
@@ -199,8 +318,10 @@ _INTERPRETER_EVAL_FLAGS = {
                              "-EncodedCommand", "-encodedcommand"}),
 }
 
-# Git actions considered read-only (safe for auto-approval)
-_SAFE_GIT_ACTIONS = frozenset(
+# Git actions considered read-only (safe for auto-approval). Public because it
+# is the single source of truth for "read-only git_operation actions" — also
+# consumed by tools/_delegate_core.py as the sub-agent read-gate (#033).
+SAFE_GIT_ACTIONS = frozenset(
     {
         "status", "diff", "log", "branch", "show",
         "blame", "stash_list", "remote", "tag",
@@ -277,13 +398,33 @@ def _is_single_command_safe(cmd_str: str) -> bool:
                 if pattern.search(arg):
                     return False
 
+        # #D134: `git` uses a deny-by-default allowlist (read-only subcommands
+        # only) — blocklists kept leaking RCE subcommands.
+        if base_cmd == "git" and not _is_git_shell_safe(parts[1:]):
+            return False
+
+        # #D302: package managers gate install/add/run/build/exec (arbitrary
+        # code exec from the target) behind approval, mirroring the git gate.
+        if base_cmd in _PKGMGR_AUTO_SUBCOMMANDS and not _is_pkgmgr_shell_safe(
+            base_cmd, parts[1:]
+        ):
+            return False
+
         # Interpretador com flag de eval inline (python -c, node -e, etc.):
         # exigir aprovacao humana — caso contrario o sandbox de execute_python
         # e dribavel via execute_shell.
         if base_cmd in _INTERPRETER_EVAL_FLAGS:
             eval_flags = _INTERPRETER_EVAL_FLAGS[base_cmd]
-            if any(arg in eval_flags for arg in parts[1:]):
-                return False
+            # #D308: prefixo, não igualdade exata — `python -c<code>` (colado),
+            # `node --eval=<code>` e a abreviação de prefixo do PowerShell
+            # (`-Com` → `-Command`) driblavam `arg in eval_flags`.
+            for arg in parts[1:]:
+                al = arg.lower()
+                if any(
+                    arg.startswith(f) or (len(arg) >= 3 and f.lower().startswith(al))
+                    for f in eval_flags
+                ):
+                    return False
 
         # Special handling: find -exec with safe commands is OK
         if base_cmd == "find" and "-exec" in parts:
@@ -382,6 +523,9 @@ _PRIMARY_ARG = {
     "apify_run_actor": "actor_id",
     "install_package": "package",
     "execute_python": "code",
+    # Adicionados em #DL206 — rules arg-scoped sobre eles eram inertes
+    "web_fetch": "url",
+    "web_search": "query",
 }
 
 
@@ -444,12 +588,32 @@ def _parse_rule(raw: str) -> PermissionRule | None:
         except re.error as e:
             logger.warning("Invalid regex in rule '%s': %s (skipped)", raw, e)
             return None
+    if (literal is not None or compiled is not None) and tool not in _PRIMARY_ARG:
+        # #DL206: sem primary-arg mapeado, um rule literal/regex nunca casa —
+        # um deny arg-scoped ficaria permanentemente inerte (fail-open).
+        logger.warning(
+            "Permission rule '%s' is arg-scoped but tool '%s' has no primary-arg "
+            "mapping — the rule will never match (use a tool-name-only rule)",
+            raw, tool,
+        )
     return PermissionRule(raw=raw, tool=tool, literal=literal, pattern=compiled)
 
 
 _rules_cached: str | None = None  # resolved settings path currently cached
 _allow_rules: list[PermissionRule] = []
 _deny_rules: list[PermissionRule] = []
+_settings_path_cache: tuple[str, Path | None] | None = None  # (cwd, resolved path)
+
+
+def _find_settings_file() -> Path | None:
+    """`find_config_file("settings.json")` memoized by CWD (#DP042)."""
+    global _settings_path_cache
+    cwd = os.getcwd()
+    if _settings_path_cache is not None and _settings_path_cache[0] == cwd:
+        return _settings_path_cache[1]
+    path = find_config_file("settings.json")
+    _settings_path_cache = (cwd, path)
+    return path
 
 
 def _load_permission_rules() -> tuple[list[PermissionRule], list[PermissionRule]]:
@@ -471,7 +635,7 @@ def _load_permission_rules() -> tuple[list[PermissionRule], list[PermissionRule]
     """
     global _rules_cached, _allow_rules, _deny_rules
 
-    settings_path = find_config_file("settings.json")
+    settings_path = _find_settings_file()
     if _rules_cached == str(settings_path):
         return _allow_rules, _deny_rules
 
@@ -496,14 +660,97 @@ def _load_permission_rules() -> tuple[list[PermissionRule], list[PermissionRule]
 
 def reset_permission_cache() -> None:
     """Force a re-read of permission rules. For tests."""
-    global _rules_cached, _allow_rules, _deny_rules
+    global _rules_cached, _allow_rules, _deny_rules, _settings_path_cache
     _rules_cached = None
     _allow_rules = []
     _deny_rules = []
+    _settings_path_cache = None
+
+
+def scoped_allow_rule(tool_name: str, args: dict) -> str:
+    """Build the narrowest allow-rule string that would auto-approve THIS call.
+
+    SECURITY_TIER0: the in-prompt "always allow" must scope to *this* action,
+    not blanket-approve every destructive tool. When the tool has a known
+    primary arg (command / path / url / …) the rule pins that exact value:
+    `execute_shell(npm run build)`, `write_file(/abs/path.py)`. When there is
+    no primary arg we fall back to a tool-name-only rule; when the value can't
+    be encoded in the `tool(literal)` grammar (`)` / newline break the parser)
+    we pin it with an anchored regex (`tool:^…\\Z`) rather than a blanket
+    tool-name rule (#D303).
+    """
+    primary = _primary_arg_value(tool_name, args)
+    if primary is None:
+        return tool_name
+    if ")" in primary or "\n" in primary or "\r" in primary:
+        # #D303: the value can't use the `tool(literal)` grammar, but falling
+        # back to a tool-name-only rule = allow-ALL for the tool — a single `)`
+        # in a git-commit message would silently disarm the shell gate for the
+        # rest of the session. Pin the EXACT value with an anchored regex.
+        # `re.escape` neutralises the ()/newline; `^…\Z` anchors both ends
+        # (PermissionRule matches with `.search`, so anchoring is mandatory). A
+        # newline the rule parser can't round-trip is discarded on reload →
+        # re-prompt (fail-closed).
+        return f"{tool_name}:^{re.escape(primary)}\\Z"
+    return f"{tool_name}({primary})"
+
+
+def _settings_write_path() -> Path:
+    """Where to persist a new allow-rule.
+
+    Targets the settings.json that `find_config_file` actually loads, so the
+    rule takes effect; falls back to the user-global `~/.alpha/settings.json`
+    when no settings file exists yet.
+    """
+    path = find_config_file("settings.json")
+    return path if path is not None else alpha_user_dir("settings.json")
+
+
+def add_allow_rule(tool_name: str, args: dict) -> str:
+    """Persist a scoped allow-rule for this tool call and return the rule text.
+
+    Appends to `permissions.allow` in settings.json (dedup), then invalidates
+    the rule cache so the next `needs_approval` sees it. Best-effort: on a
+    disk error the rule is not persisted but the caller still approved the
+    current call. Returns the rule string (or empty on failure).
+    """
+    import json as _json
+
+    rule = scoped_allow_rule(tool_name, args)
+    path = _settings_write_path()
+    try:
+        data = read_json(path, default={})
+        if not isinstance(data, dict):
+            data = {}
+        perms = data.get("permissions")
+        if not isinstance(perms, dict):
+            perms = {}
+        allow = perms.get("allow")
+        if not isinstance(allow, list):
+            allow = []
+        if rule not in allow:
+            allow.append(rule)
+        perms["allow"] = allow
+        data["permissions"] = perms
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(_json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    except OSError:
+        logger.warning("Could not persist allow-rule %r to %s", rule, path)
+        return ""
+    reset_permission_cache()
+    logger.info("Persisted scoped allow-rule: %s", rule)
+    return rule
 
 
 def is_denied(tool_name: str, args: dict) -> tuple[bool, str]:
     """Check if a deny rule matches. Denied tools never prompt and never run."""
+    # Plan mode (camada 2): bloqueia destrutivas mesmo quando estariam
+    # auto-aprovadas por default (write_file/edit_file) ou por regra allow.
+    from . import plan_mode
+    plan_reason = plan_mode.deny_reason(tool_name)
+    if plan_reason:
+        return True, plan_reason
+
     _, deny = _load_permission_rules()
     for rule in deny:
         if rule.matches(tool_name, args):
@@ -571,6 +818,11 @@ _SENSITIVE_ABS_PREFIXES = (
 # desnecessario (prompt extra em arquivos legitimos com caixa diferente).
 _CASEFOLD_PATHS = sys.platform == "darwin"
 
+# Tools que escrevem no path do arg primario e portanto passam pelo gate de
+# path sensivel. #DL205: `search_and_replace` e DESTRUCTIVE + auto-aprovada e
+# reescreve arquivos via os.replace — mesmo vetor plant+execute de write_file.
+_SENSITIVE_PATH_WRITE_TOOLS = ("write_file", "edit_file", "search_and_replace")
+
 
 def _is_sensitive_path(raw_path: str) -> bool:
     """True if writing to `raw_path` should drop auto-approve and prompt."""
@@ -597,6 +849,20 @@ def _matches_allow(tool_name: str, args: dict) -> bool:
     return any(rule.matches(tool_name, args) for rule in allow)
 
 
+def _has_exact_path_allow(tool_name: str, path_val: str) -> bool:
+    """#D309: True only when an allow-rule pins THIS exact path (a
+    `tool(literal)` rule), not a tool-name-only or regex rule — used to decide
+    whether a sensitive-path write may bypass the approval prompt."""
+    allow, _ = _load_permission_rules()
+    target = os.path.expanduser(path_val)
+    for rule in allow:
+        if rule.tool != tool_name or not rule.literal:
+            continue
+        if os.path.expanduser(rule.literal) == target:
+            return True
+    return False
+
+
 def needs_approval(tool_name: str, args: dict) -> bool:
     """
     Determine if a tool call needs user approval.
@@ -608,6 +874,15 @@ def needs_approval(tool_name: str, args: dict) -> bool:
     Deny rules are enforced upstream by the executor via `is_denied`; by the
     time we reach this function, denied calls have already been short-circuited.
     """
+    # #D309: a sensitive-path write must NOT be auto-approved by a broad
+    # allow-rule (tool-name-only / regex) — only a rule scoped to the EXACT
+    # path bypasses the prompt. Checked before the general allow short-circuit
+    # so the plant+execute vector (#002) can't reopen via any write_file rule.
+    if tool_name in _SENSITIVE_PATH_WRITE_TOOLS:
+        _sens_path = str(args.get("path") or "")
+        if _is_sensitive_path(_sens_path):
+            return not _has_exact_path_allow(tool_name, _sens_path)
+
     if _matches_allow(tool_name, args):
         return False
 
@@ -617,11 +892,13 @@ def needs_approval(tool_name: str, args: dict) -> bool:
         # quando a CHAVE esta ausente — com a chave presente e valor None, o get
         # retorna None e `None.strip()` levanta AttributeError, matando o turno.
         # `args.get("X") or ""` cobre os dois casos (key ausente OR valor falsy).
-        content = args.get("content") or ""
+        # #DB02: str() — um não-string truthy (list/dict/int, ex. `content` como
+        # array-de-linhas do modelo) passava intacto e crashava `.strip()`.
+        content = str(args.get("content") or "")
         if tool_name == "write_file" and not content.strip():
             return True
-        path_val = args.get("path") or ""
-        if tool_name in ("write_file", "edit_file") and _is_sensitive_path(path_val):
+        path_val = str(args.get("path") or "")
+        if tool_name in _SENSITIVE_PATH_WRITE_TOOLS and _is_sensitive_path(path_val):
             logger.warning(
                 "Sensitive path write: tool=%s path=%r — requesting approval (issue #002)",
                 tool_name, path_val,
@@ -641,7 +918,7 @@ def needs_approval(tool_name: str, args: dict) -> bool:
 
     # execute_shell: auto-approve safe commands (no &&, ||, ;)
     if tool_name == "execute_shell":
-        command = args.get("command") or ""
+        command = str(args.get("command") or "")  # #DB02: str() — evita TypeError em argv-array
         if is_safe_shell_command(command):
             logger.info(f"Auto-approve safe shell: {command[:80]}")
             return False
@@ -649,7 +926,7 @@ def needs_approval(tool_name: str, args: dict) -> bool:
 
     # execute_pipeline: auto-approve if all commands are safe (allows &&, ||, ;)
     if tool_name == "execute_pipeline":
-        pipeline = args.get("pipeline") or ""
+        pipeline = str(args.get("pipeline") or "")  # #DB02: str()
         if _is_safe_pipeline(pipeline):
             logger.info(f"Auto-approve safe pipeline: {pipeline[:80]}")
             return False
@@ -657,8 +934,8 @@ def needs_approval(tool_name: str, args: dict) -> bool:
 
     # git_operation: read-only auto-approved, write needs approval
     if tool_name == "git_operation":
-        action = args.get("action") or ""
-        if action in _SAFE_GIT_ACTIONS:
+        action = str(args.get("action") or "")  # #DB02: str() — evita TypeError: unhashable
+        if action in SAFE_GIT_ACTIONS:
             return False
         if action in _AUTO_GIT_ACTIONS:
             return False

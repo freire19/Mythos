@@ -10,7 +10,7 @@ from pathlib import Path
 
 from .._registry import FileBackedRegistry
 from .._resources import package_data
-from ..config import _PROJECT_ROOT  # #095: fonte unica
+from ..config import PROJECT_ROOT  # #095: fonte unica
 from .loader import load_agent_file
 from .scope import AgentScope
 
@@ -22,7 +22,7 @@ from .scope import AgentScope
 # bundled dir whether the install is editable, wheel, or zipped.
 _SEARCH_PATHS = [
     Path.home() / ".alpha" / "agents",
-    _PROJECT_ROOT / "agents",
+    PROJECT_ROOT / "agents",
     package_data("data", "agents"),
 ]
 

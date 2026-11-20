@@ -3,8 +3,8 @@
 Slice 1 coverage:
 - Cost estimator: known-model price applied, unknown-model → $0
 - Time estimator: per-tool defaults + fallback + LLM round-trip overhead
-- pre_flight tool executor: validates inputs, returns enriched card,
-  honors ALPHA_MAX_TURN_COST_USD budget cap
+- pre_flight tool executor: validates inputs, returns enriched card
+  (o cap ALPHA_MAX_TURN_COST_USD é enforced no loop — AUDIT_V2.3 #201)
 - Card renderer: smoke test that the printer doesn't crash on the
   standard shapes (rendering correctness is visual, not unit-testable)
 """
@@ -157,8 +157,11 @@ class TestPreFlightExecutor:
         assert "error" in result
 
     @pytest.mark.asyncio
-    async def test_budget_cap_blocks_when_over(self, monkeypatch):
-        # Set a cap so low that any non-zero estimate exceeds it.
+    async def test_cap_does_not_block_the_tool_itself(self, monkeypatch):
+        """AUDIT_V2.3 #201: o enforcement do cap por-turno saiu da tool
+        (opcional, com preview controlado pelo modelo) e vive no loop do
+        run_agent — ver TestTurnCapInLoop em test_preflight_slice2.py.
+        A tool aprova e reporta a estimativa (UI) mesmo acima do cap."""
         monkeypatch.setenv("ALPHA_MAX_TURN_COST_USD", "0.00001")
         result = await _pre_flight(
             goal="anything",
@@ -166,9 +169,8 @@ class TestPreFlightExecutor:
             confidence="high",
             model="claude-opus-4-7",  # expensive model amplifies estimate
         )
-        assert result.get("error") == "budget_cap_exceeded"
-        assert "estimated_cost_usd" in result
-        assert result["cap_usd"] == 0.00001
+        assert result.get("approved") is True
+        assert result["estimated_cost_usd"] > 0.00001
 
     @pytest.mark.asyncio
     async def test_budget_cap_passes_when_under(self, monkeypatch):
@@ -249,3 +251,41 @@ class TestPreFlightRenderer:
         })
         out = capsys.readouterr().out
         assert "PRE-FLIGHT" in out
+
+
+# ─── env_float (AUDIT_V2.3 #202) ──────────────────────────────────
+
+
+class TestEnvFloatValidation:
+    """#202: negativo/nan/inf são malformados — parse-or-ignore com warning.
+    Um `nan` aceito desligava o cap por-turno silenciosamente e abortava
+    toda sessão no cap de sessão (efeitos opostos do mesmo typo)."""
+
+    def _get(self, monkeypatch, raw):
+        from alpha.preflight import env_float
+        monkeypatch.setenv("X_TEST_CAP", raw)
+        return env_float("X_TEST_CAP")
+
+    def test_valid_value_parses(self, monkeypatch):
+        assert self._get(monkeypatch, "1.5") == 1.5
+
+    def test_zero_is_valid(self, monkeypatch):
+        assert self._get(monkeypatch, "0") == 0.0
+
+    def test_negative_rejected(self, monkeypatch):
+        assert self._get(monkeypatch, "-5") is None
+
+    def test_nan_rejected(self, monkeypatch):
+        assert self._get(monkeypatch, "nan") is None
+
+    def test_inf_rejected(self, monkeypatch):
+        assert self._get(monkeypatch, "inf") is None
+        assert self._get(monkeypatch, "-inf") is None
+
+    def test_garbage_rejected(self, monkeypatch):
+        assert self._get(monkeypatch, "not-a-number") is None
+
+    def test_unset_returns_none(self, monkeypatch):
+        from alpha.preflight import env_float
+        monkeypatch.delenv("X_TEST_CAP", raising=False)
+        assert env_float("X_TEST_CAP") is None

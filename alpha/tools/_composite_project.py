@@ -8,7 +8,7 @@ from . import ToolCategory, ToolDefinition, ToolSafety, register_tool
 from ._composite_helpers import _resolve_target, _run_tool
 
 
-async def _project_overview(path: str = None) -> dict:
+async def _project_overview(path: str | None = None) -> dict:
     """Get a comprehensive overview of a project directory."""
     target_path, err = _resolve_target(path)
     if err:
@@ -61,16 +61,16 @@ register_tool(
     ToolDefinition(
         name="project_overview",
         description=(
-            "Obter visao geral de um projeto: estrutura de diretorios, tipo de projeto "
-            "(Python/Node/Rust/Go), arquivos de configuracao, status git. "
-            "Combina list_directory + git status + deteccao automatica."
+            "Get an overview of a project: directory structure, project type "
+            "(Python/Node/Rust/Go), configuration files, git status. "
+            "Combines list_directory + git status + automatic detection."
         ),
         parameters={
             "type": "object",
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "Caminho do projeto (opcional, usa workspace padrao)",
+                    "description": "Project path (optional, uses the default workspace)",
                 },
             },
         },

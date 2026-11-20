@@ -23,7 +23,11 @@
 
 # ─── Stage 1: build the wheel ──────────────────────────────────────
 
-FROM python:3.12-slim AS builder
+# #D327: base pinada por digest (index multi-arch) — a tag `3.12-slim` e
+# mutavel, entao um rebuild puxaria o que ela apontar no momento. O bump do
+# digest e deliberado e vem pelo Dependabot (ecosystem `docker`), que tambem
+# evita que o pin congele patches de seguranca da imagem base.
+FROM python:3.12-slim@sha256:646fb0bca3dd3ea1bcc6feb72c17ed16eed6e10cffc732fcc1478bd3e7f02d7b AS builder
 
 WORKDIR /build
 
@@ -43,7 +47,7 @@ RUN python -m build --wheel --outdir /build/dist
 
 # ─── Stage 2: runtime ──────────────────────────────────────────────
 
-FROM python:3.12-slim AS runtime
+FROM python:3.12-slim@sha256:646fb0bca3dd3ea1bcc6feb72c17ed16eed6e10cffc732fcc1478bd3e7f02d7b AS runtime
 
 # Minimal system deps:
 # - git: alpha's git_operation tool and the project_context loader
@@ -71,7 +75,7 @@ USER mythos
 # Mythos already checks `sys.stdout.isatty()` via supports_color, this is
 # just a belt-and-suspenders default for non-interactive `docker run`.
 ENV PYTHONUNBUFFERED=1 \
-    NO_COLOR=
+    NO_COLOR=1
 
 ENTRYPOINT ["mythos"]
 CMD ["--help"]

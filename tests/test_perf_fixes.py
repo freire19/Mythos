@@ -6,7 +6,6 @@ Cobre #D013 (loop detection complexity), #D015 (httpx client loop binding),
 
 import asyncio
 
-import pytest
 
 from alpha._loop_detect import detect_loop
 from alpha.context import MAX_MESSAGES, MIN_MESSAGES_FOR_COMPRESSION, needs_compression

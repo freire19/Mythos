@@ -16,7 +16,7 @@ import pytest
 from alpha import agent as agent_mod
 from alpha.llm_fixtures import build_replay_stream
 from alpha.tools import ToolCategory, ToolDefinition, ToolSafety
-from alpha.preflight.feedback import _FEEDBACK_PATH, record_decision
+from alpha.preflight.feedback import record_decision
 
 
 # ─── feedback log ──────────────────────────────────────────────────
@@ -449,3 +449,118 @@ class TestReprompFallback:
         # turn_index = 2 because pre_flight was honored — no extra
         # re-prompt round-trip.
         assert state["turn_index"] == 2
+
+
+# ─── turn cap no loop (AUDIT_V2.3 #201) ────────────────────────────
+
+
+class TestTurnCapInLoop:
+    """#201: ALPHA_MAX_TURN_COST_USD é enforced no run_agent (gate
+    cumulativo + gate pré-execução do batch), não mais dentro da tool
+    `pre_flight` (que virou só UI)."""
+
+    @pytest.mark.asyncio
+    async def test_cumulative_gate_aborts_when_turn_spend_reaches_cap(
+        self, monkeypatch
+    ):
+        # 1ª chamada = snapshot na entrada do turno (0.0); seguintes
+        # simulam custo real acumulado (0.5) — acima do cap de 0.1.
+        calls = {"n": 0}
+
+        def rising_cost():
+            calls["n"] += 1
+            return 0.0 if calls["n"] == 1 else 0.5
+
+        monkeypatch.setattr("alpha.agent.session_cost_usd", rising_cost)
+        monkeypatch.delenv("ALPHA_MAX_SESSION_COST_USD", raising=False)
+        monkeypatch.setenv("ALPHA_MAX_TURN_COST_USD", "0.1")
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "test")
+
+        fixture = Path(__file__).parent / "fixtures" / "llm" / "deepseek" / "happy_path.json"
+        fake_stream, _ = build_replay_stream(fixture)
+        monkeypatch.setattr(agent_mod, "stream_chat_with_tools", fake_stream)
+
+        events = []
+        async for event in agent_mod.run_agent(
+            messages=[{"role": "user", "content": "hi"}],
+            user_message="hi",
+            provider="deepseek",
+        ):
+            events.append(event)
+        error_events = [e for e in events if e.get("type") == "error"]
+        assert error_events, f"expected error event, got: {events}"
+        assert "ALPHA_MAX_TURN_COST_USD" in error_events[0]["message"]
+
+    @pytest.mark.asyncio
+    async def test_batch_estimate_gate_blocks_before_execution(
+        self, monkeypatch, tmp_path
+    ):
+        monkeypatch.setattr("alpha.agent.session_cost_usd", lambda: 0.0)
+        monkeypatch.delenv("ALPHA_MAX_SESSION_COST_USD", raising=False)
+        monkeypatch.setenv("ALPHA_MAX_TURN_COST_USD", "1.0")
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "test")
+        # Estimador força o estouro — o teste valida o WIRING do gate;
+        # o estimador em si tem testes próprios em test_preflight.py.
+        monkeypatch.setattr(agent_mod, "estimate_total_cost", lambda steps, model: 99.0)
+
+        executed = {"ran": False}
+
+        def get_tool(name: str):
+            if name != "read_file":
+                return None
+
+            def _exec(**_):
+                executed["ran"] = True
+                return {"content": "x"}
+
+            return ToolDefinition(
+                name="read_file",
+                description="fake",
+                parameters={"type": "object", "properties": {}},
+                safety=ToolSafety.SAFE,
+                executor=_exec,
+                category=ToolCategory.FILESYSTEM,
+            )
+
+        fixture = _make_fixture(
+            tmp_path,
+            [{"id": "0", "name": "read_file", "arguments": json.dumps({"path": "x"})}],
+        )
+        fake_stream, _ = build_replay_stream(fixture)
+        monkeypatch.setattr(agent_mod, "stream_chat_with_tools", fake_stream)
+
+        events = []
+        async for event in agent_mod.run_agent(
+            messages=[{"role": "user", "content": "hi"}],
+            user_message="hi",
+            provider="deepseek",
+            get_tool_fn=get_tool,
+            tools=_tool_schema(),
+        ):
+            events.append(event)
+        error_events = [e for e in events if e.get("type") == "error"]
+        assert error_events, f"expected error event, got: {events}"
+        assert "ALPHA_MAX_TURN_COST_USD" in error_events[0]["message"]
+        assert not executed["ran"], "batch executou apesar do gate pré-execução"
+
+    @pytest.mark.asyncio
+    async def test_no_turn_cap_set_never_blocks(self, monkeypatch):
+        monkeypatch.setattr("alpha.agent.session_cost_usd", lambda: 123.0)
+        monkeypatch.delenv("ALPHA_MAX_SESSION_COST_USD", raising=False)
+        monkeypatch.delenv("ALPHA_MAX_TURN_COST_USD", raising=False)
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "test")
+
+        fixture = Path(__file__).parent / "fixtures" / "llm" / "deepseek" / "happy_path.json"
+        fake_stream, _ = build_replay_stream(fixture)
+        monkeypatch.setattr(agent_mod, "stream_chat_with_tools", fake_stream)
+
+        events = []
+        async for event in agent_mod.run_agent(
+            messages=[{"role": "user", "content": "hi"}],
+            user_message="hi",
+            provider="deepseek",
+        ):
+            events.append(event)
+            if event.get("type") == "done":
+                break
+        assert [e for e in events if e.get("type") == "done"]

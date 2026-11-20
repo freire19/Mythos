@@ -23,6 +23,8 @@ classifiers = [
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Topic :: Software Development",
     "Topic :: Software Development :: Code Generators",
     "Topic :: Terminals",
@@ -91,7 +93,16 @@ multimodal = [
     # /pdf REPL command (H3 #18, from Alpha_Code upstream) — text extraction via pypdf.
     # Audio (/audio) uses Whisper via httpx (already a core dep) so it
     # has no extra package here.
-    "pypdf>=4.0,<7.0",
+    # #D321: floor >=6.13.3 — pypdf <6.13.3 (ex. 6.11.0) tem 9 CVEs de DoS
+    # (PYSEC-2026-3022/.../GHSA-jm82-fx9c-mx94) alcançáveis via /pdf.
+    "pypdf>=6.13.3,<7.0",
+]
+antigravity = [
+    # Google Antigravity agent integration.
+    # AUDIT_V2.3 #703: o cap antigo `<1.0` resolvia para 0.8.0 (pre-GA,
+    # abandonado, SEM a API `interactions` que o tool usa) e bloqueava
+    # toda a linha GA 1.x/2.x que funciona. Floor na linha GA.
+    "google-genai>=1.0,<3.0",
 ]
 binary = [
     # PyInstaller for the standalone binary build (Plano-v3 §4 Tier 2).
@@ -100,7 +111,7 @@ binary = [
     "pyinstaller>=6.0,<7.0",
 ]
 all = [
-    "mythos[browser,network,database,web,dev,exploit,embeddings,graph,c_analysis,multimodal]",
+    "mythos[browser,network,database,web,dev,exploit,embeddings,graph,c_analysis,multimodal,antigravity]",
 ]
 dev = [
     # AUDIT_V1.2 #010: pytest 9.0.2 vulneravel a CVE-2025-71176 (fix em 9.0.3).
@@ -112,6 +123,9 @@ dev = [
     "pytest-cov>=5.0,<8.0",
     # pip-audit pra detectar CVEs em CI / pre-release (#036).
     "pip-audit>=2.7,<3.0",
+    # ruff: fast lint gate in CI. Catches unused imports, undefined names,
+    # and the 3.12-only f-string syntax that SyntaxErrors on our 3.11 floor.
+    "ruff>=0.14,<1.0",
 ]
 
 [project.urls]
@@ -135,11 +149,44 @@ include = ["alpha*"]
 # pipx-installed Mythos still has system.md / subagent.md available.
 # Without this, only .py files land in the wheel (H3 #13).
 [tool.setuptools.package-data]
+# PEP 561 marker so downstream consumers' type-checkers see Alpha's hints.
+# The `Typing :: Typed` classifier is a lie without this file shipped.
+"alpha" = ["py.typed"]
 "alpha.prompts" = ["*.md"]
 # Bundle the built-in agent profiles (default/lean/researcher) so a
 # pipx-installed Mythos has them out-of-the-box without the user copying
 # anything into ~/.alpha/agents/.
 "alpha.data" = ["agents/**/*.yaml"]
+
+[tool.ruff]
+target-version = "py311"
+# The codebase predates a linter and favors long, documented lines. Start
+# with ruff's default rule set (pyflakes F + a slice of pycodestyle E) which
+# catches real defects — unused imports, undefined names, and the
+# 3.12-only f-string quote-reuse that a 3.11 target would SyntaxError on —
+# without the churn of full style enforcement. Widen `select` over time.
+extend-exclude = ["build", "alpha/data"]
+
+[tool.ruff.lint.per-file-ignores]
+# Package __init__.py files re-export their public surface; unused-import
+# there is the intended pattern, not a defect.
+"__init__.py" = ["F401"]
+# Adapters register with the provider/tool registry at import-time via a
+# module-tail import (after the functions they reference are defined), and
+# agent/__init__.py defers imports so tests can monkeypatch env first — both
+# are deliberate E402 (import-not-at-top).
+"alpha/llm.py" = ["E402"]
+"alpha/llm_anthropic.py" = ["E402"]
+"alpha/agent/__init__.py" = ["E402"]
+"alpha/tools/browser_tools.py" = ["E402"]
+# O entry (ex-main.py, #702) defers heavy imports (prompt_toolkit, mcp,
+# skills) past the CLI entry so `alpha "quick question"` single-shot doesn't
+# pay their cold-load (AUDIT_V1.8 #043) — the E402s are that optimization,
+# not an oversight.
+"alpha/cli/entry.py" = ["E402"]
+# Test files group imports by the section they exercise (imports after a
+# "─── path_helpers ───" divider) — a readability choice, not a defect.
+"tests/*" = ["E402"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

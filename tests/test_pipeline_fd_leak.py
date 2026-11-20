@@ -124,24 +124,42 @@ class TestOpenRedirectFiles:
             })
 
 
-class TestRedirectFunctionStructure:
-    """Sanity check: cleanup wrapper esta no source."""
+class TestRedirectTargetNoFollow:
+    """#D117: `_open_redirect_target` usa O_NOFOLLOW para fechar TOCTOU.
 
-    def test_function_uses_try_except_for_cleanup(self):
-        import inspect
+    A garantia de cleanup (`try/except` + close) ja e coberta
+    comportamentalmente por `test_second_target_outside_workspace_closes_first`,
+    entao aqui validamos apenas o efeito observavel do O_NOFOLLOW: abrir um
+    target que e symlink falha com OSError(ELOOP) em vez de seguir o link.
+    """
+
+    @pytest.mark.skipif(
+        not hasattr(__import__("os"), "O_NOFOLLOW"),
+        reason="O_NOFOLLOW indisponivel nesta plataforma (Windows)",
+    )
+    def test_symlink_target_raises_eloop(self, tmp_path):
+        import errno
+
         from alpha.tools import pipeline_tools
 
-        src = inspect.getsource(pipeline_tools._open_redirect_files)
-        # try/except em volta do for + close em loop de cleanup
-        assert "try:" in src
-        assert "except Exception:" in src
-        assert "fh.close()" in src
+        real = tmp_path / "real.txt"
+        real.write_text("alvo real")
+        link = tmp_path / "link.txt"
+        link.symlink_to(real)
 
-    def test_function_uses_o_nofollow(self):
-        """#D117: `_open_redirect_target` usa O_NOFOLLOW para fechar TOCTOU."""
-        import inspect
+        with pytest.raises(OSError) as exc:
+            pipeline_tools._open_redirect_target("stdout", link)
+        # O_NOFOLLOW -> ELOOP (Linux) quando o path final e symlink.
+        assert exc.value.errno == errno.ELOOP
+
+    def test_regular_target_opens(self, tmp_path):
         from alpha.tools import pipeline_tools
 
-        src = inspect.getsource(pipeline_tools._open_redirect_target)
-        assert "O_NOFOLLOW" in src
-        assert "os.open" in src or "os.fdopen" in src
+        target = tmp_path / "out.txt"
+        fh = pipeline_tools._open_redirect_target("stdout", target)
+        try:
+            fh.write("ok")
+        finally:
+            fh.close()
+        # O write foi para o arquivo real (truncado/criado).
+        assert target.read_text() == "ok"

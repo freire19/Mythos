@@ -14,7 +14,9 @@ Agora:
 
 from __future__ import annotations
 
-import inspect
+import asyncio
+
+import pytest
 
 
 class TestConfigCentralization:
@@ -44,46 +46,123 @@ class TestConfigCentralization:
 
 
 class TestToolFilesUseConfigCaps:
-    def test_shell_tools_uses_config_cap(self):
+    """Behavioral: cada tool DEVE limitar o timeout pedido ao cap da config.
+
+    Em vez de grepar o source por `TOOL_TIMEOUT_CAPS`, chamamos a tool com um
+    timeout absurdamente grande e capturamos o timeout efetivo propagado para o
+    subprocess/wait_for. Se a regressao reintroduzir um literal divergente (ou
+    remover o cap), o valor capturado diverge da config e o teste falha.
+    """
+
+    @pytest.mark.asyncio
+    async def test_shell_caps_timeout_to_config(self, monkeypatch, tmp_path):
         from alpha.tools import shell_tools
+        from alpha.config import TOOL_TIMEOUT_CAPS
 
-        # Localiza o body de _execute_shell e checa que NAO tem `min(timeout, 300)` literal
-        src = inspect.getsource(shell_tools)
-        # O literal antigo nao deve mais aparecer
-        assert "min(timeout, 300)" not in src
-        # Deve usar TOOL_TIMEOUT_CAPS
-        assert "TOOL_TIMEOUT_CAPS" in src
+        captured = {}
 
-    def test_code_tools_uses_config_cap(self):
+        async def fake_run(*cmd, timeout=30, **kwargs):
+            captured["timeout"] = timeout
+            raise shell_tools.SubprocessTimeoutError()
+
+        monkeypatch.setattr(shell_tools, "run_subprocess_safe", fake_run)
+        monkeypatch.setattr(shell_tools, "AGENT_WORKSPACE", tmp_path)
+
+        # cwd omitido -> usa shell_tools.AGENT_WORKSPACE (patchado).
+        await shell_tools._execute_shell("echo hi", timeout=99999)
+        assert captured["timeout"] == TOOL_TIMEOUT_CAPS["shell"]
+
+    @pytest.mark.asyncio
+    async def test_code_caps_timeout_to_config(self, monkeypatch):
         from alpha.tools import code_tools
+        from alpha.config import TOOL_TIMEOUT_CAPS
 
-        src = inspect.getsource(code_tools._execute_python)
-        assert "min(timeout, 60)" not in src
-        assert "TOOL_TIMEOUT_CAPS" in src
+        captured = {}
 
-    def test_network_tools_uses_config_cap(self):
+        async def fake_run(*cmd, timeout=30, **kwargs):
+            captured["timeout"] = timeout
+            raise code_tools.SubprocessTimeoutError()
+
+        monkeypatch.setattr(code_tools, "run_subprocess_safe", fake_run)
+
+        # `print(1)` passa pelo validador de seguranca AST.
+        await code_tools._execute_python("print(1)", timeout=99999)
+        assert captured["timeout"] == TOOL_TIMEOUT_CAPS["code"]
+
+    @pytest.mark.asyncio
+    async def test_network_caps_timeout_to_config(self, monkeypatch):
         from alpha.tools import network_tools
+        from alpha.config import TOOL_TIMEOUT_CAPS
 
-        src = inspect.getsource(network_tools._http_request)
-        # `min(timeout, 60)` literal nao deve mais existir
-        assert "min(timeout, 60)" not in src
-        assert "TOOL_TIMEOUT_CAPS" in src
+        captured = {}
 
-    def test_pipeline_tools_uses_config_cap(self):
+        async def fake_wait_for(coro, timeout):
+            captured["timeout"] = timeout
+            # fecha a coroutine pra evitar warning de "never awaited"
+            if asyncio.iscoroutine(coro):
+                coro.close()
+            raise asyncio.TimeoutError()
+
+        monkeypatch.setattr(network_tools.asyncio, "wait_for", fake_wait_for)
+
+        # URL publica valida (passa SSRF), GET — entra no caminho do wait_for.
+        await network_tools._http_request("https://example.com", timeout=99999)
+        # _http_request usa wait_for(..., timeout=timeout + 5); o cap esta no
+        # `timeout` base, entao o efetivo e cap + 5.
+        assert captured["timeout"] == TOOL_TIMEOUT_CAPS["network"] + 5
+
+    @pytest.mark.asyncio
+    async def test_pipeline_caps_timeout_to_config(self, monkeypatch, tmp_path):
         from alpha.tools import pipeline_tools
+        from alpha.config import TOOL_TIMEOUT_CAPS
 
-        src = inspect.getsource(pipeline_tools)
-        assert "min(timeout, 120)" not in src
-        assert "TOOL_TIMEOUT_CAPS" in src
+        captured = {}
+
+        async def fake_wait_for(coro, timeout):
+            captured.setdefault("timeout", timeout)
+            if asyncio.iscoroutine(coro):
+                coro.close()
+            raise asyncio.TimeoutError()
+
+        class _FakeProc:
+            returncode = None
+
+            async def communicate(self, input=None):
+                return b"", b""
+
+            def kill(self):
+                pass
+
+            async def wait(self):
+                return 0
+
+        async def fake_exec(*a, **k):
+            return _FakeProc()
+
+        monkeypatch.setattr(pipeline_tools, "AGENT_WORKSPACE", tmp_path)
+        monkeypatch.setattr(pipeline_tools.asyncio, "create_subprocess_exec", fake_exec)
+        monkeypatch.setattr(pipeline_tools.asyncio, "wait_for", fake_wait_for)
+
+        # cwd omitido -> usa pipeline_tools.AGENT_WORKSPACE (patchado).
+        await pipeline_tools._execute_pipeline("echo hi", timeout=99999)
+        # A primeira chamada de wait_for envolve proc.communicate(..., timeout=timeout).
+        assert captured["timeout"] == TOOL_TIMEOUT_CAPS["pipeline"]
 
 
 class TestExecutorReadFromConfig:
-    def test_executor_imports_from_config(self):
+    """O executor deve usar os MESMOS objetos que a config expoe, nao copias
+    com literais hardcoded. Comparamos identidade de valor com a config."""
+
+    def test_executor_values_match_config(self):
+        from alpha import config, executor
+
+        assert executor.TOOL_EXECUTION_TIMEOUT == config.TOOL_EXECUTION_TIMEOUT
+        assert executor._SLOW_TOOL_TIMEOUT == config.SLOW_TOOL_TIMEOUT
+
+    def test_slow_tools_get_slow_timeout(self):
+        """Sanity: a logica de selecao usa SLOW_TOOL_TIMEOUT para slow tools
+        e o default para o resto — distintos."""
         from alpha import executor
 
-        src = inspect.getsource(executor)
-        # O executor agora le config; nao tem mais `TOOL_EXECUTION_TIMEOUT = 120` hardcoded
-        assert "TOOL_EXECUTION_TIMEOUT = 120" not in src
-        assert "_SLOW_TOOL_TIMEOUT = 300" not in src
-        assert "from .config import" in src
-        assert "TOOL_EXECUTION_TIMEOUT" in src
+        assert executor._SLOW_TOOL_TIMEOUT != executor.TOOL_EXECUTION_TIMEOUT
+        assert executor._SLOW_TOOLS  # nao vazio

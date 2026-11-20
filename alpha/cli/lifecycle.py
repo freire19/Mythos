@@ -50,15 +50,21 @@ def _safe_shutdown(name: str, fn: Callable[[], None]) -> None:
 def _shutdown_browser_session() -> None:
     """atexit hook: close any persistent browser session.
 
-    When called from a running event loop (tests, embedding), schedule
-    the shutdown as a task instead of trying to create a new loop.
+    `asyncio.run` falha com RuntimeError se ja existe um loop rodando
+    (raro em atexit, mas acontece em testes / embedding). Quando isso
+    ocorre, usamos um loop dedicado para o shutdown e logamos qualquer
+    erro real ao inves de engolir tudo (#055).
     """
     try:
         from alpha.tools.browser_session import shutdown_browser
 
         try:
-            running = asyncio.get_running_loop()
-            running.create_task(shutdown_browser())
+            asyncio.get_running_loop()
+            new_loop = asyncio.new_event_loop()
+            try:
+                new_loop.run_until_complete(shutdown_browser())
+            finally:
+                new_loop.close()
         except RuntimeError:
             asyncio.run(shutdown_browser())
     except ImportError:
@@ -81,20 +87,27 @@ def _shutdown_pg_pools() -> None:
     """
     try:
         from alpha.tools.database_tools import _close_pg_pools
-
-        try:
-            asyncio.get_running_loop()
-            new_loop = asyncio.new_event_loop()
-            try:
-                new_loop.run_until_complete(_close_pg_pools())
-            finally:
-                new_loop.close()
-        except RuntimeError:
-            asyncio.run(_close_pg_pools())
     except ImportError:
-        pass  # asyncpg nao instalado, sem pools pra fechar
-    except Exception as e:
-        _stderr(f"shutdown_pg_pools: {type(e).__name__}: {e}")
+        return  # asyncpg nao instalado, sem pools pra fechar
+
+    # #024: atexit normalmente roda SEM loop ativo — `asyncio.run` é o caminho
+    # correto. O ramo antigo (`call_soon_threadsafe` + `ensure_future` num loop
+    # "rodando") era código morto no atexit e, quando disparava, era frágil: o
+    # loop podia parar antes da coroutine agendada rodar, deixando pools sem
+    # fechar. Removido.
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        # Nenhum loop rodando (caso normal do atexit) — seguro criar um.
+        try:
+            asyncio.run(_close_pg_pools())
+        except Exception as e:
+            _stderr(f"shutdown_pg_pools: {type(e).__name__}: {e}")
+        return
+    # Loop ainda ativo no exit (raro) — não dá para `asyncio.run` dentro dele;
+    # o OS reclama as conexões ao encerrar o processo.
+    _stderr("shutdown_pg_pools: event loop ainda ativo no exit; "
+            "pools de PG deixados para limpeza do OS")
 
 
 def _fire_on_stop() -> None:
@@ -141,14 +154,15 @@ def install_lifecycle_hooks() -> None:
         return
     # AUDIT_V1.8 #043: prompt_toolkit so carrega em modo REPL.
     from alpha.repl_input import cleanup_temp_images
-    atexit.register(_fire_on_stop)
+    # atexit runs hooks in reverse-registration order: _fire_on_stop is
+    # registered LAST so it fires FIRST (contrato do docstring), and
+    # cleanup_indicator fires right after — restoring the scroll region
+    # before the remaining teardowns write to stdout/stderr.
     atexit.register(_shutdown_browser_session)
     atexit.register(_shutdown_mcp_servers)
     atexit.register(_shutdown_pg_pools)
     atexit.register(cleanup_temp_images)
-    # atexit runs hooks in reverse-registration order, so registering
-    # cleanup_indicator last means it fires first — restoring the
-    # scroll region before any other hook writes to stdout/stderr.
     atexit.register(cleanup_indicator)
+    atexit.register(_fire_on_stop)
     _install_sigterm_handler()
     _INSTALLED = True

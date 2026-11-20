@@ -149,11 +149,30 @@ class TestSummaryForPrompt:
 
 
 class TestWorkspaceToken:
-    def test_basename_from_cwd(self, monkeypatch, tmp_path):
+    def test_basename_prefix_from_cwd(self, monkeypatch, tmp_path):
+        # AUDIT_V2.2 #032: token keeps the readable basename but appends a
+        # short path-hash for uniqueness.
         proj = tmp_path / "MyProject"
         proj.mkdir()
         monkeypatch.chdir(proj)
-        assert memory._workspace_token() == "MyProject"
+        token = memory._workspace_token()
+        assert token.startswith("MyProject-")
+        # stable across calls
+        assert token == memory._workspace_token()
+
+    def test_same_basename_distinct_paths_dont_collide(self, monkeypatch, tmp_path):
+        # AUDIT_V2.2 #032: two different projects both named "web" must NOT
+        # map to the same workspace token.
+        a = tmp_path / "a" / "web"
+        b = tmp_path / "b" / "web"
+        a.mkdir(parents=True)
+        b.mkdir(parents=True)
+        monkeypatch.chdir(a)
+        token_a = memory._workspace_token()
+        monkeypatch.chdir(b)
+        token_b = memory._workspace_token()
+        assert token_a.startswith("web-") and token_b.startswith("web-")
+        assert token_a != token_b
 
     def test_sanitizes_special_chars(self, monkeypatch, tmp_path):
         weird = tmp_path / "with spaces & symbols!"
@@ -165,5 +184,5 @@ class TestWorkspaceToken:
     def test_fallback_when_root(self, monkeypatch):
         monkeypatch.chdir("/")
         token = memory._workspace_token()
-        # basename("/") == "" — falls back to "default"
-        assert token == "default"
+        # basename("/") == "" — falls back to "default" prefix
+        assert token.startswith("default-")

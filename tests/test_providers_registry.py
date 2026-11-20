@@ -79,20 +79,71 @@ async def test_dispatcher_uses_registered_provider(monkeypatch):
     assert captured and captured[0]["provider"] == "fakeprov"
 
 
-def test_unregistered_format_falls_through_to_openai_path():
-    """Source-level guard: stream_chat_with_tools must contain the
-    fall-through comment for unregistered formats. Without this, a
-    typo'd api_format would route an unrecognized provider into a
-    silent no-op rather than the OpenAI default path."""
-    import inspect
+@pytest.mark.asyncio
+async def test_unregistered_format_falls_through_to_openai_path(monkeypatch):
+    """Behavioral: a provider whose api_format is NOT in the registry must
+    fall through to the inline OpenAI streaming path (not a silent no-op).
 
+    We register nothing for 'mystery-fmt', point a provider at it, and assert
+    the request reaches the OpenAI HTTP client (`client.stream`) — proving the
+    fall-through. Without it, the dispatcher would return early on the registry
+    miss and yield zero events."""
     from alpha import llm
+    from alpha.config import _PROVIDERS
 
-    src = inspect.getsource(llm.stream_chat_with_tools)
-    # The dispatcher branch keys on api_format != "openai" and looks
-    # up the registry; on a miss it falls through to the inline OpenAI
-    # streaming code below.
-    assert 'api_format != "openai"' in src
-    assert "_get_provider_impl(api_format)" in src
-    # The comment about fall-through is load-bearing for future devs.
-    assert "fall through to OpenAI" in src.lower() or "OpenAI compat" in src
+    # Make sure the format is genuinely unregistered.
+    assert providers.get("mystery-fmt") is None
+
+    streamed: dict = {}
+
+    class _FakeResponse:
+        status_code = 200
+        headers: dict = {}
+
+        async def aiter_lines(self):
+            # Minimal OpenAI-style SSE: one final-ish chunk then DONE.
+            yield 'data: {"choices":[{"delta":{"content":"hi"}}]}'
+            yield "data: [DONE]"
+
+    class _FakeStreamCtx:
+        async def __aenter__(self):
+            return _FakeResponse()
+
+        async def __aexit__(self, *exc):
+            return False
+
+    class _FakeClient:
+        def stream(self, method, url, *a, **k):
+            streamed["url"] = url
+            return _FakeStreamCtx()
+
+    async def fake_get_client():
+        return _FakeClient()
+
+    async def noop_rate_limit(provider):
+        return None
+
+    monkeypatch.setattr(llm, "_get_shared_llm_client", fake_get_client)
+    monkeypatch.setattr(llm, "_rate_limit_acquire", noop_rate_limit)
+    monkeypatch.setitem(_PROVIDERS, "mysteryprov", {
+        "base_url": "http://mystery.local",
+        "api_key_env": "MYSTERY_KEY",
+        "model_env": "MYSTERY_MODEL",
+        "default_model": "mystery-model",
+        "supports_tools": False,
+        "api_format": "mystery-fmt",
+    })
+    monkeypatch.setenv("MYSTERY_KEY", "x")
+
+    events = [
+        e async for e in llm.stream_chat_with_tools(
+            messages=[{"role": "user", "content": "hi"}],
+            tools=[],
+            temperature=0.5,
+            provider="mysteryprov",
+        )
+    ]
+    # Reached the OpenAI HTTP path (chamou client.stream com a base_url).
+    assert streamed.get("url") == "http://mystery.local/chat/completions"
+    # E produziu ao menos um evento (nao foi no-op silencioso).
+    assert events

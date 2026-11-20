@@ -47,6 +47,26 @@ class TestFormatResult:
         assert parsed["truncated"] is True
         assert len(formatted) <= TOOL_RESULT_MAX_CHARS + 200
 
+    def test_truncation_preserves_tail(self):
+        # Issue #005: erro no FINAL de um log longo não pode ser cortado —
+        # o clip mantém head+tail com marcador do meio omitido.
+        result = {"stdout": "x" * (TOOL_RESULT_MAX_CHARS + 5000) + "THE_ERROR_AT_END"}
+        formatted = _format_result(result, "execute_shell")
+        parsed = json.loads(formatted)
+        assert parsed["truncated"] is True
+        clipped = parsed["preview"]["stdout"]
+        assert clipped.startswith("xxx")
+        assert clipped.endswith("THE_ERROR_AT_END")
+        assert "chars omitted" in clipped
+
+    def test_truncation_marker_reports_omitted_count(self):
+        n_total = TOOL_RESULT_MAX_CHARS + 3000
+        result = {"log": "a" * n_total}
+        formatted = _format_result(result, "test")
+        clipped = json.loads(formatted)["preview"]["log"]
+        # 1000 chars preservados (600 head + 400 tail); o resto declarado.
+        assert f"[{n_total - 1000} chars omitted" in clipped
+
 
 class TestExecuteSingleTool:
     @pytest.mark.asyncio

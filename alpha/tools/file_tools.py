@@ -19,7 +19,9 @@ Invariants enforced here:
   blow up `rglob` traversal time on monorepos and rarely have content
   the agent should be looking at.
 - Search uses ripgrep when available (fast-path), falls back to a Python
-  walker; both honor `_SKIP_DIRS` and never escape the workspace.
+  walker; both honor `_SKIP_DIRS` (via `_RG_EXCLUDES`, derived from it —
+  the Python walker additionally skips hidden dirs) and never escape the
+  workspace.
 
 What's NOT here (lives elsewhere):
 
@@ -34,6 +36,7 @@ What's NOT here (lives elsewhere):
 from __future__ import annotations
 
 import asyncio
+import fnmatch
 import json
 import logging
 import os
@@ -43,7 +46,6 @@ from pathlib import Path
 
 from . import ToolCategory, ToolDefinition, ToolSafety, register_tool
 from .path_helpers import (
-    _fuzzy_resolve,
     _validate_path,
     _validate_path_no_symlink,
 )
@@ -62,8 +64,10 @@ _SKIP_DIRS = frozenset({".git", "node_modules", ".venv", "__pycache__",
 # Detectamos no import — `shutil.which` lookup e barato e o resultado
 # nao muda a cada call. Quando ausente, caimos no fallback Python.
 _RIPGREP_BIN = shutil.which("rg")
-# Excluir os mesmos paths que o fallback Python pula
-_RG_EXCLUDES = (".git", "node_modules", "__pycache__", ".venv")
+# #DM070: derivado de `_SKIP_DIRS` (fonte única) — antes era uma tupla menor
+# mantida à mão, e editar `_SKIP_DIRS` era silenciosamente ignorado pela
+# busca, contradizendo o invariante documentado no docstring do módulo.
+_RG_EXCLUDES = tuple(sorted(_SKIP_DIRS))
 
 # Inline edits load the whole file into memory; refuse anything larger so we
 # don't allocate runaway buffers (the previous unconditional 10MB read also
@@ -87,20 +91,36 @@ def _read_file_sync(p: Path, offset: int, limit: int) -> tuple[list[str], int]:
     # mesmo com offset/limit pequenos. Para arquivos >= 100KB, fazemos
     # streaming com open() — conta total de linhas e só guarda as do range.
     # Custo: O(n) CPU (contar \n), O(limit) RAM (só as linhas visíveis).
-    fsize = p.stat().st_size
-    if fsize < 100_000:
-        text = p.read_text(errors="replace")
-        lines = text.splitlines()
-        selected = lines[offset : offset + limit]
-        total_lines = len(lines)
-    else:
-        selected = []
-        total_lines = 0
-        with open(p, "r", errors="replace", buffering=65536) as f:
-            for i, line in enumerate(f):
-                total_lines = i + 1
-                if offset <= i < offset + limit:
-                    selected.append(line.rstrip("\n"))
+    # #011: open with O_NOFOLLOW. `_validate_path` returns the RESOLVED path
+    # (symlinks collapsed) and rejects targets outside the workspace, so for a
+    # legit read the final component is never a symlink and O_NOFOLLOW is a
+    # no-op. It only fires (ELOOP → caught upstream) if a component was swapped
+    # for a symlink between validation and read (the residual TOCTOU window).
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(str(p), flags)
+    opened = False
+    try:
+        fsize = os.fstat(fd).st_size
+        buffering = 65536 if fsize >= 100_000 else -1
+        f = os.fdopen(fd, "r", errors="replace", buffering=buffering)
+        opened = True  # the file object now owns (and will close) fd
+        with f:
+            if fsize < 100_000:
+                lines = f.read().splitlines()
+                selected = lines[offset : offset + limit]
+                total_lines = len(lines)
+            else:
+                selected = []
+                total_lines = 0
+                for i, line in enumerate(f):
+                    total_lines = i + 1
+                    if offset <= i < offset + limit:
+                        selected.append(line.rstrip("\n"))
+    finally:
+        if not opened:
+            os.close(fd)
     return selected, total_lines
 
 
@@ -126,13 +146,32 @@ async def _read_file(path: str, offset: int = 0, limit: int = 500) -> dict:
             _read_file_sync, p, offset, limit
         )
         numbered = "\n".join(f"{i + offset + 1}: {line}" for i, line in enumerate(selected))
-        return {
+        result = {
             "path": str(p),
             "total_lines": total_lines,
             "offset": offset,
             "lines_returned": len(selected),
             "content": numbered,
         }
+        # Sinal em prosa quando o range pedido nao bate com o arquivo. Sem
+        # isso, o modelo que chuta `offset=250` num arquivo de 200 linhas
+        # recebe content="" + total_lines=200 e tende a refazer a leitura as
+        # cegas. A frase deixa o overshoot/truncamento obvio em uma rodada.
+        last_read = offset + len(selected)
+        # `offset > 0` evita ruido no caso normal de ler um arquivo vazio do
+        # inicio (offset=0, total=0); mas um offset positivo alem do fim —
+        # inclusive num arquivo vazio (total=0) — merece o aviso explicito.
+        if offset >= total_lines and offset > 0:
+            result["note"] = (
+                f"offset {offset} esta alem do fim do arquivo "
+                f"({total_lines} linhas no total) — nada foi retornado."
+            )
+        elif last_read < total_lines:
+            result["note"] = (
+                f"truncado: restam {total_lines - last_read} linha(s). "
+                f"Use offset={last_read} para continuar."
+            )
+        return result
     except Exception as e:
         return {"error": str(e)}
 
@@ -155,22 +194,27 @@ async def _list_directory(path: str = ".") -> dict:
         }
     if not p.is_dir():
         return {"error": f"Não é um diretório: {path}"}
-    entries = []
     try:
-        for entry in sorted(p.iterdir()):
-            try:
-                info = {
-                    "name": entry.name,
-                    "type": "dir" if entry.is_dir() else "file",
-                }
-                if entry.is_file():
-                    info["size"] = entry.stat().st_size
-                entries.append(info)
-            except PermissionError:
-                entries.append({"name": entry.name, "type": "unknown", "error": "permissão negada"})
+        return await asyncio.to_thread(_list_directory_sync, p)
     except PermissionError:
         return {"error": f"Permissão negada: {path}"}
-    return {"path": str(p), "count": len(entries), "entries": entries[:300]}
+
+
+def _list_directory_sync(p: Path) -> dict:
+    listing = sorted(p.iterdir())
+    entries = []
+    for entry in listing[:300]:
+        try:
+            info = {
+                "name": entry.name,
+                "type": "dir" if entry.is_dir() else "file",
+            }
+            if entry.is_file():
+                info["size"] = entry.stat().st_size
+            entries.append(info)
+        except PermissionError:
+            entries.append({"name": entry.name, "type": "unknown", "error": "permissão negada"})
+    return {"path": str(p), "count": len(listing), "entries": entries}
 
 
 MAX_REGEX_PATTERN_LENGTH = 500
@@ -315,13 +359,30 @@ async def _search_files(pattern: str, path: str = ".", max_results: int = 50) ->
     # grandes. Fallback para scan Python preserva semantica (case-insensitive,
     # mesmas exclusoes de dir, mesmo formato de output).
     if _RIPGREP_BIN is not None:
-        results = await _search_with_ripgrep(pattern, p, max_results)
+        try:
+            results = await _search_with_ripgrep(pattern, p, max_results)
+        except _RipgrepTimeout:
+            # #D043: surface the timeout as a failure (not a misleading
+            # "0 matches") so the agent knows the search was incomplete.
+            return {
+                "error": (
+                    "Busca excedeu 30s (ripgrep) e foi abortada — resultado "
+                    "incompleto. Refine o padrão ou reduza o escopo (path)."
+                ),
+                "timeout": True,
+                "pattern": pattern,
+                "path": str(p),
+            }
     else:
         results = await asyncio.to_thread(
             _search_with_python, regex, p, max_results
         )
 
     return {"pattern": pattern, "path": str(p), "matches": len(results), "results": results}
+
+
+class _RipgrepTimeout(Exception):
+    """#D043: ripgrep exceeded its time budget — distinct from 'no matches'."""
 
 
 async def _search_with_ripgrep(pattern: str, root: Path, max_results: int) -> list[dict]:
@@ -360,10 +421,11 @@ async def _search_with_ripgrep(pattern: str, root: Path, max_results: int) -> li
             await proc.wait()
         except Exception:
             pass
-        # Em timeout, fallback Python — ja temos `regex` compilado mas
-        # a versao chamadora vai re-compilar. Devolver vazio aqui evita
-        # double-work; o usuario pode re-tentar com pattern mais especifico.
-        return []
+        # #D043: sinalizar o timeout em vez de devolver `[]` — vazio era
+        # indistinguivel de "sem matches" e o agente concluia um falso
+        # negativo. Nao caimos no fallback Python (provavelmente tambem
+        # estouraria o tempo); o caller transforma isto num payload de erro.
+        raise _RipgrepTimeout()
     except asyncio.CancelledError:
         proc.kill()
         try:
@@ -442,26 +504,82 @@ def _search_with_python(regex: "re.Pattern[str]", root: Path, max_results: int) 
     return out
 
 
-async def _glob_files(pattern: str, path: str = ".") -> dict:
-    """Find files matching a glob pattern."""
-    try:
-        p = _validate_path(path)
-    except PermissionError as e:
-        return {"error": str(e)}
-    if not p.exists():
-        return {"error": f"Caminho não encontrado: {path}"}
+def _glob_match_parts(
+    parts: tuple[str, ...], pat_parts: tuple[str, ...], is_dir: bool
+) -> bool:
+    """Match relative path components against glob pattern components.
 
+    Mirrors `pathlib.Path.glob` semantics (py3.11/3.12): `**` matches zero
+    or more directories; a bare `**` tail matches directories only.
+    """
+    if not pat_parts:
+        return not parts
+    head, rest = pat_parts[0], pat_parts[1:]
+    if head == "**":
+        if not rest:
+            return is_dir
+        return any(
+            _glob_match_parts(parts[i:], rest, is_dir)
+            for i in range(len(parts) + 1)
+        )
+    if not parts:
+        return False
+    if not fnmatch.fnmatchcase(parts[0], head):
+        return False
+    return _glob_match_parts(parts[1:], rest, is_dir)
+
+
+def _glob_recursive_sync(
+    p: Path, pat_parts: tuple[str, ...], dirs_only: bool
+) -> tuple[list[dict], int]:
+    """Recursive glob via `os.walk` com poda real de `_SKIP_DIRS`."""
+    matches: list[dict] = []
+    skipped_outside = 0
+    if not p.is_dir():
+        return matches, skipped_outside
+    if _glob_match_parts((), pat_parts, True):
+        matches.append({"path": str(p), "type": "dir"})
+    for dirpath, dirnames, filenames in os.walk(str(p)):
+        # Skip subdirectories de noise para nao ler 100K entries em monorepos
+        dirnames[:] = [d for d in dirnames if d not in _SKIP_DIRS]
+        rel_parts = Path(dirpath).relative_to(p).parts
+        candidates = [(name, True) for name in dirnames]
+        if not dirs_only:
+            candidates += [
+                (name, False) for name in filenames if name not in _SKIP_DIRS
+            ]
+        for name, is_dir in candidates:
+            if not _glob_match_parts(rel_parts + (name,), pat_parts, is_dir):
+                continue
+            entry = Path(dirpath) / name
+            # #D025: workspace dentro do glob — se p contem symlink que aponta
+            # para fora, glob seguiria e listaria filenames externos. read_file
+            # depois bloquearia, mas o filename ja vazou estrutura externa.
+            target = entry.resolve() if entry.is_symlink() else entry
+            if assert_within_workspace(target):
+                skipped_outside += 1
+                continue
+            info = {"path": str(entry), "type": "dir" if is_dir else "file"}
+            if not is_dir:
+                try:
+                    info["size"] = entry.stat().st_size
+                except OSError:
+                    pass
+            matches.append(info)
+            if len(matches) >= 200:
+                return matches, skipped_outside
+    return matches, skipped_outside
+
+
+def _glob_flat_sync(p: Path, pattern: str) -> tuple[list[dict], int]:
+    """Glob nao-recursivo — mesmo comportamento de `p.glob`, fora do loop."""
     # #027/#072: era `sorted(p.glob(pattern))` — materializava a lista
     # inteira antes de cortar a 200. Em monorepos com .git/node_modules
     # incluido, isso pode produzir 100K+ entradas. Itera o generator,
     # acumula 200, ordena no final.
-    matches = []
+    matches: list[dict] = []
     skipped_outside = 0
-    try:
-        glob_iter = p.glob(pattern)
-    except PermissionError as e:
-        return {"error": f"Permissão negada ao acessar: {e}"}
-    for match in glob_iter:
+    for match in p.glob(pattern):
         # Skip subdirectories de noise para nao ler 100K entries em monorepos
         try:
             rel = match.relative_to(p)
@@ -484,6 +602,42 @@ async def _glob_files(pattern: str, path: str = ".") -> dict:
         matches.append(info)
         if len(matches) >= 200:
             break
+    return matches, skipped_outside
+
+
+async def _glob_files(pattern: str, path: str = ".") -> dict:
+    """Find files matching a glob pattern."""
+    try:
+        p = _validate_path(path)
+    except PermissionError as e:
+        return {"error": str(e)}
+    if not p.exists():
+        return {"error": f"Caminho não encontrado: {path}"}
+
+    try:
+        if "**" in pattern:
+            if os.path.isabs(pattern):
+                raise ValueError(pattern)
+            pat_parts = tuple(
+                seg for seg in pattern.split("/") if seg not in ("", ".")
+            )
+            if not pat_parts or any(
+                "**" in seg and seg != "**" for seg in pat_parts
+            ):
+                raise ValueError(pattern)
+            matches, skipped_outside = await asyncio.to_thread(
+                _glob_recursive_sync, p, pat_parts, pattern.endswith("/")
+            )
+        else:
+            matches, skipped_outside = await asyncio.to_thread(
+                _glob_flat_sync, p, pattern
+            )
+    except PermissionError as e:
+        return {"error": f"Permissão negada ao acessar: {e}"}
+    except (ValueError, NotImplementedError):
+        return {
+            "error": "Pattern inválido: deve ser relativo (não absoluto) e não pode ser vazio"
+        }
 
     # Sort apenas o subset de 200 (ou menos), nao a coleta inteira.
     matches.sort(key=lambda info: info["path"])
@@ -502,6 +656,31 @@ async def _glob_files(pattern: str, path: str = ".") -> dict:
 # ─── Destructive Tools ───
 
 
+# Combo de flags da escrita atômica: O_NOFOLLOW faz o open falhar (ELOOP)
+# se o alvo virou symlink entre a validação e a escrita (janela TOCTOU).
+_WRITE_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW
+
+
+def _overwrite_validated(p: Path, original_path: str, text: str) -> int:
+    """Cauda comum de `_write_file_sync`/`_edit_file_sync` (#DM070 sub-achado).
+
+    Re-valida o workspace (fecha o TOCTOU pós-mkdir/pós-read) e sobrescreve
+    `p` com `text` em UTF-8 via O_NOFOLLOW. Retorna os bytes escritos.
+    Levanta PermissionError se o path resolvido saiu do workspace.
+    """
+    p_resolved = Path(original_path).expanduser().resolve()
+    err = assert_within_workspace(p_resolved)
+    if err:
+        raise PermissionError(err)
+    data = text.encode("utf-8")
+    fd = os.open(str(p), _WRITE_FLAGS, 0o644)
+    try:
+        os.write(fd, data)
+    finally:
+        os.close(fd)
+    return len(data)
+
+
 def _write_file_sync(p: Path, original_path: str, content: str) -> dict:
     """Sync helper para `_write_file` (AUDIT_V1.8 #041).
 
@@ -517,21 +696,15 @@ def _write_file_sync(p: Path, original_path: str, content: str) -> dict:
         except Exception:
             previous_content = ""
 
+    # Checkpoint ANTES da mutação (rede de proteção do /rewind; nunca levanta).
+    from ..checkpoints import snapshot as _ckpt_snapshot
+    _ckpt_snapshot(p, "write_file")
+
     p.parent.mkdir(parents=True, exist_ok=True)
-    p_resolved = Path(original_path).expanduser().resolve()
-    err = assert_within_workspace(p_resolved)
-    if err:
-        raise PermissionError(err)
-    data = content.encode("utf-8")
-    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW
-    fd = os.open(str(p), flags, 0o644)
-    try:
-        os.write(fd, data)
-    finally:
-        os.close(fd)
+    bytes_written = _overwrite_validated(p, original_path, content)
     return {
         "path": str(p),
-        "bytes_written": len(data),
+        "bytes_written": bytes_written,
         "_previous_content": previous_content,
         "_created": not existed,
     }
@@ -562,8 +735,16 @@ async def _write_file(path: str, content: str) -> dict:
         return {"error": str(e)}
 
 
-def _edit_file_sync(p: Path, original_path: str, old_text: str, new_text: str) -> dict:
+def _edit_file_sync(
+    p: Path,
+    original_path: str,
+    old_text: str,
+    new_text: str,
+    replace_all: bool = False,
+) -> dict:
     """Sync helper para `_edit_file` (AUDIT_V1.8 #041)."""
+    if not old_text:
+        return {"error": "old_text vazio não é permitido"}
     fd = os.open(str(p), os.O_RDONLY | os.O_NOFOLLOW)
     try:
         size = os.fstat(fd).st_size
@@ -579,26 +760,35 @@ def _edit_file_sync(p: Path, original_path: str, old_text: str, new_text: str) -
     if old_text not in original:
         return {"error": "Texto não encontrado no arquivo. Verifique indentação e espaços."}
     count = original.count(old_text)
-    updated = original.replace(old_text, new_text, 1)
-    p_resolved = Path(original_path).expanduser().resolve()
-    err = assert_within_workspace(p_resolved)
-    if err:
-        raise PermissionError(err)
-    data = updated.encode("utf-8")
-    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW
-    fd = os.open(str(p), flags, 0o644)
-    try:
-        os.write(fd, data)
-    finally:
-        os.close(fd)
+    if count > 1 and not replace_all:
+        # Ambiguidade explícita > substituição silenciosa da 1ª ocorrência:
+        # o modelo escolhe entre ampliar o contexto ou assumir todas.
+        return {
+            "error": (
+                f"old_text aparece {count} vezes no arquivo. Inclua mais "
+                "contexto para torná-lo único, ou passe replace_all=true "
+                "para substituir todas as ocorrências."
+            ),
+            "occurrences_found": count,
+        }
+    updated = original.replace(old_text, new_text) if replace_all else original.replace(
+        old_text, new_text, 1
+    )
+
+    from ..checkpoints import snapshot as _ckpt_snapshot
+    _ckpt_snapshot(p, "edit_file")
+
+    _overwrite_validated(p, original_path, updated)
     return {
         "path": str(p),
         "occurrences_found": count,
-        "replaced": 1,
+        "replaced": count if replace_all else 1,
     }
 
 
-async def _edit_file(path: str, old_text: str, new_text: str) -> dict:
+async def _edit_file(
+    path: str, old_text: str, new_text: str, replace_all: bool = False
+) -> dict:
     """Edit a file by replacing old_text with new_text."""
     try:
         p = _validate_path_no_symlink(path)
@@ -609,7 +799,7 @@ async def _edit_file(path: str, old_text: str, new_text: str) -> dict:
     try:
         # AUDIT_V1.8 #041: read+replace+write bloqueantes em thread pool.
         result = await asyncio.to_thread(
-            _edit_file_sync, p, path, old_text, new_text
+            _edit_file_sync, p, path, old_text, new_text, replace_all
         )
         # Edit-not-found path retorna dict com error sem levantar — repassa.
         if "error" in result:
@@ -631,22 +821,22 @@ async def _edit_file(path: str, old_text: str, new_text: str) -> dict:
 register_tool(
     ToolDefinition(
         name="read_file",
-        description="Ler o conteúdo de um arquivo. Retorna linhas numeradas com offset/limit opcionais para arquivos grandes.",
+        description="Read a file's contents. Returns numbered lines with optional offset/limit for large files.",
         parameters={
             "type": "object",
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "Caminho do arquivo (absoluto ou relativo)",
+                    "description": "File path (absolute or relative)",
                 },
                 "offset": {
                     "type": "integer",
-                    "description": "Linha inicial (0-based). Padrão: 0",
+                    "description": "Start line (0-based). Default: 0",
                     "default": 0,
                 },
                 "limit": {
                     "type": "integer",
-                    "description": "Máximo de linhas para ler. Padrão: 500",
+                    "description": "Maximum lines to read. Default: 500",
                     "default": 500,
                 },
             },
@@ -661,13 +851,13 @@ register_tool(
 register_tool(
     ToolDefinition(
         name="list_directory",
-        description="Listar conteúdo de um diretório (arquivos e subdiretórios com tamanhos).",
+        description="List a directory's contents (files and subdirectories with sizes).",
         parameters={
             "type": "object",
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "Caminho do diretório. Padrão: diretório atual",
+                    "description": "Directory path. Default: current directory",
                     "default": ".",
                 },
             },
@@ -682,19 +872,19 @@ register_tool(
 register_tool(
     ToolDefinition(
         name="search_files",
-        description="Buscar um padrão de texto (regex) dentro de arquivos recursivamente (similar ao grep).",
+        description="Search for a text pattern (regex) inside files recursively (like grep).",
         parameters={
             "type": "object",
             "properties": {
-                "pattern": {"type": "string", "description": "Padrão regex para buscar"},
+                "pattern": {"type": "string", "description": "Regex pattern to search for"},
                 "path": {
                     "type": "string",
-                    "description": "Diretório base para busca. Padrão: diretório atual",
+                    "description": "Base directory for the search. Default: current directory",
                     "default": ".",
                 },
                 "max_results": {
                     "type": "integer",
-                    "description": "Máximo de resultados. Padrão: 50",
+                    "description": "Maximum results. Default: 50",
                     "default": 50,
                 },
             },
@@ -709,14 +899,14 @@ register_tool(
 register_tool(
     ToolDefinition(
         name="glob_files",
-        description="Encontrar arquivos por padrão glob (ex: '**/*.py', '*.json').",
+        description="Find files by glob pattern (e.g. '**/*.py', '*.json').",
         parameters={
             "type": "object",
             "properties": {
-                "pattern": {"type": "string", "description": "Padrão glob (ex: '**/*.py')"},
+                "pattern": {"type": "string", "description": "Glob pattern (e.g. '**/*.py')"},
                 "path": {
                     "type": "string",
-                    "description": "Diretório base. Padrão: diretório atual",
+                    "description": "Base directory. Default: current directory",
                     "default": ".",
                 },
             },
@@ -731,15 +921,15 @@ register_tool(
 register_tool(
     ToolDefinition(
         name="write_file",
-        description="Criar ou sobrescrever um arquivo com o conteúdo fornecido. Cria diretórios pais automaticamente.",
+        description="Create or overwrite a file with the given content. Creates parent directories automatically.",
         parameters={
             "type": "object",
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "Caminho do arquivo para criar/sobrescrever",
+                    "description": "Path of the file to create/overwrite",
                 },
-                "content": {"type": "string", "description": "Conteúdo completo do arquivo"},
+                "content": {"type": "string", "description": "Full file content"},
             },
             "required": ["path", "content"],
         },
@@ -752,18 +942,27 @@ register_tool(
 register_tool(
     ToolDefinition(
         name="edit_file",
-        description="Editar um arquivo substituindo uma string por outra (search-and-replace). SEMPRE leia o arquivo antes de editar.",
+        description=(
+            "Edit a file by replacing one string with another (search-and-replace). "
+            "ALWAYS read the file before editing. If old_text matches more than "
+            "once, the call fails unless replace_all=true."
+        ),
         parameters={
             "type": "object",
             "properties": {
-                "path": {"type": "string", "description": "Caminho do arquivo para editar"},
+                "path": {"type": "string", "description": "Path of the file to edit"},
                 "old_text": {
                     "type": "string",
-                    "description": "Texto exato a ser substituído (inclua contexto suficiente para ser único)",
+                    "description": "Exact text to replace (include enough context to be unique)",
                 },
                 "new_text": {
                     "type": "string",
-                    "description": "Novo texto que substituirá o antigo",
+                    "description": "New text that will replace the old one",
+                },
+                "replace_all": {
+                    "type": "boolean",
+                    "description": "Replace every occurrence of old_text (default: false)",
+                    "default": False,
                 },
             },
             "required": ["path", "old_text", "new_text"],

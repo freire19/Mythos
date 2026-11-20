@@ -1,8 +1,10 @@
 """Model Context Protocol (MCP) integration for Mythos.
 
-Exposes a stdio-only client that connects to external MCP servers and
-auto-registers their tools into the global alpha TOOL_REGISTRY under the
-prefix `mcp__<server>__<tool>`.
+Two transports connect to external MCP servers: stdio (`client.py`,
+subprocess + reader threads) and Streamable HTTP (`http_client.py`,
+sync httpx with `Mcp-Session-Id` sessions). `loader.py` treats both by
+duck-typing and auto-registers their tools into the global alpha
+TOOL_REGISTRY under the prefix `mcp__<server>__<tool>`.
 """
 
 from __future__ import annotations

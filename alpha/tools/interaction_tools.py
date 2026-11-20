@@ -35,14 +35,44 @@ def _parse_options(raw: object) -> list[str]:
     return []
 
 
+def _wrap_menu(question: str, options: list[str]) -> tuple[list[str], list[list[str]]]:
+    """Word-wrap the question and each option to the terminal width. A line
+    the terminal wraps on its own restarts at column 0 and breaks both the
+    numbering and the in-place redraw of the arrow-key menu."""
+    import textwrap
+
+    from ..display.theme import term_cols
+
+    cols = max(30, term_cols() - 2)
+    q_lines = textwrap.wrap(question.strip(), width=cols - 2) or [""]
+    hang = 4 + len(str(len(options))) + 2
+    o_lines = [
+        textwrap.wrap(" ".join(opt.split()), width=max(20, cols - hang)) or [""]
+        for opt in options
+    ]
+    return q_lines, o_lines
+
+
+def _render_question(q_lines: list[str]) -> None:
+    print()
+    print(f"{c(C.VIOLET_GLOW, '●')} {c(C.BOLD, q_lines[0])}")
+    for ln in q_lines[1:]:
+        print(f"  {c(C.BOLD, ln)}")
+    print()
+
+
 def _render_menu(question: str, options: list[str]) -> None:
-    print()
-    print(f"  {c(C.VIOLET + C.BOLD, '?')} {c(C.WHITE + C.BOLD, question)}")
-    print()
+    """Static numbered menu, for terminals where the arrow-key menu can't run."""
+    q_lines, o_lines = _wrap_menu(question, options)
+    _render_question(q_lines)
     width = len(str(len(options)))
-    for i, opt in enumerate(options, start=1):
-        num = c(C.VIOLET, f"{i:>{width}})")
-        print(f"    {num} {c(C.WHITE, opt)}")
+    hang = " " * (4 + width + 2)
+    for i, lines in enumerate(o_lines, start=1):
+        pointer = c(C.VIOLET_GLOW, "❯") if i == 1 else " "
+        num = c(C.GRAY, f"{i:>{width}}.")
+        print(f"  {pointer} {num} {lines[0]}")
+        for ln in lines[1:]:
+            print(f"{hang}{ln}")
     print()
 
 
@@ -88,8 +118,32 @@ async def _ask_choice(question: str, options: object = None) -> dict:
         ind.pause()
 
     try:
+        from ..display.select import can_select, select_menu
+
+        if can_select():
+            q_lines, o_lines = _wrap_menu(question, parsed)
+            _render_question(q_lines)
+            try:
+                picked = await asyncio.to_thread(select_menu, o_lines)
+            except (EOFError, KeyboardInterrupt):
+                picked = None
+            if picked is None:
+                print(f"  {c(C.GRAY, '(cancelado)')}")
+                return {
+                    "ok": False,
+                    "category": "user_cancelled",
+                    "error": "user cancelled the choice prompt",
+                }
+            chosen = parsed[picked]
+            print(f"  {c(C.GREEN, '✓')} {c(C.GRAY, ' '.join(chosen.split())[:120])}")
+            return {
+                "ok": True,
+                "chosen_index": picked + 1,
+                "chosen_value": chosen,
+            }
+
         _render_menu(question, parsed)
-        prompt = f"  {c(C.VIOLET, '→')} Escolha [1-{len(parsed)}]: "
+        prompt = f"  {c(C.GRAY, f'Escolha [1-{len(parsed)}]:')} "
         attempts = 0
         while attempts < 5:
             try:
@@ -103,7 +157,7 @@ async def _ask_choice(question: str, options: object = None) -> dict:
             idx = _match_option(raw, parsed)
             if idx is not None:
                 chosen = parsed[idx - 1]
-                print(f"  {c(C.GREEN, '✓')} {c(C.GRAY, chosen)}")
+                print(f"  {c(C.GREEN, '✓')} {c(C.GRAY, ' '.join(chosen.split())[:120])}")
                 return {
                     "ok": True,
                     "chosen_index": idx,

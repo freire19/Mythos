@@ -16,10 +16,8 @@ Cobre:
 - #D005 (V1.0 PERF) — fuzzy resolve cache
 """
 
-import inspect
 from pathlib import Path
 
-import pytest
 
 
 # ─── #DM004 — dead import removed ──────────────────────────────────
@@ -36,30 +34,44 @@ class TestIsPrivateIpDeadImportRemoved:
 
 
 class TestUrllibImportsAtTop:
-    def test_no_inline_urllib_imports(self):
+    def test_urllib_imported_at_module_top(self):
+        """#DM005: urllib.request is imported at module top, not via the old
+        inline `import urllib.request as _urllib_request` alias nor inline in
+        `_http_request_urllib`. Structural proof: the `urllib` package is bound
+        as a module attribute and the no-redirect handler subclasses
+        urllib.request.HTTPRedirectHandler (resolved at class-definition time,
+        which only works if the top-level import exists)."""
+        import urllib.request
+
         from alpha.tools import network_tools
 
-        src = inspect.getsource(network_tools)
-        # Antes tinha `import urllib.request as _urllib_request` em meio
-        # ao modulo + `import urllib.error/import urllib.request` dentro
-        # de `_http_request_urllib`. Agora ambos no topo.
-        assert "import urllib.request as _urllib_request" not in src
-        # urllib.request ainda eh usado no top-level (subclass) e funcao
-        assert "urllib.request.HTTPRedirectHandler" in src or "urllib.request.build_opener" in src
+        assert not hasattr(network_tools, "_urllib_request")
+        assert hasattr(network_tools, "urllib")
+        assert issubclass(
+            network_tools._NoRedirectHandler, urllib.request.HTTPRedirectHandler
+        )
 
 
 # ─── #DM014 — script_path init ─────────────────────────────────────
 
 
 class TestScriptPathInit:
-    def test_init_before_try(self):
+    async def test_tempfile_failure_does_not_unboundlocal(self, monkeypatch):
+        """#DM014: if creating the tempfile fails *before* `script_path` is
+        assigned, the `finally: os.unlink(script_path)` must not blow up with
+        UnboundLocalError. Behavioral proof: force NamedTemporaryFile to raise
+        and assert we get back the clean `{"error": ...}` dict (the pre-init to
+        None makes `finally` skip the unlink) rather than a NameError."""
         from alpha.tools import code_tools
 
-        src = inspect.getsource(code_tools._execute_python)
-        # Init `script_path: str | None = None` antes do try, e finally
-        # checa `if script_path is not None` antes de unlink.
-        assert "script_path: str | None = None" in src
-        assert "if script_path is not None" in src
+        def boom(*_a, **_kw):
+            raise OSError("no space left on device")
+
+        monkeypatch.setattr(code_tools.tempfile, "NamedTemporaryFile", boom)
+
+        result = await code_tools._execute_python("print('hi')")
+        assert "error" in result
+        assert "no space left" in result["error"]
 
 
 # ─── #D012 (V1.0 MAINT) — ALPHA_FEATURES removed ───────────────────
@@ -77,17 +89,16 @@ class TestAlphaFeaturesAliasRemoved:
 
 
 class TestSafeShellCommandsDedupe:
-    def test_no_duplicate_in_safe_shell_commands(self):
-        from alpha import approval
+    def test_ip_and_route_present_in_safe_shell_commands(self):
+        """#083 dedup-ed `ip`/`route` in SAFE_SHELL_COMMANDS. The set is a
+        frozenset so duplicates collapse by construction; the load-bearing
+        invariant is that both commands survived the dedup and remain
+        members of the allowlist."""
+        from alpha.approval import SAFE_SHELL_COMMANDS
 
-        src = inspect.getsource(approval)
-        # Pega regiao SAFE_SHELL_COMMANDS — termina no `}\n)` que fecha
-        # a frozenset.
-        start = src.find("SAFE_SHELL_COMMANDS = frozenset(")
-        end = src.find("\n)", start)
-        region = src[start:end]
-        assert region.count('"ip"') == 1, f"`ip` duplicado em {region!r}"
-        assert region.count('"route"') == 1, f"`route` duplicado em {region!r}"
+        assert isinstance(SAFE_SHELL_COMMANDS, frozenset)
+        assert "ip" in SAFE_SHELL_COMMANDS
+        assert "route" in SAFE_SHELL_COMMANDS
 
 
 # ─── #085 — loop detection consts in config ────────────────────────
@@ -101,15 +112,12 @@ class TestLoopDetectionInConfig:
         assert "similarity_threshold" in LOOP_DETECTION
         assert "min_iter" in LOOP_DETECTION
 
-    def test_agent_reads_from_config(self):
-        from alpha import agent
-
-        src = inspect.getsource(agent)
-        assert "LOOP_DETECTION" in src
+    # NB: the former `test_agent_reads_from_config` source-grep was removed —
+    # `test_consts_match_config_values` below already proves the agent's loop
+    # constants are sourced from config.LOOP_DETECTION (it asserts equality of
+    # every runtime constant against the dict).
 
     def test_consts_match_config_values(self):
-        # Constantes de loop detection vivem em alpha.agent.loop desde a
-        # refatoracao do agente (alpha/agent virou package).
         from alpha.agent.loop import (
             _CYCLE_WINDOW,
             _MAX_REPEAT_CALLS,
@@ -130,28 +138,83 @@ class TestLoopDetectionInConfig:
 
 
 class TestRunTestsShlexQuote:
-    def test_pattern_uses_shlex_quote(self):
-        from alpha.tools import composite_tools
+    async def test_pattern_is_shell_quoted(self, tmp_path, monkeypatch):
+        """#090: an adversarial `-k` pattern must be shell-quoted so it can't
+        inject into the pytest command. Behavioral proof: capture the command
+        _run_tests hands to execute_shell and verify the injection payload is
+        neutralized by quoting (no bare `; rm -rf`)."""
+        import shlex
 
-        src = inspect.getsource(composite_tools._run_tests)
-        # Antes: f" -k '{pattern}'" — quebra com aspas
-        # Agora: shlex.quote
-        assert "shlex.quote" in src or "_shlex.quote" in src
+        from alpha.tools import _composite_tests
+
+        # Bypass the workspace gate (not under test here) so we reach the
+        # command-construction path.
+        monkeypatch.setattr(
+            _composite_tests, "_resolve_target", lambda path: (tmp_path, None)
+        )
+
+        captured = {}
+
+        async def fake_run_tool(name, **kwargs):
+            captured["name"] = name
+            captured["command"] = kwargs.get("command")
+            return {"exit_code": 0, "stdout": "", "stderr": ""}
+
+        monkeypatch.setattr(_composite_tests, "_run_tool", fake_run_tool)
+
+        nasty = "x'; rm -rf ~; echo '"
+        await _composite_tests._run_tests(
+            path=str(tmp_path), framework="pytest", pattern=nasty
+        )
+
+        cmd = captured["command"]
+        # The payload must appear as the exact shlex.quote() rendering — i.e.
+        # fully escaped so the shell can't interpret `;`, quotes, or `~`.
+        assert f"-k {shlex.quote(nasty)}" in cmd
+        # Definitive safety check: a POSIX shell tokenizer parses the command
+        # into exactly [python3, -m, pytest, -v, -k, <original pattern>]. The
+        # injection is a single argument, not separate commands — so a bare
+        # f"-k '{pattern}'" (which would split on the `;`) would fail here.
+        assert shlex.split(cmd) == ["python3", "-m", "pytest", "-v", "-k", nasty]
 
 
 # ─── #091 — _safe_get_tool comment ─────────────────────────────────
 
 
-class TestSafeGetToolCommentUpdated:
-    def test_comment_explains_policy(self):
+class TestSafeGetToolPolicy:
+    def test_blocklist_enforces_anti_recursion(self):
+        """#091: the documented policy must actually hold — a sub-agent can
+        never resolve `delegate_*` (anti-recursion), even with no name-filter."""
         from alpha.tools import delegate_tools
 
-        src = inspect.getsource(delegate_tools._run_subagent)
-        # Comentario antigo: "Safe get_tool that blocks disallowed tools"
-        # — vago. Agora menciona explicitamente blocklist + anti-recursao
-        # + tools_filter.
-        assert "anti-recursao" in src or "blocklist" in src
-        assert "tools_filter" in src
+        blocked = delegate_tools._resolve_subagent_blocklist(None)
+        assert {"delegate_task", "delegate_parallel"} <= blocked
+
+        safe_get = delegate_tools._make_safe_get_tool(
+            blocked, None, delegate_tools.get_tool
+        )
+        assert safe_get("delegate_task") is None
+        assert safe_get("delegate_parallel") is None
+        # A normal, non-blocked tool still resolves.
+        assert safe_get("read_file") is not None
+
+    def test_tools_filter_restricts_lookup(self):
+        """#091: the `tools_filter` allow-list gates `_safe_get_tool` — a tool
+        outside the filter returns None even though it isn't blocklisted."""
+        from alpha.tools import delegate_tools
+
+        blocked = delegate_tools._resolve_subagent_blocklist(None)
+        _tools, allowed = delegate_tools._build_subagent_tools(
+            "read_file", blocked
+        )
+        assert allowed == {"read_file"}
+
+        safe_get = delegate_tools._make_safe_get_tool(
+            blocked, allowed, delegate_tools.get_tool
+        )
+        assert safe_get("read_file") is not None
+        # In-registry but outside the filter → blocked.
+        assert safe_get("write_file") is None
 
 
 # ─── #093 — analyze_tools docstring ────────────────────────────────
@@ -240,7 +303,7 @@ class TestValidatePgSsrf:
 
         # Simular DNS lento: 0.5s de bloqueio
         def slow_is_private_ip(hostname: str) -> bool:
-            time.sleep(0.5)
+            time.sleep(0.05)
             return False
 
         monkeypatch.setattr(database_tools, "_is_private_ip", slow_is_private_ip)

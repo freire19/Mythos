@@ -1,0 +1,24 @@
+# Dependabot — mantem os pins por SHA/digest atualizados.
+#
+# #D322/#D327: as actions dos workflows e a imagem base do Dockerfile sao
+# pinadas por commit SHA / digest (nao por tag mutavel). Sem atualizacao
+# automatizada o pin vira dependency-rot — o repo fica preso numa versao
+# antiga e perde patches de seguranca. Os PRs do Dependabot reescrevem o
+# SHA e o comentario de versao ao lado dele.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(deps)"
+
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: "chore(deps)"

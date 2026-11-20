@@ -9,7 +9,6 @@ Cobre:
 - #D022 — extract_page_content TTL cache
 """
 
-import inspect
 from pathlib import Path
 
 import pytest
@@ -44,13 +43,10 @@ class TestEnvExampleComplete:
 
 
 class TestWizardProvidersFromConfig:
-    def test_wizard_imports_config_providers(self):
-        import inspect
-
-        from alpha.wizard import steps
-
-        src = inspect.getsource(steps)
-        assert "_CONFIG_PROVIDERS" in src or "from ..config import" in src
+    # NB: the former `test_wizard_imports_config_providers` source-grep was
+    # removed — `test_wizard_provider_count_matches_config` below proves the
+    # wizard's `_PROVIDERS` is derived from config (identical id-set), which an
+    # independently hand-maintained list could not satisfy.
 
     def test_wizard_provider_count_matches_config(self):
         from alpha.config import _PROVIDERS as cfg
@@ -66,25 +62,26 @@ class TestWizardProvidersFromConfig:
 
 
 class TestProjectRootShared:
-    def test_wizard_env_imports_from_config(self):
+    def test_wizard_env_shares_config_project_root(self):
+        """#095: env reuses config.PROJECT_ROOT rather than recomputing its
+        own. Identity proof — the bound object IS the one config exports, which
+        a local `Path(__file__)...` definition could never satisfy."""
+        from alpha import config
         from alpha.wizard import env
 
-        src = inspect.getsource(env)
-        assert "from ..config import _PROJECT_ROOT" in src
-        # Sem definicao local
-        assert "Path(__file__).resolve().parent.parent.parent" not in src
+        assert env.PROJECT_ROOT is config.PROJECT_ROOT
 
-    def test_wizard_steps_imports_from_config(self):
-        from alpha.wizard import steps
-
-        src = inspect.getsource(steps)
-        assert "from ..config import" in src and "_PROJECT_ROOT" in src
-
-    def test_agents_registry_imports_from_config(self):
+    def test_agents_registry_shares_config_project_root(self):
+        """#095: agents.registry reuses config.PROJECT_ROOT (same object)."""
+        from alpha import config
         from alpha.agents import registry
 
-        src = inspect.getsource(registry)
-        assert "from ..config import _PROJECT_ROOT" in src
+        assert registry.PROJECT_ROOT is config.PROJECT_ROOT
+
+    # NB: the former `test_wizard_steps_imports_from_config` source-grep was
+    # removed — it only passed because the string "_PROJECT_ROOT" appears in a
+    # docstring (steps no longer binds it). The real config coupling for steps
+    # is its `_PROVIDERS`, which TestWizardProvidersFromConfig covers.
 
 
 # ─── #096 — tools index comment ────────────────────────────────────
@@ -109,25 +106,36 @@ class TestDisplayConstants:
     def test_constants_exported(self):
         from alpha import display
 
-        assert hasattr(display, "DISPLAY_LINE_TRUNCATE")
-        assert hasattr(display, "DISPLAY_PREVIEW_TRUNCATE")
-        assert hasattr(display, "DISPLAY_PROMPT_VALUE_TRUNCATE")
-        assert hasattr(display, "DISPLAY_MAX_LINES")
+        assert isinstance(getattr(display, "DISPLAY_LINE_TRUNCATE", None), int) and display.DISPLAY_LINE_TRUNCATE > 0
+        assert isinstance(getattr(display, "DISPLAY_PREVIEW_TRUNCATE", None), int) and display.DISPLAY_PREVIEW_TRUNCATE > 0
+        assert isinstance(getattr(display, "DISPLAY_PROMPT_VALUE_TRUNCATE", None), int) and display.DISPLAY_PROMPT_VALUE_TRUNCATE > 0
+        assert isinstance(getattr(display, "DISPLAY_MAX_LINES", None), int) and display.DISPLAY_MAX_LINES > 0
 
-    def test_no_inline_magic_numbers_in_print_paths(self):
+    def test_render_path_honors_preview_constant(self):
+        """#D010: the centralized constants are actually wired into the render
+        path, not shadowed by inline magic numbers. Behavioral proof: the
+        tool-args preview truncates a long value to exactly
+        DISPLAY_PREVIEW_TRUNCATE chars (ending in the ellipsis marker). If a
+        renderer reverted to a literal `[:200]`/`[:120]`, this length would no
+        longer track the constant and the test would fail."""
         from alpha import display
+        from alpha.display.renderers.tools import _tool_args_preview
 
-        src = inspect.getsource(display)
-        # As magic numbers principais foram substituidas pelas constantes
-        # — `[:200]` literal nao deve aparecer mais (poderia escapar para
-        # outras funcoes pero validamos a presenca das constantes acima).
-        # Conta apenas dentro das funcoes principais que substituimos.
-        # Esta checagem e branda — apenas garante que houve substituicao.
-        # `[:200]` e `[:120]` ainda podem aparecer 1x no docstring que
-        # documenta a centralizacao (comentario sobre o historico). O
-        # importante e que nao haja MULTIPLAS ocorrencias inline em codigo.
-        assert src.count("[:200]") <= 1, "Reduzir uso de literal [:200]"
-        assert src.count("[:120]") <= 1, "Reduzir uso de literal [:120]"
+        limit = display.DISPLAY_PREVIEW_TRUNCATE
+        out = _tool_args_preview({"command": "x" * (limit * 4)})
+        assert len(out) == limit
+        assert out.endswith("…")
+
+    def test_truncate_helper_respects_arbitrary_limit(self):
+        """The shared `_truncate` helper drives every render truncation; it
+        honours the limit it is passed (proving truncation is parameterized by
+        the constants rather than hardcoded)."""
+        from alpha.display.theme import _truncate
+
+        assert _truncate("short", 50) == "short"
+        out = _truncate("y" * 100, 30)
+        assert len(out) == 30
+        assert out.endswith("…")
 
 
 # ─── #D022 — extract cache ─────────────────────────────────────────

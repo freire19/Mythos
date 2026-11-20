@@ -23,15 +23,22 @@ import json
 import logging
 import os
 import asyncio
+import random
+import re
+import time
 
 import httpx
 
+from .._loop_lock import LoopAwareLock
 from . import ToolCategory, ToolDefinition, ToolSafety, register_tool
 
 logger = logging.getLogger(__name__)
 
 APIFY_BASE = "https://api.apify.com/v2"
-_POLL_INTERVAL = 5  # seconds between status checks
+# #D141: an Apify actor id is `name`, `user/name`, or `user~name` — one segment
+# pair, word chars only. Anything else (e.g. `../`) could rewrite the API path.
+_ACTOR_ID_RE = re.compile(r"^[A-Za-z0-9_-]+(?:[/~][A-Za-z0-9_-]+)?$")
+_POLL_INTERVAL = 5  # base seconds between status checks; jitter added in the poll loop (#038)
 _MAX_WAIT = 300  # max seconds to wait for an Actor run
 
 # #D012: client compartilhado entre _run_actor e _list_actors. Antes
@@ -39,22 +46,30 @@ _MAX_WAIT = 300  # max seconds to wait for an Actor run
 # TCP/TLS por call (~150-300ms). Reuso mantem keep-alive ativo.
 _shared_apify_client: httpx.AsyncClient | None = None
 _apify_client_loop: object | None = None
+# #D049: loop-aware lock (era `asyncio.Lock()` module-level, introduzido pelo
+# fix de #028) — bind ao 1o loop que contender, crash no turn seguinte.
+_apify_client_lock = LoopAwareLock()
 
 
-def _get_apify_client(timeout: float = 30.0) -> httpx.AsyncClient:
-    """Lazy single-instance client. Recria se loop atual difere do que criou."""
+async def _get_apify_client(timeout: float = 30.0) -> httpx.AsyncClient:
+    """Lazy single-instance client. Recria se loop atual difere do que criou.
+
+    AUDIT_V1.10 #030: lock anti-race — sem ele, duas coroutines concorrentes
+    podem criar clientes duplicados (o órfaõ nunca tem aclose() chamado).
+    """
     global _shared_apify_client, _apify_client_loop
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
         loop = None
-    if (
-        _shared_apify_client is None
-        or _shared_apify_client.is_closed
-        or _apify_client_loop is not loop
-    ):
-        _shared_apify_client = httpx.AsyncClient(timeout=timeout)
-        _apify_client_loop = loop
+    async with _apify_client_lock():
+        if (
+            _shared_apify_client is None
+            or _shared_apify_client.is_closed
+            or _apify_client_loop is not loop
+        ):
+            _shared_apify_client = httpx.AsyncClient(timeout=timeout)
+            _apify_client_loop = loop
     return _shared_apify_client
 
 
@@ -76,6 +91,11 @@ async def _run_actor(
     build: str = "latest",
 ) -> dict:
     """Run an Apify Actor and return its dataset items."""
+    # #D141: actor_id is interpolated into the API URL — validate its format
+    # (`name`, `user/name`, or `user~name`) so a `../` can't rewrite the path
+    # to another Apify endpoint with the user's credential.
+    if not _ACTOR_ID_RE.match(actor_id or ""):
+        return {"error": f"Invalid actor_id format: {actor_id!r}"}
     token = _get_token()
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
 
@@ -84,9 +104,12 @@ async def _run_actor(
     except json.JSONDecodeError as e:
         return {"error": f"Invalid JSON in input_data: {e}"}
 
-    # Start the Actor run via shared client (#D012)
-    client = _get_apify_client(timeout=30.0)
+    # Start the Actor run via shared client (#D012). #D816: o client e
+    # singleton — o timeout do construtor e o do 1o caller, entao cada
+    # request passa o seu explicitamente.
+    client = await _get_apify_client()
     try:
+        # Start actor run
         resp = await client.post(
             f"{APIFY_BASE}/acts/{actor_id}/runs",
             headers=headers,
@@ -96,6 +119,7 @@ async def _run_actor(
                 "timeout": timeout_secs,
                 "build": build,
             },
+            timeout=30.0,
         )
         resp.raise_for_status()
     except httpx.HTTPStatusError as e:
@@ -120,18 +144,24 @@ async def _run_actor(
 
     logger.info(f"Apify Actor run started: {run_id}")
 
-    # Poll until finished
-    elapsed = 0
+    # Poll until finished. #D816: deadline de wall-clock real — antes
+    # `elapsed` acumulava so o sleep, ignorando o round-trip de cada GET.
+    start = time.monotonic()
+    deadline = start + _MAX_WAIT
     consecutive_errors = 0
     last_error: str | None = None
-    while elapsed < _MAX_WAIT:
-        await asyncio.sleep(_POLL_INTERVAL)
-        elapsed += _POLL_INTERVAL
+    while time.monotonic() < deadline:
+        # #038: jitter desincroniza sub-agents paralelos que antes pollavam o
+        # mesmo run em lockstep (sleep fixo de 5s).
+        sleep_for = _POLL_INTERVAL + random.uniform(0, _POLL_INTERVAL * 0.5)
+        await asyncio.sleep(sleep_for)
+        elapsed = time.monotonic() - start
 
         try:
             status_resp = await client.get(
                 f"{APIFY_BASE}/actor-runs/{run_id}",
                 headers=headers,
+                timeout=30.0,
             )
             status_resp.raise_for_status()
         except httpx.HTTPError as e:
@@ -141,7 +171,7 @@ async def _run_actor(
             consecutive_errors += 1
             last_error = f"{type(e).__name__}: {e}"
             logger.warning(
-                f"Apify poll error ({elapsed}s elapsed, "
+                f"Apify poll error ({elapsed:.0f}s elapsed, "
                 f"{consecutive_errors} consecutive): {last_error}"
             )
             if consecutive_errors >= 5:
@@ -157,7 +187,7 @@ async def _run_actor(
 
         try:
             status_payload = status_resp.json()
-            status = status_payload.get("data", {}).get("status")
+            status = (status_payload.get("data") or {}).get("status")
         except ValueError:
             status = None
         if status is None:
@@ -184,6 +214,7 @@ async def _run_actor(
             f"{APIFY_BASE}/datasets/{dataset_id}/items",
             headers=headers,
             params={"limit": max_items, "format": "json"},
+            timeout=30.0,
         )
         items_resp.raise_for_status()
         items = items_resp.json()
@@ -215,12 +246,13 @@ async def _list_actors(
     if search:
         params["search"] = search
 
-    client = _get_apify_client(timeout=15.0)
+    client = await _get_apify_client()
     try:
         resp = await client.get(
             f"{APIFY_BASE}/store",
             headers=headers,
             params=params,
+            timeout=15.0,
         )
         resp.raise_for_status()
     except httpx.HTTPError as e:
@@ -235,12 +267,12 @@ async def _list_actors(
         data = {}
     actors = [
         {
-            "id": a.get("username", "") + "/" + a.get("name", ""),
-            "title": a.get("title", ""),
-            "description": a.get("description", "")[:200],
-            "runs": a.get("stats", {}).get("totalRuns", 0),
+            "id": (a.get("username") or "") + "/" + (a.get("name") or ""),
+            "title": a.get("title") or "",
+            "description": (a.get("description") or "")[:200],
+            "runs": (a.get("stats") or {}).get("totalRuns", 0),
         }
-        for a in data.get("items", [])
+        for a in (data.get("items") or [])
     ]
 
     return {"total": len(actors), "actors": actors}

@@ -16,6 +16,8 @@ import logging
 import os
 import time
 
+from ._loop_lock import LoopAwareLock
+
 logger = logging.getLogger(__name__)
 
 
@@ -29,11 +31,27 @@ class TokenBucket:
         self.burst = burst
         self.tokens = float(burst)
         self.last_refill = time.monotonic()
-        self._lock = asyncio.Lock()
+        # #D045: loop-aware lock. Buckets are cached module-level and the lock
+        # is contended on EVERY delegate_parallel call; a plain asyncio.Lock()
+        # binds to the first contending loop and crashes on the next REPL turn
+        # (new loop). Rebind lazily per loop.
+        self._lock = LoopAwareLock()
 
     async def acquire(self) -> None:
-        """Acquire one token, waiting if necessary."""
-        async with self._lock:
+        """Acquire one token, waiting if necessary.
+
+        AUDIT_V1.10 #020: a coroutine deve RESERVAR seu token atomicamente sob
+        o lock antes de dormir, senao duas coroutines consomem o mesmo token
+        parcial. AUDIT_V2.1 #003: mas o sleep nao pode ficar DENTRO do lock —
+        isso serializa todos os acquirers concorrentes do mesmo provider (cada
+        delegate_parallel espera o sleep do anterior). A solucao: reservar o
+        slot sob o lock (avancar `last_refill` para o instante em que o token
+        fica disponivel) e dormir FORA do lock. A reserva ja torna o consume
+        atomico; o sleep apenas aguarda o relogio.
+        """
+        if self.rate <= 0:
+            return
+        async with self._lock():
             now = time.monotonic()
             elapsed = now - self.last_refill
             self.tokens = min(float(self.burst), self.tokens + elapsed * self.rate)
@@ -46,7 +64,19 @@ class TokenBucket:
             # Calculate wait time for 1 token
             wait = (1.0 - self.tokens) / self.rate
             self.tokens = 0.0
+            # AUDIT_V2.1 #003: advance last_refill to the instant this waiter's
+            # token actually becomes available (now + wait), NOT `now` (set
+            # above). Leaving it at `now` made the NEXT acquire() credit the
+            # slept interval AGAIN — its `elapsed` would span `wait` and refill
+            # a token for time this waiter already consumed → ~2x under-throttle.
+            # This reservation is also what makes it safe to sleep outside the
+            # lock: the next acquirer computes its wait relative to THIS pushed
+            # last_refill, staggering behind us instead of double-consuming.
+            self.last_refill = now + wait
 
+        # Sleep OUTSIDE the lock — the token is already reserved above, so
+        # concurrent acquirers can enter, reserve their own future slot, and
+        # sleep in parallel rather than serializing behind this waiter.
         logger.debug(f"Rate limiter: waiting {wait:.2f}s for token")
         await asyncio.sleep(wait)
 
@@ -80,6 +110,8 @@ def _parse_limit(provider: str) -> tuple[float, int]:
         try:
             parts = raw.split(",")
             rpm = float(parts[0].strip())
+            if rpm <= 0:
+                raise ValueError(f"rpm deve ser > 0, recebido {rpm}")
             burst = int(parts[1].strip()) if len(parts) > 1 else max(1, int(rpm / 6))
             return (rpm / 60.0, burst)
         except (ValueError, IndexError):

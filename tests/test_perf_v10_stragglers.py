@@ -11,9 +11,9 @@ Cobre:
 - #027/#072 — glob_files iterator + skip noise dirs + sort subset
 """
 
-import inspect
-import json
+import sys
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -27,17 +27,30 @@ class TestGitRegexModuleLevel:
 
         assert hasattr(git_tools, "_DANGEROUS_GIT_FMT")
 
-    def test_sanitize_does_not_recompile(self):
-        import inspect
+    def test_sanitize_uses_module_level_compiled_regex(self):
+        # #D006: o padrao perigoso e compilado uma vez no escopo do modulo
+        # (objeto re.Pattern reutilizado) em vez de re-compilado por chamada.
+        import re
+
+        from alpha.tools import git_tools
+
+        assert isinstance(git_tools._DANGEROUS_GIT_FMT, re.Pattern)
+
+        # _sanitize_git_args deve usar exatamente esse objeto compartilhado:
+        # espionamos .search e confirmamos que a validacao o consulta.
+        calls = {"n": 0}
+        orig_search = git_tools._DANGEROUS_GIT_FMT.search
+
+        class Spy:
+            def search(self, s):
+                calls["n"] += 1
+                return orig_search(s)
 
         from alpha.tools.git_tools import _sanitize_git_args
 
-        src = inspect.getsource(_sanitize_git_args)
-        # Antes tinha `import re as _re` + `_re.compile(...)` dentro da
-        # funcao. Apos #D006 nao deve ter recompilacao inline.
-        assert "_re.compile" not in src
-        assert "import re as _re" not in src
-        assert "_DANGEROUS_GIT_FMT" in src
+        with patch.object(git_tools, "_DANGEROUS_GIT_FMT", Spy()):
+            _sanitize_git_args("log", "--format=%(if)evil%(end)")
+        assert calls["n"] >= 1, "sanitize nao consultou o regex module-level"
 
     def test_dangerous_format_still_blocked(self):
         from alpha.tools.git_tools import _sanitize_git_args
@@ -74,28 +87,54 @@ class TestSaveSessionCompact:
         # Sem indent=2 a saida nao tem newlines em meio a estrutura
         assert "\n  " not in text  # 2-space indent ausente
 
-    def test_cleanup_is_probabilistic(self):
-        import inspect
-
+    def test_cleanup_runs_only_on_lucky_draw(self, tmp_path, monkeypatch):
+        # #D025: _cleanup_old_sessions roda em ~10% das chamadas
+        # (secrets.randbelow(10) == 0), nao em toda save.
         from alpha import history
 
-        src = inspect.getsource(history.save_session)
-        # randbelow(10) == 0 → ~10% das chamadas roda cleanup
-        assert "randbelow" in src or "random" in src
+        monkeypatch.setattr(history, "_HISTORY_DIR", tmp_path)
+        cleanup_calls = {"n": 0}
+        monkeypatch.setattr(history, "_cleanup_old_sessions",
+                            lambda: cleanup_calls.__setitem__("n", cleanup_calls["n"] + 1))
+
+        msgs = [{"role": "user", "content": "hi"}]
+
+        # Draw "azarado" (!=0) -> nao roda cleanup.
+        monkeypatch.setattr(history.secrets, "randbelow", lambda n: 7)
+        history.save_session("s_no_cleanup", msgs)
+        assert cleanup_calls["n"] == 0
+
+        # Draw "sortudo" (==0) -> roda cleanup.
+        monkeypatch.setattr(history.secrets, "randbelow", lambda n: 0)
+        history.save_session("s_cleanup", msgs)
+        assert cleanup_calls["n"] == 1
 
 
 # ─── #D007 — list_sessions partial read ────────────────────────────
 
 
 class TestListSessionsPartialRead:
-    def test_uses_partial_read(self):
-        import inspect
+    def test_small_session_skips_full_read(self, tmp_path, monkeypatch):
+        # #D007: para sessoes pequenas (< 8KB) o metadata sai do chunk
+        # parcial — read_text (full read) NAO deve ser acionado.
+        from alpha import history
 
-        from alpha.history import list_sessions
+        monkeypatch.setattr(history, "_HISTORY_DIR", tmp_path)
+        history.save_session("small", [{"role": "user", "content": "oi"}])
 
-        src = inspect.getsource(list_sessions)
-        # Lemos apenas chunk inicial e fallback completo se parse falha
-        assert "_PARTIAL_BYTES" in src or "8192" in src
+        full_reads = {"n": 0}
+        orig_read_text = Path.read_text
+
+        def spy_read_text(self, *a, **k):
+            full_reads["n"] += 1
+            return orig_read_text(self, *a, **k)
+
+        monkeypatch.setattr(Path, "read_text", spy_read_text)
+
+        sessions = history.list_sessions(limit=10)
+        assert any(s["session_id"] == "small" for s in sessions)
+        # Partial read bastou — sem fallback de read completo.
+        assert full_reads["n"] == 0
 
     def test_works_with_large_session(self, tmp_path, monkeypatch):
         from alpha import history
@@ -115,44 +154,95 @@ class TestListSessionsPartialRead:
 
 
 class TestCompositeRglobUnified:
-    def test_single_rglob_in_test_detection(self):
-        import inspect
+    @pytest.mark.asyncio
+    async def test_detects_both_naming_conventions_single_pass(self, tmp_path, monkeypatch):
+        # #D010: deteccao de testes usa um unico rglob("*.py") + filtro por
+        # nome, cobrindo TANTO test_*.py QUANTO *_test.py. Antes eram dois
+        # rglob separados. Provamos cobertura das duas convencoes.
+        from alpha.tools import _composite_tests as ct
 
-        from alpha.tools import composite_tools
+        async def fake_run_tool(name, **kw):
+            return {"ok": True, "stdout": "", "command": kw.get("command")}
 
-        src = inspect.getsource(composite_tools)
-        # Antes: rglob("test_*.py") + rglob("*_test.py") = duas iteracoes
-        # Agora: rglob("*.py") + filter por nome = uma so
-        idx = src.find("rglob(\"test_*.py\")")
-        assert idx == -1
+        monkeypatch.setattr(ct, "_run_tool", fake_run_tool)
+        monkeypatch.setattr(ct, "_resolve_target", lambda p, **k: (tmp_path, None))
+
+        # Apenas a 2a convencao (*_test.py), sem markers de framework.
+        (tmp_path / "alpha_test.py").write_text("def test_x(): pass\n")
+        res = await ct._run_tests(str(tmp_path))
+        assert res.get("framework") == "pytest", "deteccao perdeu *_test.py"
+
+        # Limpa e testa a 1a convencao (test_*.py).
+        (tmp_path / "alpha_test.py").unlink()
+        (tmp_path / "test_alpha.py").write_text("def test_x(): pass\n")
+        res = await ct._run_tests(str(tmp_path))
+        assert res.get("framework") == "pytest", "deteccao perdeu test_*.py"
+
+    @pytest.mark.asyncio
+    async def test_skips_noise_dirs_in_detection(self, tmp_path, monkeypatch):
+        # Test files dentro de node_modules/.git nao contam como deteccao.
+        from alpha.tools import _composite_tests as ct
+
+        monkeypatch.setattr(ct, "_resolve_target", lambda p, **k: (tmp_path, None))
+        (tmp_path / "node_modules").mkdir()
+        (tmp_path / "node_modules" / "test_vendor.py").write_text("")
+
+        res = await ct._run_tests(str(tmp_path))
+        # Sem testes reais -> nao detecta pytest, retorna erro de framework.
+        assert res.get("ok") is False or "error" in res
 
 
 # ─── #D012 — apify shared client ───────────────────────────────────
 
 
 class TestApifySharedClient:
-    def test_get_apify_client_returns_same(self):
-        import asyncio
+    async def test_get_apify_client_returns_same(self):
 
         from alpha.tools import apify_tools
 
         # Module-level client + lazy init
         assert hasattr(apify_tools, "_get_apify_client")
         # Sem loop ativo, get sem comparacao retorna o mesmo
-        c1 = apify_tools._get_apify_client()
-        c2 = apify_tools._get_apify_client()
+        c1 = await apify_tools._get_apify_client()
+        c2 = await apify_tools._get_apify_client()
         assert c1 is c2
 
-    def test_no_async_with_in_run_actor(self):
-        import inspect
+    async def test_run_actor_uses_shared_client(self, monkeypatch):
+        # #D012: _run_actor obtem o client via _get_apify_client (compartilhado)
+        # em vez de criar um httpx.AsyncClient novo por chamada.
+        import httpx
 
         from alpha.tools import apify_tools
 
-        src = inspect.getsource(apify_tools._run_actor)
-        # Antes: `async with httpx.AsyncClient(...) as client:` dentro da
-        # funcao. Agora: client compartilhado via _get_apify_client.
-        assert "async with httpx.AsyncClient" not in src
-        assert "_get_apify_client" in src
+        monkeypatch.setenv("APIFY_API_TOKEN", "fake-token")
+
+        get_client_calls = {"n": 0}
+        # Client mockado: post retorna shape valido com run id; sem dataset
+        # nos faz a funcao terminar cedo apos detectar shape.
+        fake_client = MagicMock()
+
+        async def fake_post(url, **kw):
+            resp = MagicMock()
+            resp.raise_for_status = MagicMock()
+            # shape invalido -> funcao retorna logo apos validar, sem polling.
+            resp.json = MagicMock(return_value={"data": "not-a-dict"})
+            return resp
+
+        fake_client.post = fake_post
+
+        async def fake_get_client(timeout=30.0):
+            get_client_calls["n"] += 1
+            return fake_client
+
+        # Se o codigo criasse seu proprio client, este sentinel falharia.
+        def boom_client(*a, **k):
+            raise AssertionError("_run_actor criou httpx.AsyncClient proprio")
+
+        monkeypatch.setattr(apify_tools, "_get_apify_client", fake_get_client)
+        monkeypatch.setattr(httpx, "AsyncClient", boom_client)
+
+        await apify_tools._run_actor("my-actor")
+        assert get_client_calls["n"] == 1
 
 
 # ─── #D020 — HARD_BLOCKED combined regex ───────────────────────────
@@ -166,16 +256,27 @@ class TestHardBlockedCombinedRegex:
         # Continua valida — fork bomb e padrao inequivocamente perigoso
         assert shell_tools.HARD_BLOCKED_RE.search(":(){:|:&};:")
 
-    def test_validate_uses_single_search(self):
-        import inspect
+    def test_validate_consults_combined_regex_once(self, monkeypatch):
+        # #D020: _validate_command checa o comando com um unico
+        # HARD_BLOCKED_RE.search em vez de iterar sobre N patterns.
+        from alpha.tools import shell_tools
 
-        from alpha.tools.shell_tools import _validate_command
+        # _validate_command vive em alpha.security (re-exportado por
+        # shell_tools); o regex que ele consulta esta nesse namespace.
+        sec_module = sys.modules[shell_tools._validate_command.__module__]
 
-        src = inspect.getsource(_validate_command)
-        # Antes: `for pattern in HARD_BLOCKED: if pattern.search(...)`.
-        # Agora: `if HARD_BLOCKED_RE.search(command):`
-        assert "HARD_BLOCKED_RE.search" in src
-        assert "for pattern in HARD_BLOCKED" not in src
+        searches = {"n": 0}
+        real_re = sec_module.HARD_BLOCKED_RE
+
+        class SpyRe:
+            def search(self, s):
+                searches["n"] += 1
+                return real_re.search(s)
+
+        monkeypatch.setattr(sec_module, "HARD_BLOCKED_RE", SpyRe())
+        # Comando seguro: deve passar pelo unico search e nao bloquear.
+        assert shell_tools._validate_command("echo hi") is None
+        assert searches["n"] == 1, "esperava UM unico search combinado"
 
     def test_dangerous_commands_still_blocked(self):
         from alpha.tools.shell_tools import _validate_command
@@ -195,16 +296,6 @@ class TestHardBlockedCombinedRegex:
 
 
 class TestGlobFilesIterator:
-    def test_skip_noise_dirs(self):
-        import inspect
-
-        from alpha.tools import file_tools
-
-        src = inspect.getsource(file_tools._glob_files)
-        # Skip dirs comuns de monorepos
-        assert ".git" in src or "_SKIP_DIRS" in src
-        assert "node_modules" in src
-
     @pytest.mark.asyncio
     async def test_glob_skips_node_modules(self, tmp_path, monkeypatch):
         from alpha.tools import file_tools, path_helpers, workspace as ws_module

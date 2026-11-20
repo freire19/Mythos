@@ -8,7 +8,6 @@ para thread pool em vez de pendurar o event loop. Sem isso,
 from __future__ import annotations
 
 import asyncio
-import time
 
 import pytest
 
@@ -101,12 +100,56 @@ async def test_edit_file_non_blocking(workspace_file):
 
     sent_task = asyncio.create_task(sentinel())
     # Edit sequenciais sao OK aqui — o ponto e que o yield acontece
-    result = await _edit_file(str(target), "hello world", "HELLO WORLD")
+    result = await _edit_file(
+        str(target), "hello world", "HELLO WORLD", replace_all=True
+    )
     await sent_task
 
     assert "error" not in result, result
-    assert result["replaced"] == 1
+    assert result["replaced"] == 1_000
     assert sentinel_ticks == 20
+
+
+@pytest.mark.asyncio
+async def test_edit_file_ambiguous_old_text_errors(workspace_file):
+    """old_text repetido sem replace_all deve falhar sem tocar o arquivo."""
+    target = workspace_file / "ambiguous.txt"
+    content = "foo\nbar\nfoo\n"
+    target.write_text(content)
+
+    result = await _edit_file(str(target), "foo", "baz")
+
+    assert "error" in result
+    assert "replace_all" in result["error"]
+    assert result["occurrences_found"] == 2
+    assert target.read_text() == content  # arquivo intocado
+
+
+@pytest.mark.asyncio
+async def test_edit_file_replace_all(workspace_file):
+    target = workspace_file / "all.txt"
+    target.write_text("foo\nbar\nfoo\nfoo\n")
+
+    result = await _edit_file(str(target), "foo", "qux", replace_all=True)
+
+    assert "error" not in result, result
+    assert result["occurrences_found"] == 3
+    assert result["replaced"] == 3
+    assert target.read_text() == "qux\nbar\nqux\nqux\n"
+
+
+@pytest.mark.asyncio
+async def test_edit_file_single_occurrence_unchanged(workspace_file):
+    """Contrato antigo preservado quando old_text e unico."""
+    target = workspace_file / "single.txt"
+    target.write_text("alpha\nbeta\n")
+
+    result = await _edit_file(str(target), "beta", "gamma")
+
+    assert "error" not in result, result
+    assert result["occurrences_found"] == 1
+    assert result["replaced"] == 1
+    assert target.read_text() == "alpha\ngamma\n"
 
 
 @pytest.mark.asyncio
@@ -121,6 +164,38 @@ async def test_read_file_returns_correct_lines(workspace_file):
     assert "line1" in result["content"]
     assert "line2" in result["content"]
     assert "line3" in result["content"]
+
+
+@pytest.mark.asyncio
+async def test_read_file_note_truncated(workspace_file):
+    """Leitura parcial sinaliza quantas linhas restam e o proximo offset."""
+    target = workspace_file / "trunc.txt"
+    target.write_text("".join(f"l{i}\n" for i in range(10)))
+    result = await _read_file(str(target), offset=0, limit=4)
+    assert "truncado" in result.get("note", "")
+    assert "offset=4" in result["note"]
+
+
+@pytest.mark.asyncio
+async def test_read_file_note_offset_beyond_eof(workspace_file):
+    """Offset alem do fim avisa em prosa (overshoot)."""
+    target = workspace_file / "short.txt"
+    target.write_text("a\nb\n")  # 2 linhas
+    result = await _read_file(str(target), offset=50)
+    assert "alem do fim" in result.get("note", "")
+
+
+@pytest.mark.asyncio
+async def test_read_file_note_empty_file_positive_offset(workspace_file):
+    """Code-review finding 5: arquivo VAZIO lido com offset>0 ainda avisa."""
+    target = workspace_file / "empty.txt"
+    target.write_text("")
+    result = await _read_file(str(target), offset=5)
+    assert result["total_lines"] == 0
+    assert "alem do fim" in result.get("note", ""), result
+    # E ler um arquivo vazio do inicio NAO produz ruido de note.
+    result0 = await _read_file(str(target), offset=0)
+    assert "note" not in result0, result0
 
 
 @pytest.mark.asyncio

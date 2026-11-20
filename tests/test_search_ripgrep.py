@@ -12,7 +12,6 @@ Testes cobrem:
 
 from __future__ import annotations
 
-import inspect
 import re
 from pathlib import Path
 
@@ -55,24 +54,14 @@ class TestRipgrepDetection:
         for d in (".git", "node_modules", "__pycache__", ".venv"):
             assert d in file_tools._RG_EXCLUDES
 
-    def test_python_fallback_references_excludes_constant(self):
-        from alpha.tools import file_tools
-
-        # Garante que mudar a constante propaga para o fallback,
-        # nao virou string literal acidentalmente.
-        src = inspect.getsource(file_tools._search_with_python)
-        assert "_RG_EXCLUDES" in src
-
-    def test_search_files_dispatches_to_helper(self):
-        from alpha.tools import file_tools
-
-        src = inspect.getsource(file_tools._search_files)
-        # Deve chamar uma das duas helpers e nao ter mais o `_scan` antigo
-        assert (
-            "_search_with_ripgrep" in src
-            or "_search_with_python" in src
-        )
-        assert "def _scan()" not in src
+    # NOTE: a antiga `test_python_fallback_references_excludes_constant`
+    # (source-grep por "_RG_EXCLUDES") foi removida — redundante com
+    # `test_python_fallback_finds_matches`, que prova comportamentalmente que
+    # o fallback Python honra os excludes (.git/node_modules/__pycache__).
+    # A antiga `test_search_files_dispatches_to_helper` tambem foi removida —
+    # o dispatch de `_search_files` ja e exercitado por
+    # `test_search_files_signals_ripgrep_timeout` (patcha `_search_with_ripgrep`
+    # e confirma que e chamado) e por `test_python_fallback_finds_matches`.
 
 
 @pytest.mark.asyncio
@@ -150,3 +139,55 @@ class TestSearchFunctionalParity:
         assert "main.py" in files
         # ripgrep tambem deve respeitar exclusoes (--glob '!.git/**')
         assert "config" not in files
+
+
+# ── #D043: ripgrep timeout must be distinguishable from "no matches" ──
+
+@pytest.mark.asyncio
+async def test_search_files_signals_ripgrep_timeout(tmp_path, monkeypatch):
+    import alpha.tools.file_tools as ft
+
+    # Force the ripgrep branch, bypass the workspace gate (not under test),
+    # and make ripgrep time out.
+    monkeypatch.setattr(ft, "_RIPGREP_BIN", "/usr/bin/rg")
+    monkeypatch.setattr(ft, "_validate_path", lambda path: tmp_path)
+
+    async def _timeout(pattern, root, max_results):
+        raise ft._RipgrepTimeout()
+
+    monkeypatch.setattr(ft, "_search_with_ripgrep", _timeout)
+
+    out = await ft._search_files("needle", str(tmp_path), 50)
+    # Surfaced as an error/timeout, NOT a misleading 0-match success.
+    assert out.get("timeout") is True
+    assert "error" in out
+    assert "matches" not in out
+
+
+@pytest.mark.asyncio
+async def test_search_with_ripgrep_raises_on_timeout(tmp_path, monkeypatch):
+    import asyncio
+    import alpha.tools.file_tools as ft
+
+    class _FakeProc:
+        returncode = None
+        async def communicate(self):
+            await asyncio.sleep(10)  # never completes within the patched wait_for
+        def kill(self):
+            pass
+        async def wait(self):
+            return 0
+
+    async def _fake_exec(*a, **k):
+        return _FakeProc()
+
+    async def _fake_wait_for(coro, timeout):
+        # close the coroutine to avoid "never awaited" warnings, then time out
+        coro.close()
+        raise asyncio.TimeoutError()
+
+    monkeypatch.setattr(ft.asyncio, "create_subprocess_exec", _fake_exec)
+    monkeypatch.setattr(ft.asyncio, "wait_for", _fake_wait_for)
+
+    with pytest.raises(ft._RipgrepTimeout):
+        await ft._search_with_ripgrep("needle", tmp_path, 50)

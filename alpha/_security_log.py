@@ -36,6 +36,17 @@ _API_KEY_PREFIX_RE = re.compile(
     r"\b(sk(?:-ant)?|dsk|xai|gh[po]_|github_pat|glpat|hf|pk-[a-z]+|[a-z]+-api)-([A-Za-z0-9_-]{16,})",
     re.IGNORECASE,
 )
+# #012: vendor-specific key shapes the generic prefix regex misses. Each is a
+# self-identifying prefix — redact the whole token. Case-sensitive (these
+# prefixes are exact).
+_VENDOR_KEY_RE = re.compile(
+    r"\bAIza[0-9A-Za-z_\-]{20,}"               # Google / Gemini
+    r"|\bxai-[A-Za-z0-9]{16,}"                  # xAI
+    r"|\bhf_[A-Za-z0-9]{16,}"                   # HuggingFace
+    r"|\bgh[posur]_[A-Za-z0-9]{20,}"            # GitHub (ghp_/gho_/ghu_/ghs_/ghr_)
+    r"|\bAKIA[0-9A-Z]{16}\b"                    # AWS access key id
+    r"|\b[ps]k_(?:live|test)_[A-Za-z0-9]{16,}"  # Stripe
+)
 
 
 def sanitize_for_log(text: str, *, max_chars: int | None = None) -> str:
@@ -55,6 +66,7 @@ def sanitize_for_log(text: str, *, max_chars: int | None = None) -> str:
         lambda m: f"{m.group('scheme')}{m.group('user')}:[redacted]@", out
     )
     out = _API_KEY_PREFIX_RE.sub(r"\1-[redacted]", out)
+    out = _VENDOR_KEY_RE.sub("[redacted]", out)
     if max_chars is not None and len(out) > max_chars:
         out = out[:max_chars]
     return out

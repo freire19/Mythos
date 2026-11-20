@@ -310,6 +310,7 @@ class TestScreenshot:
         assert result["tool_used"] == "scrot"
         assert result["size_bytes"] == 12345
         assert result["region"] == "full"
+        assert result["_image_path"] == result["path"]
 
     @pytest.mark.anyio
     async def test_active_window_with_window_id(self, monkeypatch):

@@ -7,7 +7,6 @@ Cobre:
 - #030 — multi-statement SQL detector handles SQL standard `''` escape
 """
 
-from unittest.mock import patch
 
 import pytest
 
@@ -78,20 +77,61 @@ class TestSafeEnvCache:
 
 
 class TestSubagentPathPrivacy:
-    def test_subagent_task_content_uses_relative_scratch(self):
-        # O fix nao deve incluir o workspace absoluto no task_content.
-        # Lemos o source do _run_subagent para verificar — runtime check
-        # precisaria de scaffolding pesado (provider mock + asyncio).
-        import inspect
+    def test_task_content_uses_relative_scratch_not_absolute_workspace(self):
+        """#022: o prompt do sub-agent recebe o SCRATCH_DIR RELATIVO, e o path
+        absoluto do workspace NAO deve vazar no conteudo da mensagem (ficava
+        acessivel via tool results e logs). Exercitamos o builder diretamente."""
+        from pathlib import Path
 
-        from alpha.tools.delegate_tools import _run_subagent
+        from alpha.tools.delegate_tools import _build_subagent_messages
 
-        src = inspect.getsource(_run_subagent)
-        # Antes: `[CWD: {workspace_root}]` na string. Apos #022 fix:
-        # workspace_root nao aparece no task_content (so usado para criar
-        # scratch_dir e passar como `workspace=` arg).
-        assert "[CWD:" not in src or "workspace_root}" not in src.split("[CWD:")[-1][:200]
-        assert "scratch_rel" in src or "relative" in src.lower()
+        abs_workspace = "/home/secret-user/private-workspace"
+        scratch_rel = Path(".alpha/runs/agent-xyz")
+
+        messages = _build_subagent_messages(
+            task="faca a tarefa",
+            context="algum contexto",
+            agent_id="agent-xyz",
+            scratch_rel=scratch_rel,
+        )
+        user_msg = next(m for m in messages if m["role"] == "user")["content"]
+
+        # O scratch relativo aparece; o workspace absoluto NAO.
+        assert str(scratch_rel) in user_msg
+        assert abs_workspace not in user_msg
+        # Sanity: nao ha preâmbulo `[CWD: <absoluto>]` legado.
+        assert "[CWD:" not in user_msg
+
+    def test_run_subagent_passes_relative_scratch_to_builder(self, monkeypatch):
+        """Integra: `_run_subagent` deriva o scratch RELATIVO ao workspace e o
+        repassa ao builder — capturamos o argumento `scratch_rel`."""
+        import asyncio
+        from pathlib import Path
+
+        from alpha.tools import delegate_tools
+
+        captured = {}
+
+        def fake_builder(task, context, agent_id, scratch_rel, system_extra=""):
+            captured["scratch_rel"] = scratch_rel
+            # Interrompe cedo para evitar rodar o agent de verdade.
+            raise RuntimeError("stop-after-build")
+
+        monkeypatch.setattr(delegate_tools, "_build_subagent_messages", fake_builder)
+
+        async def go():
+            return await delegate_tools._run_subagent(
+                task="t", parent_workspace="/tmp/parent-ws"
+            )
+
+        # O builder e chamado ANTES do try interno, entao o sentinel propaga.
+        with pytest.raises(RuntimeError, match="stop-after-build"):
+            asyncio.run(go())
+
+        rel = captured["scratch_rel"]
+        # scratch_rel e RELATIVO (nao comeca com /), e fica sob .alpha/runs.
+        assert not Path(rel).is_absolute()
+        assert ".alpha" in str(rel) and "runs" in str(rel)
 
 
 # ─── #030 — SQL standard escape ────────────────────────────────────

@@ -22,13 +22,11 @@ _DEFAULT_STEP_TIME_S = {
     "execute_shell": 2.0,       # depends entirely on the command
     "execute_python": 5.0,      # cold-import overhead
     "execute_pipeline": 3.0,
-    "grep_files": 0.4,
-    "list_files": 0.2,
+    "list_directory": 0.2,
     "search_files": 0.5,
-    "git_status": 0.3,
-    "git_diff": 0.4,
-    "git_log": 0.3,
-    "git_commit": 1.0,
+    # Single tool covers status/diff/log/commit — median across a fast
+    # `status` (~0.3s) and a `commit` (~1.0s).
+    "git_operation": 0.5,
     "delegate_task": 30.0,      # sub-agent loops are the long ones
     "delegate_parallel": 45.0,  # multiple sub-agents, gated by slowest
     "delegate_consensus": 40.0,

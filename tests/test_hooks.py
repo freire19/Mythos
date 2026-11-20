@@ -19,7 +19,12 @@ def _reset_hook_cache():
 
 @pytest.fixture
 def settings_in_cwd(tmp_path: Path, monkeypatch):
-    """Point the hook loader at a settings file inside `tmp_path`."""
+    """Point the hook loader at a settings file inside `tmp_path`.
+
+    These tests exercise hook EXECUTION, so they opt in to trusting the
+    project-scoped config (#D301 makes project hooks fail-closed by default;
+    see test_project_config_trust.py for the gate itself)."""
+    monkeypatch.setenv("ALPHA_TRUST_PROJECT_CONFIG", "1")
     monkeypatch.chdir(tmp_path)
     alpha_dir = tmp_path / ".alpha"
     alpha_dir.mkdir()

@@ -12,7 +12,7 @@ tokenizer when `ALPHA_ACCURATE_COST_ESTIMATE=1`.
 from __future__ import annotations
 
 from ..context import estimate_tokens
-from ..cost import _price_for
+from ..cost import last_call_input_cost_usd, price_for
 
 
 # Per-tool expected token output. Conservative — better to over-estimate
@@ -27,13 +27,11 @@ _EXPECTED_OUTPUT_TOKENS = {
     "execute_shell": 400,
     "execute_python": 400,
     "execute_pipeline": 400,
-    "grep_files": 300,
-    "list_files": 250,
+    "list_directory": 250,
     "search_files": 300,
-    "git_status": 200,
-    "git_diff": 500,
-    "git_log": 400,
-    "git_commit": 100,
+    # Single tool covers status/diff/log/commit — use a mid value between
+    # a cheap `status` (~200) and a verbose `diff` (~500).
+    "git_operation": 400,
     "delegate_task": 1500,    # sub-agent loops are pricier
     "delegate_parallel": 3000,
     "delegate_consensus": 2500,
@@ -54,7 +52,7 @@ def estimate_step_cost(
     args + an expected result preview, output as the per-tool-family
     constant above.
     """
-    p_in, p_out = _price_for(model)
+    p_in, p_out = price_for(model)
     if p_in == 0.0 and p_out == 0.0:
         return 0.0  # unknown model — surface as `~$?` on the card
 
@@ -69,8 +67,16 @@ def estimate_step_cost(
 
 
 def estimate_total_cost(steps: list[dict], model: str) -> float:
-    """Sum of per-step estimates for a planned batch."""
-    return sum(
+    """Batch estimate consumed by the per-turn cost cap gate in `run_agent`.
+
+    The per-step sum alone misses the dominant term: each planned step
+    triggers a follow-up LLM turn that re-sends the whole accumulated
+    conversation. Approximate that context with the input cost of the last
+    recorded LLM call (0.0 before the first call of a session, where the
+    per-step sum is the whole story anyway). The `pre_flight` card sums
+    `estimate_step_cost` directly and stays purely decorative.
+    """
+    per_step = sum(
         estimate_step_cost(
             tool=str(step.get("tool", "")),
             args_preview=str(step.get("args_preview", "")),
@@ -78,3 +84,4 @@ def estimate_total_cost(steps: list[dict], model: str) -> float:
         )
         for step in steps
     )
+    return per_step + last_call_input_cost_usd() * len(steps)

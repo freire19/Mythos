@@ -623,3 +623,31 @@ class TestDeepSecurityV33McpNotificationsCap:
         assert len(client._notifications) == _NOTIFICATIONS_CAP
         # As primeiras 50 sairam por FIFO
         assert client._notifications[0]["id"] == 50
+
+
+class TestSecurityTier0FrameIntrospectionBypass:
+    """SECURITY_TIER0: frame/traceback introspection reaches f_builtins and
+    f_globals without touching any previously-blocked token. The confirmed
+    chain was `raise` → exc.__traceback__.tb_frame.f_builtins['eval']. Block
+    the whole frame-access cluster."""
+
+    @pytest.mark.parametrize("code", [
+        # The confirmed exploit chain.
+        "try:\n    raise ValueError()\nexcept ValueError as e:\n"
+        "    e.__traceback__.tb_frame.f_builtins",
+        # Individual frame-access tokens.
+        "e.__traceback__",
+        "tb.tb_frame",
+        "tb.tb_next",
+        "frame.f_builtins",
+        "frame.f_globals",
+        "frame.f_locals",
+        "frame.f_back",
+        # Generator / coroutine / async-gen frames reach the same place.
+        "g.gi_frame",
+        "c.cr_frame",
+        "a.ag_frame",
+    ])
+    def test_frame_access_blocked(self, code):
+        result = _validate_code_safety(code)
+        assert result is not None, f"Expected block: {code!r}"

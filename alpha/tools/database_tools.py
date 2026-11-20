@@ -13,6 +13,7 @@ import logging
 import re
 import sqlite3
 import ssl as _ssl
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from urllib.parse import quote, urlparse
 
@@ -23,17 +24,38 @@ from ..net_utils import (
 )
 from . import ToolCategory, ToolDefinition, ToolSafety, register_tool
 from ..config import TOOL_TIMEOUTS
-from .workspace import AGENT_WORKSPACE, assert_within_workspace
+from .workspace import AGENT_WORKSPACE, assert_within_workspace  # noqa: F401 — AGENT_WORKSPACE re-exported (monkeypatched by tests)
 
 logger = logging.getLogger(__name__)
 
 _MAX_ROWS = 500
-_MAX_RESULT_CHARS = 15000
+
+# #D804: executor dedicado e bounded para SQLite. `run_in_executor(None, ...)`
+# usava o default pool compartilhado (DNS/search/OCR); queries travadas
+# vazavam workers ate starvation global. Aqui o pior caso fica confinado a
+# estes workers, e o watchdog via `conn.interrupt()` libera a thread de fato.
+_sqlite_executor: ThreadPoolExecutor | None = None
+
+
+def _get_sqlite_executor() -> ThreadPoolExecutor:
+    global _sqlite_executor
+    if _sqlite_executor is None:
+        _sqlite_executor = ThreadPoolExecutor(
+            max_workers=4, thread_name_prefix="alpha-sqlite"
+        )
+    return _sqlite_executor
 
 # Pool por connection string para PostgreSQL (#D021-PERF). asyncpg.connect()
 # faz handshake TCP+TLS+auth (~150-500ms remoto); cada describe_table/query
 # abria conexao nova. Pool reusa, drop em sessao termina.
 _pg_pools: dict = {}
+# #001: o loop ao qual os pools cacheados pertencem. asyncpg amarra cada pool
+# (e suas conexoes) ao loop em que foi criado; o CLI roda asyncio.run() por
+# turn (loop novo a cada call), entao reusar um pool cacheado num turn ≥2
+# levanta `RuntimeError: ... got Future attached to a different loop`. O fix
+# anterior so deixou o LOCK loop-aware; os POOLS continuavam stale. Agora
+# rastreamos o loop e descartamos o cache inteiro quando ele troca.
+_pg_pools_loop: object | None = None
 # Lock criado lazy, atrelado ao loop ativo. Antes era criado no module-load:
 # o CLI roda asyncio.run() por turn (loop novo a cada call), enquanto o
 # modulo permanece em cache de imports — na 2a turn a Lock pertencia a um
@@ -89,10 +111,22 @@ async def _get_pg_pool(connection: str):
     `host=hostname` (cert SAN/SNI matcham) + `hostaddr=ip` (asyncpg conecta
     no IP, sem nova resolucao). Cobre tambem #D114 com `_build_pg_ssl_context`.
     """
+    global _pg_pools_loop
+    loop = asyncio.get_running_loop()
+    # Fast path: pool exists AND was built on the CURRENT loop.
     pool = _pg_pools.get(connection)
-    if pool is not None:
+    if pool is not None and _pg_pools_loop is loop:
         return pool
     async with _get_pg_pools_lock():
+        # #001: if the loop changed since these pools were built, they belong
+        # to a now-closed loop (asyncio.run() per turn). Their transports were
+        # already torn down when that loop closed, so we cannot await
+        # pool.close() on the dead loop — just drop the references and rebuild
+        # on the current loop. Without this, the cached pool below would be
+        # reused on the new loop and crash on first use.
+        if _pg_pools_loop is not loop:
+            _pg_pools.clear()
+            _pg_pools_loop = loop
         pool = _pg_pools.get(connection)
         if pool is None:
             import asyncpg
@@ -133,15 +167,44 @@ async def _get_pg_pool(connection: str):
     return pool
 
 
+async def _acquire_pg_pool(connection: str) -> tuple[object, float] | dict:
+    """Validate SSRF, check asyncpg import, and acquire a PG pool connection.
+
+    Returns (pool, fetch_timeout) on success, or an error dict on failure.
+    Extracted from _query_database and _describe_table (#DM059 / AUDIT_V1.10 #053).
+    """
+    ssrf_error = await _validate_pg_ssrf(connection)
+    if ssrf_error is not None:
+        return ssrf_error
+
+    try:
+        import asyncpg  # noqa: F401
+    except ImportError:
+        return {"error": "asyncpg não instalado. Execute: pip install asyncpg"}
+
+    fetch_timeout = TOOL_TIMEOUTS.get("database", 30)
+    try:
+        pool = await asyncio.wait_for(_get_pg_pool(connection), timeout=10)
+    except asyncio.TimeoutError:
+        return {"error": "Timeout ao conectar ao PostgreSQL", "timeout": True}
+    return pool, fetch_timeout
+
+
 async def _close_pg_pools() -> None:
     """Cleanup helper — chamar em shutdown da CLI."""
+    global _pg_pools_loop
     pools = list(_pg_pools.values())
     _pg_pools.clear()
+    _pg_pools_loop = None  # #001: cache emptied — next get() rebinds to its loop
     for pool in pools:
         try:
-            await pool.close()
+            await asyncio.wait_for(pool.close(), timeout=10)
+        except asyncio.TimeoutError:
+            logger.warning("asyncpg pool close timeout — possible connection leak")
         except Exception:
-            pass
+            # AUDIT_V1.8 #036: pool.close() failing silently esconde
+            # leaks. logger.exception preserva o stacktrace pra diagnostico.
+            logger.exception("asyncpg pool close failed")
 
 # SQL statements that modify data
 _WRITE_PATTERNS = re.compile(
@@ -276,6 +339,8 @@ async def _query_sqlite(db_path: str, query: str, read_only: bool) -> dict:
     if path_error:
         return {"error": path_error}
 
+    conn_box: dict = {}
+
     def _execute():
         # Use URI mode=ro for true read-only enforcement (cannot be bypassed)
         if read_only:
@@ -287,6 +352,7 @@ async def _query_sqlite(db_path: str, query: str, read_only: bool) -> dict:
             conn = sqlite3.connect(uri, uri=True)
         else:
             conn = sqlite3.connect(db_path)
+        conn_box["conn"] = conn
         conn.row_factory = sqlite3.Row
         try:
             cursor = conn.cursor()
@@ -321,14 +387,23 @@ async def _query_sqlite(db_path: str, query: str, read_only: bool) -> dict:
     # #D005: sem `wait_for`, uma query SQLite que trava (lock contention,
     # corrupted page) pendurava o agent indefinidamente. Cap de 30s alinha
     # com TOOL_TIMEOUTS["database"].
+    # #D804: o timeout bounda o RETORNO do tool; a thread so e liberada de
+    # fato pelo `conn.interrupt()` abaixo (aborta o cursor.execute em curso).
+    # Executor dedicado evita vazar workers do pool default compartilhado.
     db_timeout = TOOL_TIMEOUTS.get("database", 30)
     loop = asyncio.get_running_loop()
     try:
         return await asyncio.wait_for(
-            loop.run_in_executor(None, _execute),
+            loop.run_in_executor(_get_sqlite_executor(), _execute),
             timeout=db_timeout,
         )
     except TimeoutError:
+        conn = conn_box.get("conn")
+        if conn is not None:
+            try:
+                conn.interrupt()
+            except Exception:
+                pass
         return {
             "error": f"SQLite query excedeu timeout de {db_timeout}s",
             "timeout": True,
@@ -362,7 +437,12 @@ async def _validate_pg_ssrf(connection: str) -> dict | None:
                     ),
                     "blocked": True,
                 }
-    except Exception:
+    except Exception as e:
+        # #037: registrar o motivo real (parse de DSN malformado). DNS-errors
+        # NAO caem aqui — `is_private_ip` é fail-closed (resolução falha →
+        # retorna True → bloqueado como SSRF, acima), então este ramo cobre só
+        # connection strings malformadas. Sem o log, a causa ficava invisível.
+        logger.debug("PG SSRF: connection string parse failed: %s", e, exc_info=True)
         return {"error": "Connection string inválida para PostgreSQL"}
     return None
 
@@ -383,19 +463,12 @@ async def _query_database(
         return await _query_sqlite(connection, query, read_only)
 
     elif db_type == "postgresql":
-        ssrf_error = await _validate_pg_ssrf(connection)
-        if ssrf_error is not None:
-            return ssrf_error
+        result = await _acquire_pg_pool(connection)
+        if isinstance(result, dict):
+            return result
+        pool, fetch_timeout = result
 
         try:
-            import asyncpg  # noqa: F401  (validation only; pool import lazily)
-        except ImportError:
-            return {"error": "asyncpg não instalado. Execute: pip install asyncpg"}
-
-        # #048: cap dedicado para fetch (nao apenas pool acquire).
-        fetch_timeout = TOOL_TIMEOUTS.get("database", 30)
-        try:
-            pool = await asyncio.wait_for(_get_pg_pool(connection), timeout=10)
             async with pool.acquire(timeout=fetch_timeout) as conn:
                 if _is_write_query(query):
                     if read_only:
@@ -459,19 +532,13 @@ async def _describe_table(connection: str, table: str, db_type: str = "sqlite") 
             read_only=True,
         )
     elif db_type == "postgresql":
-        ssrf_error = await _validate_pg_ssrf(connection)
-        if ssrf_error is not None:
-            return ssrf_error
+        result = await _acquire_pg_pool(connection)
+        if isinstance(result, dict):
+            return result
+        pool, fetch_timeout = result
 
         # Usar parameterized query para PostgreSQL
         try:
-            import asyncpg  # noqa: F401
-        except ImportError:
-            return {"error": "asyncpg não instalado. Execute: pip install asyncpg"}
-
-        fetch_timeout = TOOL_TIMEOUTS.get("database", 30)
-        try:
-            pool = await asyncio.wait_for(_get_pg_pool(connection), timeout=10)
             async with pool.acquire(timeout=fetch_timeout) as conn:
                 rows = await asyncio.wait_for(
                     conn.fetch(
@@ -488,7 +555,13 @@ async def _describe_table(connection: str, table: str, db_type: str = "sqlite") 
                     "columns": columns,
                     "rows": rows_list,
                     "row_count": len(rows_list),
-                    "query": f"DESCRIBE {table}",
+                    # AUDIT_V2.2 #025: report the SQL actually executed, not a
+                    # fake `DESCRIBE` (which isn't even valid Postgres).
+                    "query": (
+                        "SELECT column_name, data_type, is_nullable, "
+                        "column_default FROM information_schema.columns "
+                        "WHERE table_name = $1 ORDER BY ordinal_position"
+                    ),
                 }
         except TimeoutError:
             return {"error": "Timeout ao conectar ao PostgreSQL"}
@@ -503,29 +576,29 @@ register_tool(
     ToolDefinition(
         name="query_database",
         description=(
-            "Executar query SQL em banco de dados local (SQLite ou PostgreSQL). "
-            "Modo read_only por padrão — queries de escrita precisam de read_only=false. "
-            "Limitado a 500 linhas por resultado. ATTACH e LOAD_EXTENSION bloqueados."
+            "Execute a SQL query on a local database (SQLite or PostgreSQL). "
+            "read_only mode by default — write queries need read_only=false. "
+            "Limited to 500 rows per result. ATTACH and LOAD_EXTENSION are blocked."
         ),
         parameters={
             "type": "object",
             "properties": {
                 "connection": {
                     "type": "string",
-                    "description": "Para SQLite: caminho do arquivo .db/.sqlite. Para PostgreSQL: connection string",
+                    "description": "For SQLite: path to the .db/.sqlite file. For PostgreSQL: connection string",
                 },
                 "query": {
                     "type": "string",
-                    "description": "Query SQL a executar",
+                    "description": "SQL query to execute",
                 },
                 "read_only": {
                     "type": "boolean",
-                    "description": "Modo somente leitura (bloqueia INSERT/UPDATE/DELETE). Padrão: true",
+                    "description": "Read-only mode (blocks INSERT/UPDATE/DELETE). Default: true",
                     "default": True,
                 },
                 "db_type": {
                     "type": "string",
-                    "description": "Tipo do banco de dados",
+                    "description": "Database type",
                     "enum": ["sqlite", "postgresql"],
                     "default": "sqlite",
                 },
@@ -541,17 +614,17 @@ register_tool(
 register_tool(
     ToolDefinition(
         name="list_tables",
-        description="Listar todas as tabelas e views de um banco de dados.",
+        description="List all tables and views in a database.",
         parameters={
             "type": "object",
             "properties": {
                 "connection": {
                     "type": "string",
-                    "description": "Para SQLite: caminho do arquivo .db. Para PostgreSQL: connection string",
+                    "description": "For SQLite: path to the .db file. For PostgreSQL: connection string",
                 },
                 "db_type": {
                     "type": "string",
-                    "description": "Tipo do banco de dados",
+                    "description": "Database type",
                     "enum": ["sqlite", "postgresql"],
                     "default": "sqlite",
                 },
@@ -567,21 +640,21 @@ register_tool(
 register_tool(
     ToolDefinition(
         name="describe_table",
-        description="Descrever o schema de uma tabela (colunas, tipos, constraints).",
+        description="Describe a table's schema (columns, types, constraints).",
         parameters={
             "type": "object",
             "properties": {
                 "connection": {
                     "type": "string",
-                    "description": "Para SQLite: caminho do arquivo .db. Para PostgreSQL: connection string",
+                    "description": "For SQLite: path to the .db file. For PostgreSQL: connection string",
                 },
                 "table": {
                     "type": "string",
-                    "description": "Nome da tabela",
+                    "description": "Table name",
                 },
                 "db_type": {
                     "type": "string",
-                    "description": "Tipo do banco de dados",
+                    "description": "Database type",
                     "enum": ["sqlite", "postgresql"],
                     "default": "sqlite",
                 },

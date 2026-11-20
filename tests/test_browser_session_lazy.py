@@ -11,9 +11,7 @@ caller exibe o mesmo RuntimeError amigavel que ja existia pro caso "not installe
 from __future__ import annotations
 
 import sys
-from unittest.mock import patch
 
-import pytest
 
 from alpha.tools import browser_session as bs
 

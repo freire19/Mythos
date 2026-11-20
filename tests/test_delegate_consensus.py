@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from unittest.mock import patch
 
 import pytest
 
@@ -200,3 +199,19 @@ async def test_all_failed(monkeypatch):
     assert out["ok"] is False
     assert out["category"] == "all_failed"
     assert out["failed"] == 3
+
+
+@pytest.mark.asyncio
+async def test_blank_majority_is_not_consensus(monkeypatch):
+    # #D114: agents that finish `completed` but with a blank result form an
+    # empty cluster. If that empty cluster wins the majority, consensus must
+    # NOT be reported as reached — a blank verdict is not agreement.
+    fake = _fake_subagent("", "   ", "yes there is a bug at line 42")
+    monkeypatch.setattr("alpha.tools.delegate_tools._run_subagent", fake)
+    out = await _delegate_consensus("q", n=3)
+    assert out["ok"] is True
+    # The two blank answers form the largest cluster (size 2 > n//2)...
+    assert out["consensus"]["majority"]["size"] == 2
+    assert out["consensus"]["majority"]["answer"].strip() == ""
+    # ...but a blank majority answer cannot count as consensus.
+    assert out["consensus"]["reached"] is False

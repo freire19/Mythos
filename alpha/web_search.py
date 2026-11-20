@@ -15,10 +15,7 @@ from urllib.parse import urlparse
 import httpx
 
 from ._http_singleton import LoopAwareClient
-from .net_utils import (
-    is_private_ip as _is_private_ip,
-    resolve_and_validate as _resolve_and_validate,
-)
+from .net_utils import resolve_and_validate as _resolve_and_validate
 
 logger = logging.getLogger(__name__)
 
@@ -66,10 +63,10 @@ async def search_duckduckgo(query: str, max_results: int = 5) -> list[dict]:
         )
         return results
     except TimeoutError:
-        logger.error(f"DuckDuckGo search timed out for '{query}' (30s)")
+        logger.exception(f"DuckDuckGo search timed out for '{query}' (30s)")
         return []
     except Exception as e:
-        logger.error(f"DuckDuckGo search failed for '{query}': {e}")
+        logger.exception(f"DuckDuckGo search failed for '{query}': {e}")
         return []
 
 
@@ -87,9 +84,11 @@ async def search_multiple_queries(
 
     seen_urls: set[str] = set()
     combined: list[dict] = []
+    failed = 0
 
     for result_set in all_results:
         if isinstance(result_set, Exception):
+            failed += 1
             logger.warning(f"Search query failed: {result_set}")
             continue
         for r in result_set:
@@ -97,6 +96,16 @@ async def search_multiple_queries(
             if url and url not in seen_urls:
                 seen_urls.add(url)
                 combined.append(r)
+
+    # AUDIT_V2.2 #013: an empty result list when EVERY query raised is a
+    # transient failure, not a genuine "no results" — make that distinguishable
+    # in the logs so it isn't silently read as "nothing on the web".
+    if failed and not combined:
+        logger.warning(
+            "search_multiple_queries: all %d queries failed (network/provider) "
+            "— returning empty; treat as transient, not 'no results'.",
+            failed,
+        )
 
     return combined
 
@@ -155,48 +164,54 @@ async def _fetch_raw(url: str, timeout: float, max_bytes: int) -> tuple[bytes, d
 
     try:
         client = await _get_shared_client()
-        pinned_url = _build_pinned_url(parsed, resolved_ip)
-        req_headers = {**_REQ_HEADERS, "Host": hostname}
-        ext = {"sni_hostname": hostname} if parsed.scheme == "https" else None
-        resp = await client.get(pinned_url, headers=req_headers, extensions=ext)
+        cur_url = _build_pinned_url(parsed, resolved_ip)
+        cur_headers = {**_REQ_HEADERS, "Host": hostname}
+        cur_ext = {"sni_hostname": hostname} if parsed.scheme == "https" else None
 
-        # Manual redirect following with SSRF re-validation
+        # #D314: stream em cada hop — respostas de redirect são fechadas SEM ler
+        # o corpo, e o corpo terminal é lido incrementalmente com abort no cap
+        # (o antigo `client.get()` + `resp.content` materializava tudo → OOM).
         redirect_count = 0
-        while resp.status_code in (301, 302, 303, 307, 308) and redirect_count < 5:
-            location = resp.headers.get("location")
-            if not location:
-                break
-            redirect_parsed = urlparse(location)
-            redirect_host = redirect_parsed.hostname or ""
-            if not redirect_host:
-                break
-            try:
-                redirect_ip = await _resolve_and_validate(redirect_host)
-            except ValueError as e:
-                logger.warning(f"SSRF blocked: redirect to {location}: {e}")
-                return b"", {}, 0
-            pinned_redirect = _build_pinned_url(redirect_parsed, redirect_ip)
-            redirect_headers = {**_REQ_HEADERS, "Host": redirect_host}
-            redirect_ext = (
-                {"sni_hostname": redirect_host}
-                if redirect_parsed.scheme == "https" else None
-            )
-            resp = await client.get(
-                pinned_redirect,
-                headers=redirect_headers,
-                extensions=redirect_ext,
-            )
-            redirect_count += 1
+        while True:
+            async with client.stream(
+                "GET", cur_url, headers=cur_headers, extensions=cur_ext
+            ) as resp:
+                is_redirect = (
+                    resp.status_code in (301, 302, 303, 307, 308)
+                    and redirect_count < 5
+                )
+                location = resp.headers.get("location") if is_redirect else None
+                if is_redirect and location:
+                    redirect_parsed = urlparse(location)
+                    redirect_host = redirect_parsed.hostname or ""
+                    if redirect_host:
+                        try:
+                            redirect_ip = await _resolve_and_validate(redirect_host)
+                        except ValueError as e:
+                            logger.warning(f"SSRF blocked: redirect to {location}: {e}")
+                            return b"", {}, 0
+                        cur_url = _build_pinned_url(redirect_parsed, redirect_ip)
+                        cur_headers = {**_REQ_HEADERS, "Host": redirect_host}
+                        cur_ext = (
+                            {"sni_hostname": redirect_host}
+                            if redirect_parsed.scheme == "https" else None
+                        )
+                        redirect_count += 1
+                        continue  # fecha a resposta de redirect sem ler o corpo
 
-        if resp.status_code >= 400:
-            return b"", {}, resp.status_code
+                if resp.status_code >= 400:
+                    return b"", {}, resp.status_code
 
-        raw = resp.content
-        if len(raw) > max_bytes:
-            raw = raw[:max_bytes]
-            logger.warning(f"Response too large for {url}, truncating at {max_bytes} bytes")
-
-        return raw, dict(resp.headers), resp.status_code
+                raw = bytearray()
+                async for chunk in resp.aiter_bytes():
+                    raw += chunk
+                    if len(raw) > max_bytes:
+                        raw = bytearray(raw[:max_bytes])
+                        logger.warning(
+                            f"Response too large for {url}, truncating at {max_bytes} bytes"
+                        )
+                        break
+                return bytes(raw), dict(resp.headers), resp.status_code
     except Exception as e:
         logger.debug(f"httpx fetch failed for {url}: {e}")
         return b"", {}, 0

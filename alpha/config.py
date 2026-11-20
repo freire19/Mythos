@@ -31,12 +31,17 @@ What's NOT here:
 
 from __future__ import annotations
 
+import logging
 import os
+import re
 from pathlib import Path
 
 from dotenv import load_dotenv
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
+# #DM072: nome público para os consumidores cross-module (settings, wizard,
+# agents/skills registries); o nome antigo segue válido por retrocompat.
+PROJECT_ROOT = _PROJECT_ROOT
 
 
 def _dotenv_search_paths() -> list[Path]:
@@ -52,13 +57,69 @@ def _dotenv_search_paths() -> list[Path]:
     ]
 
 
+# #D306: a `.env` planted in an untrusted CWD must not override the provider
+# base_url (→ the real api_key would be sent to the attacker's host) nor Alpha's
+# security flags. When loading a project-local `.env` that is NOT the trusted
+# project-root / ~/.alpha file, drop any key whose NAME is security-sensitive.
+# (`load_dotenv(override=False)` is NOT enough: the common case is the var being
+# absent — the user relies on the default — so the malicious value would still
+# be set.)
+_UNTRUSTED_ENV_BLOCK_RE = re.compile(r"(?:_BASE_URL$|_API_KEY$|^ALPHA_)", re.IGNORECASE)
+
+
+def _trusted_env_paths() -> set[Path]:
+    """.env locations trusted to set anything (the user's own): project-root
+    (`<repo>/.env`, present only on a dev/editable install) and `~/.alpha/.env`."""
+    out: set[Path] = set()
+    for p in (_PROJECT_ROOT / ".env", Path.home() / ".alpha" / ".env"):
+        try:
+            out.add(p.resolve())
+        except OSError:
+            pass
+    return out
+
+
+def _load_untrusted_env(path: Path) -> None:
+    """Load a project-local `.env` from an untrusted CWD, dropping keys whose
+    name is security-sensitive (#D306)."""
+    from dotenv import dotenv_values
+
+    blocked: list[str] = []
+    for key, val in dotenv_values(path).items():
+        if val is None:
+            continue
+        if _UNTRUSTED_ENV_BLOCK_RE.search(key):
+            blocked.append(key)
+            continue
+        os.environ[key] = val
+    if blocked:
+        logging.getLogger(__name__).warning(
+            "Ignorando %d var(s) sensível(is) de %s (config de projeto não-"
+            "confiável, #D306): %s. Mova para ~/.alpha/.env se forem legítimas.",
+            len(blocked), path, ", ".join(sorted(blocked)),
+        )
+
+
 def _load_env_files() -> list[Path]:
-    """Load every existing .env in the discovery chain. Returns paths loaded."""
+    """Load every existing .env in the discovery chain. Returns paths loaded.
+
+    Trusted files (`<project_root>/.env`, `~/.alpha/.env`) load fully. A
+    project-local CWD `.env` that is NOT one of those loads with
+    security-sensitive keys stripped (#D306)."""
     loaded: list[Path] = []
+    trusted = _trusted_env_paths()
     for path in _dotenv_search_paths():
-        if path.is_file():
+        if not path.is_file():
+            continue
+        try:
+            is_trusted = path.resolve() in trusted
+        except OSError:
+            is_trusted = False
+        if is_trusted:
             load_dotenv(path, override=True)
-            loaded.append(path)
+        else:
+            _load_untrusted_env(path)
+        loaded.append(path)
     return loaded
 
 
@@ -73,14 +134,96 @@ DEFAULT_PROVIDER = os.getenv("ALPHA_PROVIDER", "deepseek")
 # uniforme. Chaves duplicadas no module-level (`MAX_ITERATIONS` etc)
 # ficam como aliases com retro-compat. Sub-agent limit tambem entra
 # aqui em vez de viver isolado em FEATURES.
+def _env_int_clamped(name: str, default: int, *, min_value: int = 1) -> int:
+    """Parse an int env var with safe fallback + clamp.
+
+    Returns ``default`` on missing/empty/non-numeric/out-of-range input.
+    CODE_REVIEW_FASE1 #3: raw ``int(os.getenv(...))`` at module-load
+    crashed the CLI on a single typo (``ALPHA_MAX_ITERATIONS=abc``) or
+    silently degraded the agent loop on ``0``/``-5``. Clamp keeps the
+    process running with a logged warning.
+    """
+    raw = os.getenv(name)
+    if not raw:
+        return default
+    try:
+        v = int(raw)
+    except ValueError:
+        import logging
+        logging.getLogger(__name__).warning(
+            "%s=%r is not an integer — using default %d", name, raw, default,
+        )
+        return default
+    if v < min_value:
+        import logging
+        logging.getLogger(__name__).warning(
+            "%s=%d is below minimum %d — clamping to %d", name, v, min_value, min_value,
+        )
+        return min_value
+    return v
+
+
+def _env_float_clamped(name: str, default: float, *, min_value: float = 1.0) -> float:
+    """Parse a float env var with safe fallback + clamp. Rejects nan/inf
+    (CODE_REVIEW_FASE1 #3 — nan made the wall-clock guard silently
+    inert; inf crashed downstream ``int(MAX_TURN_SECONDS)`` calls)."""
+    raw = os.getenv(name)
+    if not raw:
+        return default
+    try:
+        v = float(raw)
+    except ValueError:
+        import logging
+        logging.getLogger(__name__).warning(
+            "%s=%r is not a number — using default %s", name, raw, default,
+        )
+        return default
+    import math
+    if not math.isfinite(v):
+        import logging
+        logging.getLogger(__name__).warning(
+            "%s=%r is not finite — using default %s", name, raw, default,
+        )
+        return default
+    if v < min_value:
+        import logging
+        logging.getLogger(__name__).warning(
+            "%s=%s is below minimum %s — clamping to %s", name, v, min_value, min_value,
+        )
+        return min_value
+    return v
+
+
 LIMITS = {
-    "max_iterations": 100,          # iteracoes do agent loop principal
+    # Iteration cap per turn. Restored 30 → 100 (the Mythos / pre-V1.8
+    # value). The V1.8 "tighter cap + [CONTINUE:] auto-continue" redesign
+    # assumed the model would emit a `[CONTINUE: ...]` marker to chain many
+    # short turns — but real providers (e.g. DeepSeek) rarely do, so a model
+    # that legitimately needs >30 tool calls got guillotined mid-task and
+    # never produced a summary. 100 iterations in ONE continuous turn lets
+    # long tasks (audits, multi-file refactors) run to natural completion,
+    # the way they did before. The cap is a safety net, not a chopping block:
+    # if it IS hit, the loop now forces a final summary (see run_agent) so the
+    # user always gets an answer instead of an empty turn or a silent restart.
+    "max_iterations": _env_int_clamped("ALPHA_MAX_ITERATIONS", 100),
+    # Wall-clock budget per turn (seconds). Raised to 1h so long but
+    # productive turns (audits with delegate_parallel, slow providers) finish
+    # in one go instead of being guillotined by the old 5-/20-min caps; when
+    # exceeded the loop forces one final no-tools summary (run_agent) so the
+    # user always gets a response. Honest scope: this is a HIGH CEILING, not a
+    # tight safety net — a stuck-but-not-looping model can run up to
+    # min(max_iterations × per-call time, this) before the cap fires, and a
+    # mid-call Ctrl+C resolves only after the in-flight LLM call's `llm_timeout`.
+    # Loop detection (not this cap) is what catches actual spinning. Lower
+    # ALPHA_MAX_TURN_SECONDS if you want a tighter bound on time-to-control.
+    "max_turn_seconds": _env_float_clamped("ALPHA_MAX_TURN_SECONDS", 3600.0),
     "tool_result_max_chars": 12_000,
     "llm_timeout": 300,             # seconds per LLM call
     "max_messages": 500,            # hard cap antes de needs_compression
 }
 
 MAX_ITERATIONS = LIMITS["max_iterations"]
+MAX_TURN_SECONDS = LIMITS["max_turn_seconds"]
 TOOL_RESULT_MAX_CHARS = LIMITS["tool_result_max_chars"]
 LLM_TIMEOUT = LIMITS["llm_timeout"]
 
@@ -108,6 +251,7 @@ RETRY = {
     "http": {
         "max_retries": 2,
         "initial_backoff": 0.5,
+        "max_backoff": 8.0,  # #032: explicit cap on the exponential backoff
         "safe_methods": frozenset({"GET", "HEAD", "OPTIONS"}),
     },
 }
@@ -164,6 +308,18 @@ _PROVIDERS = {
         "supports_vision": True,
         "vision_format": "openai",
     },
+    "antigravity": {
+        "base_url": os.getenv(
+            "GEMINI_API_BASE_URL",
+            "https://generativelanguage.googleapis.com/v1beta/openai",
+        ),
+        "api_key_env": "GEMINI_API_KEY",
+        "model_env": "ANTIGRAVITY_MODEL",
+        "default_model": "antigravity-preview-05-2026",
+        "supports_vision": True,
+        "vision_format": "openai",
+        "supports_tools": False,
+    },
     "grok": {
         "base_url": os.getenv("GROK_API_BASE_URL", "https://api.x.ai/v1"),
         "api_key_env": "GROK_API_KEY",
@@ -200,13 +356,65 @@ _PROVIDERS = {
 }
 
 
+# ── Provider specs + per-function routing (parity wave 2026-11, item 8) ──
+#
+# A provider "spec" is either a plain provider name ("anthropic") or
+# "<provider>:<model>" ("anthropic:claude-haiku-4-5") — the latter runs the
+# same adapter with a model override. Specs let one function of the agent
+# (context compression, sub-agents) use a cheaper/faster model than the main
+# loop without touching the provider table.
+
+_ROUTING_ENV = {
+    "compress": "ALPHA_COMPRESS_PROVIDER",
+    "subagent": "ALPHA_SUBAGENT_PROVIDER",
+}
+
+
+def split_provider_spec(spec: str) -> tuple[str, str | None]:
+    """'anthropic:claude-haiku-4-5' → ('anthropic', 'claude-haiku-4-5');
+    'anthropic' → ('anthropic', None)."""
+    spec = (spec or "").strip()
+    if ":" not in spec:
+        return spec, None
+    base, model = spec.split(":", 1)
+    base, model = base.strip(), model.strip()
+    return base, (model or None)
+
+
+def base_provider(spec: str) -> str:
+    """Provider name without a model override — the key for everything that
+    is keyed by provider (rate limits, context limits, vision support)."""
+    return split_provider_spec(spec)[0]
+
+
+def route_provider(function: str, fallback: str) -> str:
+    """Provider spec to use for `function` ("compress" | "subagent").
+
+    Reads `ALPHA_<FUNCTION>_PROVIDER`; unset/empty → `fallback` (the active
+    provider). An unknown base provider is logged and ignored so a typo
+    can't take the main loop down mid-session."""
+    env = _ROUTING_ENV.get(function)
+    raw = os.environ.get(env, "").strip() if env else ""
+    if not raw:
+        return fallback
+    base = base_provider(raw)
+    if base not in _PROVIDERS:
+        import logging
+        logging.getLogger(__name__).warning(
+            "%s=%r: provider %r desconhecido — usando %r", env, raw, base, fallback,
+        )
+        return fallback
+    return raw
+
+
 def get_provider_config(provider: str) -> dict:
     """
-    Return config for a provider.
+    Return config for a provider or provider spec (`name` or `name:model`).
 
     Returns dict with keys: base_url, api_key, model.
     Raises RuntimeError if API key is missing (except ollama).
     """
+    provider, model_override = split_provider_spec(provider)
     cfg = _PROVIDERS.get(provider)
     if not cfg:
         raise RuntimeError(
@@ -225,7 +433,7 @@ def get_provider_config(provider: str) -> dict:
     else:
         api_key = "ollama"
 
-    model = os.getenv(cfg.get("model_env", ""), cfg["default_model"])
+    model = model_override or os.getenv(cfg.get("model_env", ""), cfg["default_model"])
     supports_tools = cfg.get("supports_tools", True)
     api_format = cfg.get("api_format", "openai")
     supports_vision = cfg.get("supports_vision", False)
@@ -255,16 +463,43 @@ def _build_extra_payload(provider: str, model: str) -> dict:
 
     Env overrides:
       - DEEPSEEK_THINKING:        "enabled" (default) | "disabled"
-      - DEEPSEEK_REASONING_EFFORT: "max" (default) | "high"
+      - DEEPSEEK_REASONING_EFFORT: "max" (default) | "high" | "medium" | "low"
+
+    #D105: os valores de env sao validados contra um whitelist e caem no
+    # default quando invalidos. Sem isso, um typo (`enable`, `maximum`) era
+    # passado cru ao payload e a API rejeitava com HTTP 400 em TODA tentativa
+    # de retry — quebrando o provider por uma variavel de ambiente mal escrita.
     """
     if provider == "deepseek" and "v4" in model.lower():
-        thinking = os.getenv("DEEPSEEK_THINKING", "enabled").lower()
-        effort = os.getenv("DEEPSEEK_REASONING_EFFORT", "max").lower()
+        thinking = _validated_env(
+            "DEEPSEEK_THINKING", "enabled", {"enabled", "disabled"}
+        )
+        effort = _validated_env(
+            "DEEPSEEK_REASONING_EFFORT", "max", {"max", "high", "medium", "low"}
+        )
         extras: dict = {"thinking": {"type": thinking}}
         if thinking == "enabled":
             extras["reasoning_effort"] = effort
         return extras
     return {}
+
+
+def _validated_env(name: str, default: str, allowed: set[str]) -> str:
+    """Read an env override, lowercased, falling back to `default` (with a
+    warning) when the value is outside `allowed`. Prevents a typo'd env var
+    from being passed verbatim into the provider payload (#D105)."""
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    val = raw.strip().lower()
+    if val not in allowed:
+        import logging
+        logging.getLogger(__name__).warning(
+            "%s=%r invalido (esperado um de %s); usando default %r",
+            name, raw, sorted(allowed), default,
+        )
+        return default
+    return val
 
 
 def get_available_providers() -> list[dict]:
@@ -307,6 +542,14 @@ def load_system_prompt() -> str:
 # Toda chave aqui DEVE ser lida em algum lugar. Flags orfas viram codigo
 # morto que confunde quem tenta desabilitar comportamento via env e nao
 # ve efeito (#DL016).
+def _subagent_budget_seconds() -> float:
+    """Wall-clock budget of ONE in-process sub-agent (`ALPHA_SUBAGENT_MAX_SECONDS`).
+
+    Default 120s, floor 30s. Raise it for slow/thinking providers — with
+    DeepSeek all three `/review --deep` reviewers timed out at 120s."""
+    return float(_env_int_clamped("ALPHA_SUBAGENT_MAX_SECONDS", 120, min_value=30))
+
+
 FEATURES: dict = {
     # Master switch para o sistema de sub-agents. Quando False, `delegate_task`
     # e `delegate_parallel` retornam erro mesmo que `delegate_tool_enabled=True`.
@@ -316,6 +559,13 @@ FEATURES: dict = {
     "delegate_tool_enabled": True,
     "max_parallel_agents": 3,
     "subagent_max_iterations": 15,
+    # Wall-clock budget for ONE sub-agent (seconds). Independent from
+    # `max_turn_seconds` (parent cap). Tighter — sub-agents should do
+    # focused work; if they spin for >2 min we want the parent to know
+    # quickly so it can recover or report the gap. CODE_REVIEW_FASE1 #7.
+    # `ALPHA_SUBAGENT_MAX_SECONDS` raises it for slow/thinking providers
+    # (seen with DeepSeek on `/review --deep`: 3 reviewers timed out at 120s).
+    "subagent_max_turn_seconds": _subagent_budget_seconds(),
     # Cap total de tarefas em delegate_parallel — `max_parallel_agents`
     # controla concorrencia, nao total. Sem cap, o modelo pode submeter
     # array de 100 tasks * 15 iteracoes = 1500 chamadas LLM silenciosas.
@@ -364,6 +614,140 @@ def get_subagent_allow() -> frozenset[str]:
     """
     raw = os.environ.get("ALPHA_SUBAGENT_ALLOW", "")
     return frozenset(t.strip() for t in raw.split(",") if t.strip())
+
+
+# ─── Tool-family gating (prompt-surface reduction) ───
+#
+# Advertising tools that can't run just inflates the prompt (and the model's
+# choice space) every turn. Browser (21 tools) needs Playwright; Apify (2
+# tools) needs an API token — without those, the family is dead weight. These
+# tri-state flags default to "auto" (register iff the dependency/config is
+# present) and can be forced on/off. Read at call time so runtime env changes
+# take effect. The tools stay in the registry either way — this only controls
+# what `get_openai_tools()` advertises to the model.
+
+# #DM061: vocabulário canônico de env-boolean — ÚNICA fonte da verdade.
+# Antes cada módulo redefinia o próprio set (jsonlogs sem "on"/strip,
+# llm_anthropic sem "off", checkpoints só o lado falsy), então a grafia
+# aceita variava flag a flag. Novos flags devem usar `env_bool`.
+_ENV_TRUE = ("1", "true", "yes", "on")
+_ENV_FALSE = ("0", "false", "no", "off")
+
+
+def env_bool(env_var: str, default: bool = False) -> bool:
+    """Parse an env var as a boolean using the canonical vocabulary.
+
+    '1'/'true'/'yes'/'on' → True; '0'/'false'/'no'/'off' → False
+    (case-insensitive, whitespace-stripped). Unset — or any other
+    value — returns `default`.
+    """
+    raw = os.environ.get(env_var, "").strip().lower()
+    if raw in _ENV_TRUE:
+        return True
+    if raw in _ENV_FALSE:
+        return False
+    return default
+
+
+def _tristate_flag(env_var: str, *, auto_default: bool) -> bool:
+    """Resolve an auto/on/off feature flag.
+
+    unset or 'auto' → `auto_default`; '1'/'true'/'yes'/'on' → True;
+    '0'/'false'/'no'/'off' → False.
+    """
+    return env_bool(env_var, default=auto_default)
+
+
+def lazy_tools_enabled() -> bool:
+    """Tool lazy-loading (`alpha.tool_lazy`): heavy/rare tool families are
+    dropped from the prompt and fetched via `tool_search`. Auto = on.
+    `ALPHA_LAZY_TOOLS=off` restores the full-schema prompt."""
+    return _tristate_flag("ALPHA_LAZY_TOOLS", auto_default=True)
+
+
+def notify_mode() -> str:
+    """Desktop notifications for long REPL turns / approval prompts
+    (`alpha.notify`): `ALPHA_NOTIFY=auto|on|off`, default auto (on when
+    stdout is a TTY and a backend exists)."""
+    return _validated_env("ALPHA_NOTIFY", "auto", {"auto", "on", "off"})
+
+
+def notify_after_seconds() -> int:
+    """Only turns at least this long notify (`ALPHA_NOTIFY_AFTER`, default
+    20s; 0 = every turn)."""
+    return _env_int_clamped("ALPHA_NOTIFY_AFTER", 20, min_value=0)
+
+
+def lazy_mcp_threshold() -> int:
+    """MCP tools are deferred only when the registry holds MORE than this
+    many of them (`ALPHA_LAZY_MCP_THRESHOLD`, default 8) — a small server
+    stays inline, a big one is searched."""
+    return _env_int_clamped("ALPHA_LAZY_MCP_THRESHOLD", 8, min_value=0)
+
+
+_SHOW_THINKING_MODES = {"compact", "full", "off"}
+
+
+def show_thinking_mode() -> str:
+    """How the REPL renders the model's reasoning (extended thinking /
+    `reasoning_content`) — `ALPHA_SHOW_THINKING`:
+
+    - ``compact`` (default): dim block capped at a few lines + `(+N linhas)`.
+    - ``full``: the whole reasoning, dim.
+    - ``off``: hidden (still round-tripped to the provider).
+    """
+    return _validated_env("ALPHA_SHOW_THINKING", "compact", _SHOW_THINKING_MODES)
+
+
+def browser_tools_enabled() -> bool:
+    """Whether the browser tool family should be advertised to the model.
+
+    Auto: on only when Playwright is importable (the tools error without it).
+    Override with `ALPHA_BROWSER_TOOLS=on|off`.
+    """
+    from importlib.util import find_spec
+    return _tristate_flag(
+        "ALPHA_BROWSER_TOOLS",
+        auto_default=find_spec("playwright") is not None,
+    )
+
+
+def vision_tool_results_enabled(provider: str) -> bool:
+    """Whether tool results carrying `_image_path` (e.g. browser_screenshot)
+    should be attached to the conversation as vision messages (Plano-Browser
+    Etapa 1).
+
+    Auto: on only when the active provider declares `supports_vision` —
+    sending image blocks to a non-vision provider (deepseek, grok, ollama)
+    is a guaranteed HTTP 400. Override with `ALPHA_VISION_TOOL_RESULTS=on`
+    (e.g. a custom ollama vision model whose config flag says False) or
+    `=off` to keep results text-only even on vision providers.
+    """
+    # #DM061: usa os sets canônicos. Não delega ao `env_bool(default=...)`
+    # porque o default (supports_vision) deve ser resolvido LAZY — com o
+    # override setado, `get_provider_config` nem é chamado.
+    raw = os.environ.get("ALPHA_VISION_TOOL_RESULTS", "").strip().lower()
+    if raw in _ENV_TRUE:
+        return True
+    if raw in _ENV_FALSE:
+        return False
+    try:
+        return bool(get_provider_config(provider).get("supports_vision", False))
+    except RuntimeError:
+        # Provider desconhecido ou API key ausente — fail-closed (sem visão).
+        return False
+
+
+def apify_tools_enabled() -> bool:
+    """Whether the Apify scraping tools should be advertised to the model.
+
+    Auto: on only when `APIFY_API_TOKEN` is set (the tools error without it).
+    Override with `ALPHA_APIFY_TOOLS=on|off`.
+    """
+    return _tristate_flag(
+        "ALPHA_APIFY_TOOLS",
+        auto_default=bool(os.environ.get("APIFY_API_TOKEN", "").strip()),
+    )
 
 
 # ─── Tool Timeouts (seconds) ───
