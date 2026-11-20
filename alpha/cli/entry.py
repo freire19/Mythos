@@ -460,6 +460,9 @@ async def _run_once(messages, user_message, provider, temperature, get_tool_fn, 
     st.indicator.start()
     from alpha import notify as _notify
     _notify.turn_started()
+    # Remote control (alpha/remote.py): None unless the server is on.
+    from alpha import remote as _remote
+    _mirror = _remote.turn_mirror()
 
     aborted = False
     # CODE_REVIEW2 #1 + CODE_REVIEW3 #4: pin the turn deadline via
@@ -494,6 +497,8 @@ async def _run_once(messages, user_message, provider, temperature, get_tool_fn, 
             handler = _EVENT_HANDLERS.get(event.get("type", ""))
             if handler is not None:
                 handler(st, event)
+            if _mirror is not None:
+                _mirror.feed(event)
     except (KeyboardInterrupt, asyncio.CancelledError):
         aborted = True
         raise
@@ -513,6 +518,11 @@ async def _run_once(messages, user_message, provider, temperature, get_tool_fn, 
                 pass  # Token mismatch — rare, safe to swallow.
         st.indicator.stop()
         st.flush_text()
+        if _mirror is not None:
+            _mirror.finish(
+                aborted=aborted, tools=st.tools_count,
+                duration=time.time() - st.start,
+            )
         # Print summary unconditionally — interrupts (Ctrl+C, cancellation)
         # get a synthetic anomaly tag so the user sees what executed
         # before the cancellation tore the turn down. `finally` runs
@@ -629,7 +639,12 @@ def _handle_auto_continue(
     return auto_continues
 
 
-def run_repl(provider: str, temperature: float, resume: str | None = None):
+def run_repl(
+    provider: str,
+    temperature: float,
+    resume: str | None = None,
+    remote: str | None = None,
+):
     """Interactive REPL loop."""
     # AUDIT_V1.8 #043: prompt_toolkit so carrega em modo REPL —
     # single-shot CLI nao paga o cold-load de ~99ms.
@@ -649,6 +664,10 @@ def run_repl(provider: str, temperature: float, resume: str | None = None):
     announced_thresholds: set[int] = set()
 
     _print_startup_status(provider, cfg, tools, active_agent)
+
+    if remote:
+        from alpha.cli.commands.remote_cmd import start_remote
+        start_remote(model=cfg.get("model"), local=(remote == "local"))
 
     # Messages typed during agent execution land here; we drain before
     # falling back to the blocking read_input() prompt.
@@ -726,8 +745,10 @@ def run_repl(provider: str, temperature: float, resume: str | None = None):
                 system_prompt=system_prompt, tools=tools,
                 get_tool_fn=get_tool_fn, active_agent=active_agent,
             )
+            from alpha import remote as _remote
             try:
-                result = dispatch(ctx, user_input)
+                with _remote.capture_output(user_input):
+                    result = dispatch(ctx, user_input)
             except (KeyboardInterrupt, EOFError, SystemExit):
                 # #D809: caminhos de saída do REPL nunca são engolidos —
                 # EOFError é subclasse de Exception e cairia no guard abaixo.
@@ -788,6 +809,10 @@ def run_repl(provider: str, temperature: float, resume: str | None = None):
             pass
 
         messages.append({"role": "user", "content": user_content})
+        from alpha import remote as _remote
+        if _remote.is_active():
+            _remote.set_info(model=cfg.get("model"), cwd=cwd)
+            _remote.publish_user(_history_record_override or user_input)
         # `/image` rewrites the history entry to include the filename so
         # /history doesn't show a giant base64 blob; other commands fall
         # through with override=None and we just record the raw input.
@@ -838,6 +863,7 @@ def run_repl(provider: str, temperature: float, resume: str | None = None):
             # commands the user was trying to abort.
             queued_inputs.clear()
             repl_concurrent.drain_queue()
+            _remote.clear_inbox()
         else:
             # Pull anything the user typed while the agent was working
             # so the next loop iteration runs those before re-opening
@@ -1173,6 +1199,18 @@ def main():
         ),
     )
 
+    parser.add_argument(
+        "--remote",
+        nargs="?",
+        const="lan",
+        choices=("lan", "local"),
+        help=(
+            "REPL: start remote control — a page on your network (token link) "
+            "to follow and drive this session from a phone. `--remote local` "
+            "binds to 127.0.0.1 only (use with your own tunnel)."
+        ),
+    )
+
     args = parser.parse_args()
 
     if args.init:
@@ -1215,7 +1253,7 @@ def main():
     elif args.message:
         run_single(args.provider, args.temperature, args.message, resume=resume)
     else:
-        run_repl(args.provider, args.temperature, resume=resume)
+        run_repl(args.provider, args.temperature, resume=resume, remote=args.remote)
 
 
 if __name__ == "__main__":

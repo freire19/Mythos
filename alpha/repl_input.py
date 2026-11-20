@@ -560,6 +560,75 @@ def _arm_schedule_timer(session: "PromptSession"):
     return _Handle()
 
 
+# ── remote control integration ────────────────────────────────────
+# Same delivery path as /loop: a message sent from the remote page is
+# returned by read_input as if it had been typed.
+_REMOTE_SENTINEL = "\x00__alpha_remote_message__"
+
+
+def _pop_remote() -> str | None:
+    from . import remote
+
+    return remote.pop_message()
+
+
+def _arm_remote_waker(session: "PromptSession"):
+    """While the prompt is blocked, let `remote.submit` exit it — only when
+    the input buffer is empty (text being composed is never eaten; the
+    message waits and is re-checked every few seconds). Returns a handle
+    whose `cancel()` detaches the waker, or None when remote is off."""
+    import threading
+
+    from . import remote
+
+    if not remote.is_active():
+        return None
+    state = {"timer": None, "done": False}
+
+    def _exit_if_idle() -> None:
+        app = session.app
+        if state["done"] or not app.is_running or not remote.has_messages():
+            return
+        if app.current_buffer.text.strip():
+            _retry()
+            return
+        app.exit(result=_REMOTE_SENTINEL)
+
+    def _wake() -> None:
+        app = session.app
+        loop = getattr(app, "loop", None)
+        if state["done"] or loop is None or loop.is_closed():
+            return
+        try:
+            loop.call_soon_threadsafe(_exit_if_idle)
+        except RuntimeError:
+            pass
+
+    def _retry() -> None:
+        t = threading.Timer(_IDLE_RECHECK_S, _wake)
+        t.daemon = True
+        state["timer"] = t
+        t.start()
+
+    remote.set_waker(_wake)
+    # A message may have landed between the caller's pop and now, before
+    # the app (and its loop) existed: re-check shortly after start.
+    first = threading.Timer(0.3, _wake)
+    first.daemon = True
+    state["timer"] = first
+    first.start()
+
+    class _Handle:
+        def cancel(self) -> None:
+            state["done"] = True
+            remote.set_waker(None)
+            t = state.get("timer")
+            if t is not None:
+                t.cancel()
+
+    return _Handle()
+
+
 def read_input(prompt_ansi: str) -> tuple[str, list[Path]]:
     """Read a line from the user. Returns (text, image_paths).
 
@@ -578,6 +647,11 @@ def read_input(prompt_ansi: str) -> tuple[str, list[Path]]:
         _echo(scheduled, note="(/loop)")
         return scheduled, []
 
+    remote_msg = _pop_remote()
+    if remote_msg is not None:
+        _echo(remote_msg, note="(remoto)")
+        return remote_msg, []
+
     if use_simple_input():
         return _read_input_simple(prompt_ansi)
 
@@ -590,12 +664,18 @@ def read_input(prompt_ansi: str) -> tuple[str, list[Path]]:
     attached: dict[int, Path] = {}
     kb = _build_key_bindings(attached)
     session = _get_session()
+    # A submitted slash command leaves the menu rows reserved (the buffer
+    # reset fires no text-changed event): every prompt starts without them.
+    session.reserve_space_for_menu = 0
     timer = _arm_schedule_timer(session)
+    waker = _arm_remote_waker(session)
     try:
         text = session.prompt(ANSI(prompt_ansi), key_bindings=kb)
     finally:
         if timer is not None:
             timer.cancel()
+        if waker is not None:
+            waker.cancel()
         # `erase_when_done` removed the prompt and toolbar and left the
         # cursor on the prompt's first row. Remove our own two rows above
         # it (spacer + top border) too, so the frame leaves no trace.
@@ -606,6 +686,11 @@ def read_input(prompt_ansi: str) -> tuple[str, list[Path]]:
         if scheduled:
             _echo(scheduled, note="(/loop)")
         return (scheduled or ""), []
+    if text == _REMOTE_SENTINEL:
+        remote_msg = _pop_remote()
+        if remote_msg:
+            _echo(remote_msg, note="(remoto)")
+        return (remote_msg or ""), []
     _echo(text)
     return _resolve_placeholders(text, attached)
 

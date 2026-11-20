@@ -72,6 +72,7 @@ from .bg import _handle_tasks
 from .memory_cmd import _handle_memory
 from .permissions_cmd import _handle_permissions
 from .schedule_cmd import _handle_loop
+from .remote_cmd import _handle_remote
 from .review_cmd import _handle_review
 from .rewind import _handle_rewind
 from .safety import _handle_accept_edits, _handle_plan, _handle_sandbox
@@ -125,6 +126,7 @@ _DESCRIPTIONS: dict[str, str] = {
     "/rewind": "Undo file edits from checkpoints (last turn | N edits | list)",
     "/tasks": "List background tasks (execute_shell background=true)",
     "/loop": "Schedule a prompt/command on an interval (/loop 5m /tasks | once | list | stop)",
+    "/remote": "Remote control from a phone/browser on your network (on [--local] | off | status)",
     "/review": "Code review of the working tree, a PR (gh), a branch, a commit or a path (--deep, --fix, --comment)",
     "/help": "Show all commands",
     "/exit": "Exit",
@@ -149,6 +151,7 @@ def iter_commands() -> list[tuple[str, str]]:
 
 
 _DISPATCH: dict[str, Callable[[ReplContext, list[str]], DispatchResult]] = {
+    "/remote": _handle_remote,
     "/exit": _handle_exit,
     "/quit": _handle_exit,
     "/q": _handle_exit,

@@ -135,7 +135,12 @@ async def _ask_choice(question: str, options: object = None) -> dict:
             # If this coroutine is cancelled (turn aborted, timeout), the
             # worker thread must stop reading the terminal: left behind, it
             # holds the tty in raw mode and swallows the next prompt's keys.
-            gave_up = threading.Event()
+            # With remote control on, the page may answer too: its answer
+            # sets the same event and is read back from `remote_q`.
+            from .. import remote as _remote
+
+            remote_q = _remote.ask("choice", question.strip(), "", parsed)
+            gave_up = remote_q.event if remote_q is not None else threading.Event()
             worker = asyncio.create_task(
                 asyncio.to_thread(_run_menu, select_menu, o_lines, gave_up)
             )
@@ -147,11 +152,15 @@ async def _ask_choice(question: str, options: object = None) -> dict:
                     await asyncio.wait_for(worker, timeout=2)
                 except BaseException:
                     pass
+                _remote.close_question(remote_q, "(cancelado)")
                 raise
-            except (EOFError, KeyboardInterrupt, MenuCancelled):
+            except MenuCancelled:
+                picked = remote_q.answer if remote_q is not None else None
+            except (EOFError, KeyboardInterrupt):
                 picked = None
             if picked is None:
                 print(f"  {c(C.GRAY, '(cancelado)')}")
+                _remote.close_question(remote_q, "(cancelado)")
                 return {
                     "ok": False,
                     "category": "user_cancelled",
@@ -159,6 +168,7 @@ async def _ask_choice(question: str, options: object = None) -> dict:
                 }
             chosen = parsed[picked]
             print(f"  {c(C.GREEN, '✓')} {c(C.GRAY, ' '.join(chosen.split())[:120])}")
+            _remote.close_question(remote_q, "✓ " + " ".join(chosen.split())[:120])
             return {
                 "ok": True,
                 "chosen_index": picked + 1,

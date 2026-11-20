@@ -17,7 +17,7 @@ from ..theme import (
     fit,
     term_cols,
 )
-from ..select import can_select, select_menu
+from ..select import MenuCancelled, can_select, select_menu
 from .planning import _print_plan_card
 from .tools import _display_tool_name
 
@@ -179,15 +179,33 @@ def print_approval_request(tool_name: str, args: dict) -> bool:
             pointer = c(C.VIOLET_GLOW, "❯") if num == 1 else " "
             print(f"  {pointer} {c(C.GRAY, f'{num}.')} {label}")
 
+    # Remote control: the same question is offered on the page; whichever
+    # side answers first wins (the remote answer releases the menu through
+    # its `cancel` event). Only the arrow-key menu can be released that way.
+    from ... import remote as _remote
+
+    remote_q = None
+    if interactive and _remote.is_active():
+        title, detail = _remote.describe_approval(tool_name, args)
+        remote_q = _remote.ask(
+            "approval", title, detail, [label for _, label in _APPROVAL_OPTIONS]
+        )
+    outcome = "✗ Negado"
+
     try:
         while True:
             if interactive:
                 # Arrow keys + Enter, digits, or the legacy letters. Esc = deny.
-                picked = select_menu(
-                    [[label] for _, label in _APPROVAL_OPTIONS],
-                    shortcuts={"s": 0, "y": 0, "a": 1, "t": 2, "n": 3},
-                    hint="↑/↓ para mover · Enter confirma · 1-4 ou s/a/t/n · Esc nega",
-                )
+                try:
+                    picked = select_menu(
+                        [[label] for _, label in _APPROVAL_OPTIONS],
+                        shortcuts={"s": 0, "y": 0, "a": 1, "t": 2, "n": 3},
+                        hint="↑/↓ para mover · Enter confirma · 1-4 ou s/a/t/n · Esc nega",
+                        cancel=remote_q.event if remote_q is not None else None,
+                    )
+                except MenuCancelled:
+                    picked = remote_q.answer if remote_q is not None else None
+                    print(f"  {c(C.GRAY_DARK, '(respondido pelo controle remoto)')}")
                 resp = "n" if picked is None else _APPROVAL_OPTIONS[picked][0]
             else:
                 resp = input(
@@ -198,6 +216,7 @@ def print_approval_request(tool_name: str, args: dict) -> bool:
             if resp in ("s", "sim", "y", "yes"):
                 print(f"  {c(C.GREEN, '✓ Aprovado')}")
                 _record_preflight_decision(tool_name, args, "approve")
+                outcome = "✓ Aprovado"
                 return True
             if resp in ("n", "não", "nao", "no"):
                 print(f"  {c(C.RED, '✗ Negado')}")
@@ -213,12 +232,14 @@ def print_approval_request(tool_name: str, args: dict) -> bool:
                 else:
                     print(f"  {c(C.GREEN, '✓ Aprovado')} {c(C.GRAY, '(não foi possível salvar a regra)')}")
                 _record_preflight_decision(tool_name, args, "approve_scoped")
+                outcome = "✓ Aprovado (regra salva)"
                 return True
             if resp in ("t", "todos", "toda", "all"):
                 # In-memory blanket for the rest of this session only.
                 set_auto_accept(True)
                 print(f"  {c(C.GREEN, '✓ Aprovado (sessão inteira — não persistido)')}")
                 _record_preflight_decision(tool_name, args, "approve_all")
+                outcome = "✓ Aprovado (sessão inteira)"
                 return True
     except EOFError:
         print(f"  {c(C.GRAY, '(auto-denied — sem terminal interativo)')}")
@@ -230,3 +251,5 @@ def print_approval_request(tool_name: str, args: dict) -> bool:
         print(f"\n  {c(C.RED, '✗ Negado (Ctrl+C)')}")
         _record_preflight_decision(tool_name, args, "interrupt")
         return False
+    finally:
+        _remote.close_question(remote_q, outcome)
