@@ -84,7 +84,7 @@ jobs:
           path: dist/
 
       - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33  # v1.14.2
+        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086  # v1.14.3
         # No `with:` block needed — the action defaults to PyPI (not TestPyPI)
         # and reads dist/ for distributions. OIDC is automatic when the job
         # has `id-token: write` and the repo is configured as a trusted
