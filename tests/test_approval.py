@@ -47,6 +47,46 @@ class TestNeedsApproval:
         assert needs_approval("write_file", {"path": ".git/hooks/post-commit", "content": "x"}) is True
         assert needs_approval("write_file", {"path": "/a/.git/hooks/pre-push", "content": "x"}) is True
 
+    # AUDIT #002 follow-up — bypasses de normalizacao e persistencia git/X11
+    # confirmados por probe (matriz de ataque). O kernel resolve "//", "/./"
+    # e "a/../b" para o mesmo arquivo; o gate precisa normalizar antes do match.
+    @pytest.mark.parametrize(
+        "path",
+        [
+            ".git//hooks/post-commit",
+            ".git/./hooks/post-commit",
+            "proj/.git/config",          # core.sshCommand / core.fsmonitor = exec
+            "~/.gitconfig",              # core.sshCommand global
+            "~/.git-credentials",        # cofre de credenciais git
+            "~/.xinitrc",
+            "~/.xprofile",
+            "~/.xsession",
+            "~/.xsessionrc",
+            "//etc/cron.d/x",
+            "/./etc/cron.d/x",
+            "/etc//cron.d/x",
+            "/etc/../etc/cron.d/x",
+            "/home/u/./.bashrc",
+            "~//.zshrc",
+        ],
+    )
+    def test_sensitive_path_normalization_bypasses(self, path):
+        assert needs_approval("write_file", {"path": path, "content": "x"}) is True
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "src/main.py",
+            "/tmp/scratch.txt",
+            "myapp/.git_helper.py",   # contem ".git" mas nao e o dir de config
+            "/etcetera/x",            # prefixo "/etc/" nao deve bater
+            "/etcx/y",
+            "docs/STATUS.md",
+        ],
+    )
+    def test_non_sensitive_paths_normalized_still_auto_approve(self, path):
+        assert needs_approval("write_file", {"path": path, "content": "x"}) is False
+
     def test_sensitive_path_alpha_settings(self):
         assert needs_approval("write_file", {"path": ".alpha/settings.json", "content": "{}"}) is True
         assert needs_approval("edit_file", {"path": "~/.alpha/settings.json"}) is True

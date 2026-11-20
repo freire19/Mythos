@@ -369,9 +369,14 @@ def test_is_safe_shell_command_new_branches(cmd: str, expected: bool):
 def test_is_sensitive_path_additional_patterns(path: str):
     assert _is_sensitive_path(path) is True
 
-def test_is_sensitive_path_gitconfig_not_sensitive():
-    # Confirma que .gitconfig (sem regex de match) NAO triggera o gate.
-    assert _is_sensitive_path("~/.gitconfig") is False
+def test_is_sensitive_path_gitconfig_is_sensitive():
+    # AUDIT #002 follow-up: ~/.gitconfig era um "negative case" — agora e
+    # sensivel. `core.sshCommand`/`core.fsmonitor`/`credential.helper` no
+    # gitconfig executam comandos em QUALQUER operacao git (mesma classe do
+    # hook, porem mais silencioso). Write sem prompt aqui = plant+execute.
+    assert _is_sensitive_path("~/.gitconfig") is True
+    assert _is_sensitive_path("~/.git-credentials") is True
+    assert _is_sensitive_path("proj/.git/config") is True
 
 @pytest.mark.parametrize("value", [None, "", 0, 42])
 def test_is_sensitive_path_non_string_safe(value):

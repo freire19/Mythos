@@ -14,6 +14,7 @@ import logging
 import os
 import re
 import shlex
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -527,11 +528,17 @@ _SENSITIVE_PATH_PATTERNS = (
     re.compile(
         r"(^|/)\.(bash_profile|bashrc|bash_logout|bash_aliases|bash_env"
         r"|zshrc|zshenv|zprofile|zlogin|zlogout|zsh_aliases"
-        r"|profile|envrc|kshrc|cshrc|tcshrc|inputrc)$"
+        r"|profile|envrc|kshrc|cshrc|tcshrc|inputrc|xinitrc|xprofile|xsession|xsessionrc)$"
     ),
     re.compile(r"(^|/)\.config/fish/(config\.fish|conf\.d/|functions/)"),
     # Git hooks — execute on every git operation that triggers them.
     re.compile(r"(^|/)\.git/hooks/[^/]+$"),
+    # .git/config e dotfiles git — core.sshCommand / core.fsmonitor em
+    # .git/config executa em QUALQUER operacao git (mesma classe do hook,
+    # mas sem precisar de evento especifico); ~/.git-credentials e o
+    # cofre de credenciais de HTTP basic auth do git.
+    re.compile(r"(^|/)\.git/config$"),
+    re.compile(r"(^|/)\.git(config|-credentials)$"),
     # SSH config / keys.
     re.compile(r"(^|/)\.ssh/"),
     # GPG.
@@ -559,16 +566,27 @@ _SENSITIVE_ABS_PREFIXES = (
 )
 
 
+# macOS (HFS+/APFS default) e case-insensitive: "/ETC/passwd" resolve para
+# "/etc/passwd" la. Em Linux manter case-sensitive — custo de false-positive
+# desnecessario (prompt extra em arquivos legitimos com caixa diferente).
+_CASEFOLD_PATHS = sys.platform == "darwin"
+
+
 def _is_sensitive_path(raw_path: str) -> bool:
     """True if writing to `raw_path` should drop auto-approve and prompt."""
     if not raw_path or not isinstance(raw_path, str):
         return False
     expanded = os.path.expanduser(raw_path)
-    if any(p.search(expanded) for p in _SENSITIVE_PATH_PATTERNS):
+    # normpath (lexical, sem tocar o filesystem) colapsa "//", "/./" e
+    # "a/../b" — sem isso ".git//hooks/x", ".git/./hooks/x" e "/./etc/x"
+    # bypassam os padroes embora o kernel resolva para o mesmo arquivo.
+    normalized = os.path.normpath(expanded)
+    check = normalized.casefold() if _CASEFOLD_PATHS else normalized
+    if any(p.search(check) for p in _SENSITIVE_PATH_PATTERNS):
         return True
-    if expanded.startswith("/"):
+    if check.startswith("/"):
         # Force a trailing "/" so "/etcetera/x" doesn't match the "/etc/" prefix.
-        tail = expanded if expanded.endswith("/") else expanded + "/"
+        tail = check if check.endswith("/") else check + "/"
         if any(tail.startswith(prefix) for prefix in _SENSITIVE_ABS_PREFIXES):
             return True
     return False
