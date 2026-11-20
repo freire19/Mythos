@@ -27,7 +27,7 @@
 # mutavel, entao um rebuild puxaria o que ela apontar no momento. O bump do
 # digest e deliberado e vem pelo Dependabot (ecosystem `docker`), que tambem
 # evita que o pin congele patches de seguranca da imagem base.
-FROM python:3.12-slim@sha256:646fb0bca3dd3ea1bcc6feb72c17ed16eed6e10cffc732fcc1478bd3e7f02d7b AS builder
+FROM python:3.15-slim@sha256:65a65fc7b30b06cb6df4930fd4650697cb23f4c2698ab81fc87e4b031bc36928 AS builder
 
 WORKDIR /build
 
@@ -47,7 +47,7 @@ RUN python -m build --wheel --outdir /build/dist
 
 # ─── Stage 2: runtime ──────────────────────────────────────────────
 
-FROM python:3.12-slim@sha256:646fb0bca3dd3ea1bcc6feb72c17ed16eed6e10cffc732fcc1478bd3e7f02d7b AS runtime
+FROM python:3.15-slim@sha256:65a65fc7b30b06cb6df4930fd4650697cb23f4c2698ab81fc87e4b031bc36928 AS runtime
 
 # Minimal system deps:
 # - git: alpha's git_operation tool and the project_context loader
