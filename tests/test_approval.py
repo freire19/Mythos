@@ -1,6 +1,29 @@
 """Tests for the approval system."""
 
+from pathlib import Path
+
+import pytest
+
 from alpha.approval import _is_sensitive_path, is_safe_shell_command, needs_approval
+
+
+@pytest.fixture(autouse=True)
+def _isolate_from_user_settings(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    """Rodar sem as regras pessoais de ~/.alpha/settings.json.
+
+    O settings.json real do usuario pode conter allow/deny rules legitimas
+    (ex: allow "delegate_parallel" aprovado em sessao interativa). Os testes
+    de defaults embutidos devem ser deterministicos independente disso —
+    regras do usuario continuam vencendo em producao, o que e o comportamento
+    desejado (user intent > builtin defaults).
+    """
+    monkeypatch.setattr(
+        "alpha.approval.find_config_file",
+        lambda _name: tmp_path / "nonexistent-settings.json",
+    )
+    from alpha.approval import reset_permission_cache
+
+    reset_permission_cache()
 
 
 class TestNeedsApproval:

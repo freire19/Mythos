@@ -76,7 +76,10 @@ def _drive_repl(monkeypatch, *inputs):
     callers can assert on captured state."""
     import main
 
-    monkeypatch.setattr(main, "read_input", _ScriptedInput(*inputs))
+    # `read_input` vive em alpha.repl_input desde a refatoracao v1.22;
+    # main.py importa localmente dentro de run_repl, entao o patch precisa
+    # atingir o modulo de origem (nao ha mais `main.read_input`).
+    monkeypatch.setattr("alpha.repl_input.read_input", _ScriptedInput(*inputs))
     monkeypatch.setattr("alpha.agent.run_agent", _fake_run_agent_done)
     main.run_repl(provider="deepseek", temperature=0.5)
     return main

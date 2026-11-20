@@ -58,12 +58,27 @@ def _reset_global_state():
             return
         approval.reset_permission_cache()
 
+    def _reset_permission_cache():
+        try:
+            from alpha import approval
+        except ImportError:
+            return
+        approval.reset_permission_cache()
+
+    def _reset_approve_all():
+        try:
+            from alpha.display.renderers import prompts
+        except ImportError:
+            return
+        prompts.reset_approve_all()
+
     # Pre-test reset
     _reset_browser_session()
     _reset_compress_counter()
     _reset_pg_pools()
     _reset_safe_env_cache()
     _reset_permission_cache()
+    _reset_approve_all()
 
     yield
 
@@ -74,3 +89,4 @@ def _reset_global_state():
     _reset_pg_pools()
     _reset_safe_env_cache()
     _reset_permission_cache()
+    _reset_approve_all()

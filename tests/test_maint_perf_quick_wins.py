@@ -108,7 +108,9 @@ class TestLoopDetectionInConfig:
         assert "LOOP_DETECTION" in src
 
     def test_consts_match_config_values(self):
-        from alpha.agent import (
+        # Constantes de loop detection vivem em alpha.agent.loop desde a
+        # refatoracao do agente (alpha/agent virou package).
+        from alpha.agent.loop import (
             _CYCLE_WINDOW,
             _MAX_REPEAT_CALLS,
             _SIMILAR_REPEAT_CALLS,

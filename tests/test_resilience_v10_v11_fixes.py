@@ -31,7 +31,10 @@ class TestApprovalKeyboardInterrupt:
             raise KeyboardInterrupt()
 
         monkeypatch.setattr("builtins.input", fake_input)
-        monkeypatch.setattr(display, "_approve_all", False)
+        # `_approve_all` e global do modulo canonico (renderers.prompts);
+        # o package alpha.display apenas re-exporta o nome. Patchear o
+        # package criaria um atributo-sombra que a funcao nunca le.
+        monkeypatch.setattr("alpha.display.renderers.prompts._approve_all", False)
 
         result = display.print_approval_request("execute_shell", {"command": "rm -rf /"})
         assert result is False
