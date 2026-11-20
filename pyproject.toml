@@ -1,6 +1,6 @@
 [project]
 name = "mythos"
-version = "2.0.0"
+version = "1.23.0"
 description = "MYTHOS — Autonomous vulnerability hunter. Red-team cybersecurity agent."
 readme = "README.md"
 license = { text = "MIT" }
