@@ -180,10 +180,16 @@ def approval_callback(tool_name: str, args: dict) -> bool:
     from ..repl_concurrent import paused
     from .. import notify as _notify
 
-    try:
-        _notify.approval_needed(tool_name)
-    except Exception:  # pragma: no cover - a nudge must never block approval
-        pass
+    # No nudge when nothing will be asked: with auto-accept on,
+    # print_approval_request approves on its own and the desktop kept
+    # announcing "Aguardando aprovação" for prompts that never appeared.
+    from ..display.renderers.prompts import is_auto_accept
+
+    if not is_auto_accept():
+        try:
+            _notify.approval_needed(tool_name)
+        except Exception:  # pragma: no cover - a nudge must never block approval
+            pass
     with paused():
         approved = print_approval_request(tool_name, args)
 

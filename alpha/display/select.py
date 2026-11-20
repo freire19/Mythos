@@ -36,11 +36,30 @@ def can_select() -> bool:
         return False
 
 
-def _read_key(fd: int) -> str:
+class MenuCancelled(Exception):
+    """The caller abandoned the menu (its `cancel` event was set)."""
+
+
+# How often a blocked menu checks whether its caller gave up.
+_CANCEL_POLL = 0.2
+
+
+def _read_key(fd: int, cancel=None) -> str:
     """Block for one keypress and return a symbolic name: 'up', 'down',
-    'enter', 'esc', 'interrupt', 'eof', or the literal character."""
+    'enter', 'esc', 'interrupt', 'eof', or the literal character.
+
+    With `cancel` (a threading.Event) the wait is polled, so a menu running
+    in a worker thread stops reading the terminal when its caller is gone —
+    an orphaned reader keeps the tty in raw mode and eats the keystrokes
+    meant for the next prompt."""
     import select as _select
 
+    while cancel is not None:
+        if cancel.is_set():
+            raise MenuCancelled
+        ready, _, _ = _select.select([fd], [], [], _CANCEL_POLL)
+        if ready:
+            break
     data = os.read(fd, 1)
     if not data:
         return "eof"
@@ -101,12 +120,15 @@ def select_menu(
     options: list[list[str]],
     shortcuts: dict[str, int] | None = None,
     hint: str = _HINT,
+    cancel=None,
 ) -> int | None:
     """Run the menu and return the chosen 0-based index, or None on Esc.
 
     `options` holds the already-wrapped display lines of each option.
     `shortcuts` maps a lowercase key to the index it selects immediately.
-    Raises KeyboardInterrupt on Ctrl+C and EOFError on Ctrl+D, like `input()`.
+    Raises KeyboardInterrupt on Ctrl+C and EOFError on Ctrl+D, like `input()`,
+    and MenuCancelled when `cancel` (a threading.Event) is set by the caller;
+    the terminal mode is restored on every exit path.
     """
     import termios
     import tty
@@ -138,7 +160,7 @@ def select_menu(
         out.write("\033[?25l")
         draw(first=True)
         while True:
-            key = _read_key(fd)
+            key = _read_key(fd, cancel)
             if key == "interrupt":
                 raise KeyboardInterrupt
             if key == "eof":

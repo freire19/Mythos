@@ -78,6 +78,15 @@ _DISPLAY_TOOL_NAME_ALIASES = {
     "load_skill": "Skill",
     "tool_search": "ToolSearch",
     "record_memory": "Memory",
+    "pre_flight": "Preflight",
+    "agent_message": "Message",
+    "agent_list": "Agents",
+    "android_devices": "Phone",
+    "android_screenshot": "PhoneScreen",
+    "android_ui_dump": "PhoneUI",
+    "android_input": "PhoneInput",
+    "android_app": "PhoneApp",
+    "android_logcat": "PhoneLog",
 }
 
 
@@ -158,6 +167,20 @@ def _pattern_preview(args: dict) -> str:
     return _truncate(preview, DISPLAY_PREVIEW_TRUNCATE).replace("\n", " ")
 
 
+def _android_input_preview(args: dict) -> str:
+    """`tap 452,1065` / `swipe 100,900 → 100,300` / `text "abc"` / `key back`."""
+    action = str(args.get("action", ""))
+    if action in ("tap", "long_press"):
+        return f"{action} {args.get('x')},{args.get('y')}"
+    if action == "swipe":
+        return f"swipe {args.get('x')},{args.get('y')} → {args.get('x2')},{args.get('y2')}"
+    if action == "text":
+        return f'text "{_strip_control(str(args.get("text", "")))}"'
+    if action == "key":
+        return f"key {args.get('key', '')}"
+    return action
+
+
 def _task_count(args: object) -> int:
     """Number of sub-agent tasks in a `delegate_parallel`-style call
     (`tasks` as a list or a JSON-encoded list), 0 when there is none."""
@@ -185,6 +208,15 @@ def _format_tool_call_header(name: str, args: dict, safety: str) -> str:
     tool_name = c(C.BOLD, shown)
     if name == "read_file" and isinstance(args, dict):
         preview = _read_file_preview(args)
+    elif name == "android_input" and isinstance(args, dict):
+        preview = _android_input_preview(args)
+    elif name == "android_app" and isinstance(args, dict):
+        target = args.get("package") or rel_path(str(args.get("apk_path") or ""))
+        preview = f"{args.get('action', '')} {target}".strip()
+    elif name in ("android_ui_dump", "android_devices"):
+        preview = ""
+    elif name == "android_logcat" and isinstance(args, dict):
+        preview = str(args.get("package") or args.get("grep") or "")
     elif _task_count(args):
         # A raw JSON list of prompts says nothing at a glance; each task
         # gets its own `Done …` row when the batch returns.
@@ -571,6 +603,16 @@ def _bulk_summary(name: str, result: dict) -> str:
             val = result.get(key)
             if isinstance(val, list):
                 return f"Found {_plural(len(val), 'file')}"
+    if name == "android_ui_dump" and isinstance(result.get("nodes"), list):
+        pkg = result.get("package") or "screen"
+        return f"Found {_plural(int(result.get('count', 0)), 'element')} in {pkg}"
+    if name == "android_logcat" and isinstance(result.get("lines"), list):
+        return f"Read {_plural(len(result['lines']), 'log line')}"
+    if name == "android_screenshot" and result.get("width"):
+        return f"Captured {result['width']}x{result['height']}"
+    if name == "android_devices" and isinstance(result.get("devices"), list):
+        names = ", ".join(str(d.get("model") or d.get("serial")) for d in result["devices"])
+        return f"{_plural(len(result['devices']), 'device')}: {names}"
     return ""
 
 
@@ -581,6 +623,8 @@ def label_for_tool(name: str) -> str:
     n = name.lower()
     if n.startswith("mcp__"):
         return "Calling MCP"
+    if n.startswith("android_"):
+        return "Phone"
     if n in {"read_file", "list_directory", "list_tables"}:
         return "Reading"
     if n in {"glob_files", "search_files", "project_overview"}:

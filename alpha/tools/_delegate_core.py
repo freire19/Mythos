@@ -59,6 +59,8 @@ SUBAGENT_DESTRUCTIVE_BLOCKLIST = frozenset({
     # callback humano NAO pode rodar execução arbitraria de codigo — bloqueado
     # explicitamente aqui, fechando o canal de RCE nao supervisionada.
     "execute_python",
+    # Acting on the user's physical phone is never unattended.
+    "android_input", "android_app",
     "browser_click", "browser_fill", "browser_select_option",
     "browser_press_key", "browser_execute_js",
     # Etapa 3 (computer-use): interações por coordenada/teclado têm o mesmo

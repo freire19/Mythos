@@ -175,6 +175,17 @@ class TestIntegration:
         assert setup_mod.approval_callback("execute_shell", {"command": "ls"}) is False
         assert order == ["nudge:execute_shell", "prompt"]
 
+    def test_no_nudge_when_auto_accept_answers_for_the_user(self, monkeypatch):
+        from alpha.cli import setup as setup_mod
+        from alpha.display.renderers import prompts
+
+        nudges: list[str] = []
+        monkeypatch.setattr(notify, "approval_needed", lambda name: nudges.append(name))
+        monkeypatch.setattr(prompts, "_approve_all", True)
+        monkeypatch.setattr(prompts, "_record_preflight_decision", lambda *a, **k: None)
+        assert setup_mod.approval_callback("android_ui_dump", {}) is True
+        assert nudges == []
+
     @pytest.mark.asyncio
     async def test_bg_finish_calls_notify(self, monkeypatch, tmp_path):
         import alpha.agent as agent_mod

@@ -10,7 +10,15 @@ cada test. Custo: trivial (atribuicoes simples). Beneficio: tests
 deterministicos independente da ordem de execucao.
 """
 
+import os
+
 import pytest
+
+# The suite is network-free. With a real GEMINI_API_KEY in the developer's
+# .env, the executor's no-vision fallback would send tool screenshots to
+# Gemini from inside unit tests. Off by default; the tests that cover the
+# fallback clear this and stub the Gemini call.
+os.environ["ALPHA_VISION_FALLBACK"] = "off"
 
 
 @pytest.fixture(autouse=True)

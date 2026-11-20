@@ -43,7 +43,7 @@ logger = logging.getLogger(__name__)
 TOOL_SEARCH_NAME = "tool_search"
 
 # Categories deferred wholesale. Browser alone is 31 schemas.
-_DEFERRED_CATEGORIES: frozenset[str] = frozenset({"browser", "scraping", "database"})
+_DEFERRED_CATEGORIES: frozenset[str] = frozenset({"browser", "scraping", "database", "android"})
 
 # Individual built-ins that are rarely needed in a coding session.
 _DEFERRED_NAMES: frozenset[str] = frozenset({

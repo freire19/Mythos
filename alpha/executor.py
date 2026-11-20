@@ -33,6 +33,9 @@ logger = logging.getLogger(__name__)
 # tests) importava daqui. Fonte unica de verdade vive em `alpha.config`.
 TOOL_EXECUTION_TIMEOUT = _CFG_TOOL_EXECUTION_TIMEOUT
 _SLOW_TOOL_TIMEOUT = _CFG_SLOW_TOOL_TIMEOUT
+# Tools that block on the USER (a menu), not on work. Never timed out.
+_USER_WAIT_TOOLS = frozenset({"ask_choice"})
+
 _SLOW_TOOLS = frozenset({
     "investigate_person", "deploy_check", "run_tests",
     "delegate_task", "delegate_parallel", "delegate_consensus",
@@ -41,6 +44,7 @@ _SLOW_TOOLS = frozenset({
     "browser_describe_page", "browser_screenshot",
     "browser_click", "browser_fill", "browser_wait_for",
     "browser_new_tab",
+    "android_app", "android_screenshot",
 })
 
 _DELEGATE_TOOLS = frozenset({
@@ -387,7 +391,65 @@ def _collect_result_images(result: object) -> list[str]:
     many = result.get("_image_paths")
     if isinstance(many, list):
         paths.extend(p for p in many if isinstance(p, str) and p)
+    question = result.get("_image_question")
+    if paths and isinstance(question, str) and question.strip():
+        _image_questions[paths[0]] = question.strip()
     return paths
+
+
+# `_image_question` of a tool result, keyed by its first image path: what the
+# tool's caller wants checked in the picture. Only read by the no-vision
+# fallback below, which pops the entry.
+_image_questions: dict[str, str] = {}
+
+
+def _describe_for_blind_provider(
+    messages: list[dict], pending: list[tuple[str, list[str]]]
+) -> None:
+    """The active provider cannot see images (DeepSeek, Grok, Ollama): have
+    Gemini look at each tool-produced image and append what it saw as text.
+
+    Without this a `screenshot` / `android_screenshot` on a text-only model
+    returned a path and nothing else — the agent acted blind. Needs
+    GEMINI_API_KEY; `ALPHA_VISION_FALLBACK=off` disables it.
+    """
+    import os as _os
+    from pathlib import Path
+
+    if _os.getenv("ALPHA_VISION_FALLBACK", "").strip().lower() in ("0", "off", "false", "no"):
+        return
+    api_key = _os.getenv("GEMINI_API_KEY", "")
+    for tool_name, paths in pending:
+        question = _image_questions.pop(paths[0], "") if paths else ""
+        if not api_key:
+            messages.append({"role": "user", "content": (
+                f"[ALPHA SYSTEM NOTE] Tool '{tool_name}' produced an image, but your "
+                "model cannot see images and GEMINI_API_KEY is not set, so nobody "
+                "looked at it. Do not guess what it shows: rely on text sources "
+                "(UI dump, logs) or tell the user."
+            )})
+            continue
+        from .ocr import GEMINI_VISION_MODEL, describe_images_sync
+
+        try:
+            text = describe_images_sync([Path(p) for p in paths], api_key, question=question)
+        except Exception as e:  # the fallback must never break the turn
+            logger.warning("vision fallback failed for %s: %s", tool_name, e)
+            text = ""
+        if text:
+            note = (
+                f"[ALPHA SYSTEM NOTE] Image produced by tool '{tool_name}'. Your model "
+                f"cannot see images, so {GEMINI_VISION_MODEL} looked at it for you. "
+                "Treat this description as what is currently on screen (pixel "
+                "coordinates are approximate):\n\n" + text.strip()
+            )
+        else:
+            note = (
+                f"[ALPHA SYSTEM NOTE] Tool '{tool_name}' produced an image but the "
+                "Gemini description failed, so nobody looked at it. Do not guess "
+                "what it shows; retry or use a text source."
+            )
+        messages.append({"role": "user", "content": note})
 
 
 _VISION_NOTE_PREFIX = "[ALPHA SYSTEM NOTE] Image produced by tool"
@@ -463,7 +525,11 @@ def _append_vision_attachments(
     from .config import vision_tool_results_enabled
 
     if not vision_tool_results_enabled(provider):
+        _describe_for_blind_provider(messages, pending)
         return
+    for _tool, _paths in pending:
+        if _paths:
+            _image_questions.pop(_paths[0], None)
     from pathlib import Path
 
     from .attachments import build_user_content
@@ -538,10 +604,20 @@ async def _execute_single_tool(tool_def, tool_name: str, args: dict) -> dict:
     effective_timeout = _clamp_to_turn_budget(float(tool_timeout))
     started = time.monotonic()
     try:
-        result = await asyncio.wait_for(
-            tool_def.executor(**args),
-            timeout=effective_timeout,
-        )
+        if tool_name in _USER_WAIT_TOOLS:
+            # The tool's whole runtime is the user thinking over a menu: no
+            # timeout (it used to expire after 120s with the question still on
+            # screen) and the wait is credited back to the turn budget.
+            from ._turn_budget import note_user_wait
+            try:
+                result = await tool_def.executor(**args)
+            finally:
+                note_user_wait(time.monotonic() - started)
+        else:
+            result = await asyncio.wait_for(
+                tool_def.executor(**args),
+                timeout=effective_timeout,
+            )
     except TimeoutError:
         clamped = effective_timeout < tool_timeout
         # CODE_REVIEW2 #6: expected timeouts use logger.warning so the

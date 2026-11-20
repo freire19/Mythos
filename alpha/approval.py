@@ -53,6 +53,11 @@ AUTO_APPROVE_TOOLS = frozenset(
         # Lazy tool loading: only pulls schemas into the prompt, zero side
         # effects (alpha/tool_lazy.py).
         "tool_search",
+        # Only lists what is plugged in (serial, model, Android version).
+        # The other android_* readers (screenshot, UI dump, logcat) are NOT
+        # here on purpose: they read whatever is on the user's phone screen,
+        # private conversations included — same reasoning as clipboard_read.
+        "android_devices",
         # Browser read-only / navigation
         "browser_open",
         "browser_close",

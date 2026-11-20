@@ -70,28 +70,84 @@ def _read_image(path: Path) -> tuple[bytes, str] | None:
     return data, media
 
 
+_OCR_PROMPT = (
+    "Extract ALL text visible in this image. "
+    "Include any code, error messages, logs, file paths, numbers, "
+    "labels, UI elements, terminal output — everything that is text. "
+    "If it's a screenshot, describe the layout briefly then list all text. "
+    "Return ONLY the extracted content, no conversational filler."
+)
+
+# Model that LOOKS at tool-produced screenshots (phone, desktop, browser) on
+# behalf of a main model without vision. Needs layout understanding, not just
+# text extraction. Override with GEMINI_VISION_MODEL.
+GEMINI_VISION_MODEL = os.getenv("GEMINI_VISION_MODEL", "gemini-4-hydrogen")
+
+_DESCRIBE_PROMPT = (
+    "You are the eyes of a coding agent that cannot see images. Describe this "
+    "screenshot so it can act on it: which app/screen it is, the layout from "
+    "top to bottom, every visible text verbatim, each button/field/tab with "
+    "its approximate center in pixels as (x, y), and anything that looks "
+    "wrong (error messages, overlapping or cut-off elements, blank areas, "
+    "loading spinners). The image is {size}. Be precise and concise; no filler."
+)
+
+
+async def describe_images(
+    image_paths: list[Path],
+    api_key: str,
+    question: str = "",
+    model: str | None = None,
+    timeout: float = 60.0,
+) -> str:
+    """Ask Gemini to describe screenshots for a model without vision.
+
+    `question` (optional) is what the agent wants checked; it is appended to
+    the standing description prompt. Returns "" when nothing could be read or
+    the call fails.
+    """
+    sizes = []
+    for path in image_paths:
+        loaded = _read_image(path)
+        if loaded and loaded[0][:8] == b"\x89PNG\r\n\x1a\n" and len(loaded[0]) >= 24:
+            w = int.from_bytes(loaded[0][16:20], "big")
+            h = int.from_bytes(loaded[0][20:24], "big")
+            sizes.append(f"{w}x{h} pixels")
+    prompt = _DESCRIBE_PROMPT.format(size=", ".join(sizes) or "of unknown size")
+    if question.strip():
+        prompt += f"\n\nThe agent specifically wants to know: {question.strip()}"
+    return await ocr_images(
+        image_paths, api_key, model=model or GEMINI_VISION_MODEL,
+        timeout=timeout, prompt=prompt, max_tokens=4000,
+    )
+
+
+def describe_images_sync(
+    image_paths: list[Path],
+    api_key: str,
+    question: str = "",
+    model: str | None = None,
+    timeout: float = 60.0,
+) -> str:
+    """Synchronous wrapper (call from a worker thread, not from a running loop)."""
+    return asyncio.run(
+        describe_images(image_paths, api_key, question=question, model=model, timeout=timeout)
+    )
+
+
 async def ocr_images(
     image_paths: list[Path],
     api_key: str,
     model: str = GEMINI_OCR_MODEL,
     timeout: float = 60.0,
+    prompt: str = _OCR_PROMPT,
+    max_tokens: int = 2000,
 ) -> str:
     """Send images to Gemini and return extracted text.
 
     Returns empty string if no images could be read or OCR fails.
     """
-    content_blocks: list[dict] = [
-        {
-            "type": "text",
-            "text": (
-                "Extract ALL text visible in this image. "
-                "Include any code, error messages, logs, file paths, numbers, "
-                "labels, UI elements, terminal output — everything that is text. "
-                "If it's a screenshot, describe the layout briefly then list all text. "
-                "Return ONLY the extracted content, no conversational filler."
-            ),
-        }
-    ]
+    content_blocks: list[dict] = [{"type": "text", "text": prompt}]
 
     for path in image_paths:
         loaded = _read_image(path)
@@ -112,7 +168,7 @@ async def ocr_images(
     payload = {
         "model": model,
         "messages": [{"role": "user", "content": content_blocks}],
-        "max_tokens": 2000,
+        "max_tokens": max_tokens,
         "temperature": 0.0,
     }
 

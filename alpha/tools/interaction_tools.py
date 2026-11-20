@@ -76,6 +76,11 @@ def _render_menu(question: str, options: list[str]) -> None:
     print()
 
 
+def _run_menu(select_menu, o_lines, cancel):
+    """Thread entry point for the arrow-key menu (keyword-only `cancel`)."""
+    return select_menu(o_lines, cancel=cancel)
+
+
 def _match_option(raw: str, options: list[str]) -> int | None:
     """Resolve a user input to an option index (1-based). Accepts the
     number, the full option string, or its first word."""
@@ -123,9 +128,27 @@ async def _ask_choice(question: str, options: object = None) -> dict:
         if can_select():
             q_lines, o_lines = _wrap_menu(question, parsed)
             _render_question(q_lines)
+            import threading
+
+            from ..display.select import MenuCancelled
+
+            # If this coroutine is cancelled (turn aborted, timeout), the
+            # worker thread must stop reading the terminal: left behind, it
+            # holds the tty in raw mode and swallows the next prompt's keys.
+            gave_up = threading.Event()
+            worker = asyncio.create_task(
+                asyncio.to_thread(_run_menu, select_menu, o_lines, gave_up)
+            )
             try:
-                picked = await asyncio.to_thread(select_menu, o_lines)
-            except (EOFError, KeyboardInterrupt):
+                picked = await asyncio.shield(worker)
+            except asyncio.CancelledError:
+                gave_up.set()
+                try:
+                    await asyncio.wait_for(worker, timeout=2)
+                except BaseException:
+                    pass
+                raise
+            except (EOFError, KeyboardInterrupt, MenuCancelled):
                 picked = None
             if picked is None:
                 print(f"  {c(C.GRAY, '(cancelado)')}")

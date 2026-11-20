@@ -415,3 +415,46 @@ class TestSubagentCompactTrace:
         assert tools_mod.live_label_for_tool(
             "delegate_parallel", {"tasks": '["a", "b"]'}
         ) == "Delegating 2 agents"
+
+
+class TestMenuCancellation:
+    def test_cancel_event_stops_a_blocked_menu_and_restores_the_tty(self):
+        """A menu whose caller gave up must stop reading the terminal — an
+        orphan reader kept the tty raw and ate the next prompt's keys."""
+        import io
+        import os as _os
+        import pty
+        import termios
+        import threading
+
+        from alpha.display import select as select_mod
+
+        master, slave = pty.openpty()
+        before = termios.tcgetattr(slave)
+        cancel = threading.Event()
+        outcome = {}
+
+        class _In:
+            def fileno(self):
+                return slave
+
+        old_in, old_out = sys.stdin, sys.stdout
+        sys.stdin, sys.stdout = _In(), io.StringIO()
+        try:
+            def work():
+                try:
+                    select_mod.select_menu([["a"], ["b"]], cancel=cancel)
+                except select_mod.MenuCancelled:
+                    outcome["cancelled"] = True
+
+            t = threading.Thread(target=work, daemon=True)
+            t.start()
+            cancel.set()
+            t.join(timeout=3)
+            assert not t.is_alive()
+            assert outcome.get("cancelled")
+            assert termios.tcgetattr(slave)[3] == before[3]
+        finally:
+            sys.stdin, sys.stdout = old_in, old_out
+            _os.close(master)
+            _os.close(slave)

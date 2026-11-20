@@ -379,6 +379,52 @@ def _detect_error_streak(recent_failures: list[bool]) -> int:
     return streak
 
 
+# Tools that drive something with its own state (a phone, a browser page).
+# Their normal rhythm is observe → act → observe → act: the SAME observation
+# call (`android_ui_dump {}`) legitimately repeats after every action, and the
+# same action (tap "next") repeats after every observation. Counted naively,
+# a three-step phone test tripped "exact repeat … called 3x" and was cut off
+# before it finished.
+_DEVICE_OBSERVERS = frozenset({
+    "android_ui_dump", "android_screenshot", "android_logcat", "android_devices",
+    "screenshot", "browser_screenshot", "browser_describe_page",
+    "browser_get_content", "browser_query", "browser_status", "browser_list_tabs",
+})
+_DEVICE_ACTIONS = frozenset({
+    "android_input", "android_app",
+    "browser_click", "browser_click_at", "browser_type", "browser_fill",
+    "browser_press_key", "browser_hover", "browser_drag", "browser_select_option",
+    "browser_navigate", "browser_back", "browser_forward", "browser_reload",
+    "browser_wait_for", "browser_switch_tab",
+})
+# Backstop: however it is interleaved, the same device call this many times
+# inside the window is a loop (observe/act forever on a screen that never
+# gets where the model wants).
+_DEVICE_REPEAT_CAP = 12
+
+
+def _device_view(calls: list[str]) -> list[str]:
+    """`calls` with device-tool signatures tagged by what happened in between.
+
+    An observer signature gets the number of device ACTIONS seen so far, an
+    action signature the number of OBSERVATIONS so far. Two identical
+    observations therefore still compare equal when nothing was done between
+    them (a real repeat), and differ once an action separates them."""
+    out: list[str] = []
+    actions = observations = 0
+    for sig in calls:
+        name = sig.partition(":")[0]
+        if name in _DEVICE_OBSERVERS:
+            out.append(f"{sig}#after{actions}")
+            observations += 1
+        elif name in _DEVICE_ACTIONS:
+            out.append(f"{sig}#seen{observations}")
+            actions += 1
+        else:
+            out.append(sig)
+    return out
+
+
 def _detect_loop(
     call_sigs: list[str],
     recent_calls: list[str],
@@ -399,6 +445,22 @@ def _detect_loop(
     aligned 1:1 with `recent_results`; when omitted the error-streak detector
     is skipped (the other four still run).
     """
+    # Device tools (phone/browser): judge repetition on the interleaving-aware
+    # view for detectors 1–3. Stale-progress (4) keeps the raw signatures —
+    # it aligns calls with results by position and compares their args.
+    raw_calls = recent_calls
+    raw_counts = Counter(raw_calls)
+    for sig, c in raw_counts.most_common(1):
+        name = sig.partition(":")[0]
+        if c >= _DEVICE_REPEAT_CAP and (name in _DEVICE_OBSERVERS or name in _DEVICE_ACTIONS):
+            return f"exact repeat: '{sig[:60]}' called {c}x (device)"
+    if any(s.partition(":")[0] in _DEVICE_OBSERVERS or s.partition(":")[0] in _DEVICE_ACTIONS
+           for s in raw_calls):
+        recent_calls = _device_view(raw_calls)
+        # The current batch is the tail of the window (extended by the caller).
+        if call_sigs and raw_calls[-len(call_sigs):] == list(call_sigs):
+            call_sigs = recent_calls[-len(call_sigs):]
+
     # 1. Exact repetition — Counter em vez de N x list.count() (O(N) vs O(N*M))
     counts = Counter(recent_calls)
     for sig in call_sigs:
@@ -445,7 +507,7 @@ def _detect_loop(
     # #203: `call_sigs` é o batch corrente, já extendido em recent_calls mas
     # AINDA NÃO executado — informar o tamanho para o alinhamento call↔result.
     if _detect_stale_progress(
-        recent_results, recent_calls, pending=len(call_sigs)
+        recent_results, raw_calls, pending=len(call_sigs)
     ):
         return "stale progress — tool results not changing"
 

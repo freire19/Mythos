@@ -73,6 +73,7 @@ class ToolCategory(str, Enum):
     SYSTEM = "system"
     AGENT = "agent"
     BROWSER = "browser"
+    ANDROID = "android"
     SCRAPING = "scraping"
     SKILLS = "skills"
     SECURITY = "security"
