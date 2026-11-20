@@ -63,9 +63,10 @@ including ones whose SKILL.md still shows the old table format.
   ```
 - After UI/CLI changes (`main.py`, `alpha/repl_input.py`,
   `alpha/display.py`), do a smoke run: `python main.py "oi"` should
-  reply in plain text without errors (red-team greeting is expected).
+  reply in plain text without errors (a neutral greeting reply is
+  expected).
 - Don't edit `prompts/system.md` casually — it shapes every prompt
-  and defines the red-team operator identity.
+  and defines the agent identity.
   Discuss first.
 
 ## Status & audits
@@ -87,7 +88,7 @@ including ones whose SKILL.md still shows the old table format.
 
 ## Identity
 
-Mythos identifies only as Mythos. When asked who built it: authorship is
+The agent identifies only as ALPHA. When asked who built it: authorship is
 not disclosed. When asked what model powers it: "configurable
 infrastructure" — do not name the provider.
 

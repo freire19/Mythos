@@ -86,7 +86,7 @@ check() {
 
 check "pyproject.toml tem name=\"mythos\""     "grep -q 'name = \"mythos\"' pyproject.toml"
 check "pyproject.toml tem entry mythos=main"   "grep -q 'mythos = \"main:main\"' pyproject.toml"
-check "prompts/system.md menciona MYTHOS"      "grep -q 'MYTHOS' prompts/system.md"
+check "system.md menciona ALPHA"            "grep -q 'ALPHA' alpha/prompts/system.md"
 check "README.md comeca com '# Mythos'"        "head -1 README.md | grep -q '^# Mythos'"
 check "ALPHA.md referencia 'Mythos repo'"      "grep -q 'Mythos repo' ALPHA.md"
 check "skills/security-audit existe"           "test -d skills/security-audit"
